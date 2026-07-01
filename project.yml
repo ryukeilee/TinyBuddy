@@ -1,0 +1,80 @@
+name: TinyBuddy
+options:
+  bundleIdPrefix: com.ryukeili
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: JYL9G28DP3
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  TinyBuddyCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/TinyBuddyCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryukeili.TinyBuddyCore
+        PRODUCT_NAME: TinyBuddyCore
+  TinyBuddy:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/TinyBuddy
+    info:
+      path: Resources/TinyBuddyApp/Info.plist
+      properties:
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "14.0"
+        NSPrincipalClass: NSApplication
+    entitlements:
+      path: Resources/TinyBuddyApp/TinyBuddy.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.ryukeili.TinyBuddy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryukeili.TinyBuddy
+        PRODUCT_NAME: TinyBuddy
+        ENABLE_APP_SANDBOX: YES
+    dependencies:
+      - target: TinyBuddyCore
+      - target: TinyBuddyWidgetExtension
+        embed: true
+        codeSign: false
+  TinyBuddyWidgetExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Widget/TinyBuddyWidget
+    info:
+      path: Resources/TinyBuddyWidget/Info.plist
+      properties:
+        CFBundleDisplayName: TinyBuddy
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "14.0"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Resources/TinyBuddyWidget/TinyBuddyWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.ryukeili.TinyBuddy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+        PRODUCT_NAME: TinyBuddyWidgetExtension
+        APPLICATION_EXTENSION_API_ONLY: YES
+        ENABLE_APP_SANDBOX: YES
+    dependencies:
+      - target: TinyBuddyCore
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework

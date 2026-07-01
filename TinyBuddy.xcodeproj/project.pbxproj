@@ -1,0 +1,644 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C509A181592B4E3F45448EBE /* PetViewModel.swift */; };
+		0F04FAD0AC3F1A648278E4BA /* TinyBuddyWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		407EDCD3CF74BB4793E8EADF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */; };
+		426D23164B320789E304896C /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */; };
+		434375AA9EC8F4411454E7A6 /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
+		4F4EC20336431FED37375AAC /* PetStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673CA65B4E84452DA7E7E398 /* PetStatus.swift */; };
+		5879C67D8A30489B4A5CC575 /* PetSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B8B6AD3489E0667BE41379 /* PetSession.swift */; };
+		6A2048F95FCCF8BC71FFA2C4 /* TinyBuddySharedData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */; };
+		7234061598DF198403D751B3 /* PetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */; };
+		770F76C21A74AC083D2B392A /* TinyBuddyWidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */; };
+		8AC0469D9BB8F7ED958A9C02 /* DailyStatsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */; };
+		8F69DDB084E9DC2E6A897045 /* TinyBuddyWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */; };
+		97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */; };
+		9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */; };
+		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		D19D8A0FFF57CA8C56263579 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B715EF85393DB90A9DF10851 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 11F54D6B054C088A84644CF6;
+			remoteInfo = TinyBuddyCore;
+		};
+		DE8DACFB58727B68200C3396 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B715EF85393DB90A9DF10851 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 11F54D6B054C088A84644CF6;
+			remoteInfo = TinyBuddyCore;
+		};
+		FC9E8ED93DCEA7730F7DABFB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B715EF85393DB90A9DF10851 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1870DCEF0D44CBF1CE46C9B5;
+			remoteInfo = TinyBuddyWidgetExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		06964E12A42F705C7C6DE689 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				0F04FAD0AC3F1A648278E4BA /* TinyBuddyWidgetExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyApp.swift; sourceTree = "<group>"; };
+		21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddySharedData.swift; sourceTree = "<group>"; };
+		26B8B6AD3489E0667BE41379 /* PetSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetSession.swift; sourceTree = "<group>"; };
+		52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TinyBuddyWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyWidgetPresentation.swift; sourceTree = "<group>"; };
+		673CA65B4E84452DA7E7E398 /* PetStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetStatus.swift; sourceTree = "<group>"; };
+		6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libTinyBuddyCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStatsStore.swift; sourceTree = "<group>"; };
+		7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetView.swift; sourceTree = "<group>"; };
+		AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyWidget.swift; sourceTree = "<group>"; };
+		BED030C13CCAD80054FF21E0 /* TinyBuddy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TinyBuddy.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C509A181592B4E3F45448EBE /* PetViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetViewModel.swift; sourceTree = "<group>"; };
+		C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStats.swift; sourceTree = "<group>"; };
+		D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2A48C3FD7F9F5B37D0C89D32 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */,
+				426D23164B320789E304896C /* WidgetKit.framework in Frameworks */,
+				407EDCD3CF74BB4793E8EADF /* SwiftUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		968C78D25C96ED4DF24C5523 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				434375AA9EC8F4411454E7A6 /* libTinyBuddyCore.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		00A3C2A1FE5BD2A058969585 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */,
+				D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		50264E86B3061BB5DA126500 /* TinyBuddyWidget */ = {
+			isa = PBXGroup;
+			children = (
+				AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */,
+			);
+			path = TinyBuddyWidget;
+			sourceTree = "<group>";
+		};
+		81B417433D31B522329803B9 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */,
+				BED030C13CCAD80054FF21E0 /* TinyBuddy.app */,
+				52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		869B27CA77E0A25B49698D47 = {
+			isa = PBXGroup;
+			children = (
+				96A34CA0BBCE4C7191E79336 /* Sources */,
+				D77BDC75A46AE254E81A0E96 /* Widget */,
+				00A3C2A1FE5BD2A058969585 /* Frameworks */,
+				81B417433D31B522329803B9 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		96A34CA0BBCE4C7191E79336 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				DA2C62EDD6B8307656A889D2 /* TinyBuddy */,
+				AB4980E4A07A3740A838822F /* TinyBuddyCore */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		AB4980E4A07A3740A838822F /* TinyBuddyCore */ = {
+			isa = PBXGroup;
+			children = (
+				C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */,
+				7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */,
+				26B8B6AD3489E0667BE41379 /* PetSession.swift */,
+				673CA65B4E84452DA7E7E398 /* PetStatus.swift */,
+				21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */,
+				578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */,
+			);
+			path = TinyBuddyCore;
+			sourceTree = "<group>";
+		};
+		D77BDC75A46AE254E81A0E96 /* Widget */ = {
+			isa = PBXGroup;
+			children = (
+				50264E86B3061BB5DA126500 /* TinyBuddyWidget */,
+			);
+			path = Widget;
+			sourceTree = "<group>";
+		};
+		DA2C62EDD6B8307656A889D2 /* TinyBuddy */ = {
+			isa = PBXGroup;
+			children = (
+				7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */,
+				C509A181592B4E3F45448EBE /* PetViewModel.swift */,
+				017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */,
+			);
+			path = TinyBuddy;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		11F54D6B054C088A84644CF6 /* TinyBuddyCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A916A14D8192A4006D1D971 /* Build configuration list for PBXNativeTarget "TinyBuddyCore" */;
+			buildPhases = (
+				455BD1A23515031AB71575C9 /* Sources */,
+				1B1D4D746CED1611B1022524 /* Copy Swift Objective-C Interface Header */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TinyBuddyCore;
+			packageProductDependencies = (
+			);
+			productName = TinyBuddyCore;
+			productReference = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		1870DCEF0D44CBF1CE46C9B5 /* TinyBuddyWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FE19C7069D7E63BD6DED3A58 /* Build configuration list for PBXNativeTarget "TinyBuddyWidgetExtension" */;
+			buildPhases = (
+				FD368E61C153672F3EE187B3 /* Sources */,
+				2A48C3FD7F9F5B37D0C89D32 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2B2DB1C0D4D5CC3D725F65BA /* PBXTargetDependency */,
+			);
+			name = TinyBuddyWidgetExtension;
+			packageProductDependencies = (
+			);
+			productName = TinyBuddyWidgetExtension;
+			productReference = 52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		3EEEE777ADDF672D575B8CE7 /* TinyBuddy */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7C51815C0034AD781433887D /* Build configuration list for PBXNativeTarget "TinyBuddy" */;
+			buildPhases = (
+				644E410F13C2FD081CAD2372 /* Sources */,
+				968C78D25C96ED4DF24C5523 /* Frameworks */,
+				06964E12A42F705C7C6DE689 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D43F33B291C1F435973288B7 /* PBXTargetDependency */,
+				96FC9732B822B51A62202DAA /* PBXTargetDependency */,
+			);
+			name = TinyBuddy;
+			packageProductDependencies = (
+			);
+			productName = TinyBuddy;
+			productReference = BED030C13CCAD80054FF21E0 /* TinyBuddy.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B715EF85393DB90A9DF10851 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					11F54D6B054C088A84644CF6 = {
+						DevelopmentTeam = JYL9G28DP3;
+						ProvisioningStyle = Automatic;
+					};
+					1870DCEF0D44CBF1CE46C9B5 = {
+						DevelopmentTeam = JYL9G28DP3;
+						ProvisioningStyle = Automatic;
+					};
+					3EEEE777ADDF672D575B8CE7 = {
+						DevelopmentTeam = JYL9G28DP3;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 4EB4DE0D52E5A29AA13EE02E /* Build configuration list for PBXProject "TinyBuddy" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 869B27CA77E0A25B49698D47;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 81B417433D31B522329803B9 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				3EEEE777ADDF672D575B8CE7 /* TinyBuddy */,
+				11F54D6B054C088A84644CF6 /* TinyBuddyCore */,
+				1870DCEF0D44CBF1CE46C9B5 /* TinyBuddyWidgetExtension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		1B1D4D746CED1611B1022524 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		455BD1A23515031AB71575C9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */,
+				8AC0469D9BB8F7ED958A9C02 /* DailyStatsStore.swift in Sources */,
+				5879C67D8A30489B4A5CC575 /* PetSession.swift in Sources */,
+				4F4EC20336431FED37375AAC /* PetStatus.swift in Sources */,
+				6A2048F95FCCF8BC71FFA2C4 /* TinyBuddySharedData.swift in Sources */,
+				770F76C21A74AC083D2B392A /* TinyBuddyWidgetPresentation.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		644E410F13C2FD081CAD2372 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7234061598DF198403D751B3 /* PetView.swift in Sources */,
+				0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */,
+				97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FD368E61C153672F3EE187B3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8F69DDB084E9DC2E6A897045 /* TinyBuddyWidget.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2B2DB1C0D4D5CC3D725F65BA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 11F54D6B054C088A84644CF6 /* TinyBuddyCore */;
+			targetProxy = DE8DACFB58727B68200C3396 /* PBXContainerItemProxy */;
+		};
+		96FC9732B822B51A62202DAA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1870DCEF0D44CBF1CE46C9B5 /* TinyBuddyWidgetExtension */;
+			targetProxy = FC9E8ED93DCEA7730F7DABFB /* PBXContainerItemProxy */;
+		};
+		D43F33B291C1F435973288B7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 11F54D6B054C088A84644CF6 /* TinyBuddyCore */;
+			targetProxy = D19D8A0FFF57CA8C56263579 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		054D5BA19724165B7A2531C4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/TinyBuddyWidget/TinyBuddyWidget.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				INFOPLIST_FILE = Resources/TinyBuddyWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension;
+				PRODUCT_NAME = TinyBuddyWidgetExtension;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		47517F769B6A8B75FBED68E9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/TinyBuddyWidget/TinyBuddyWidget.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				INFOPLIST_FILE = Resources/TinyBuddyWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension;
+				PRODUCT_NAME = TinyBuddyWidgetExtension;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A7BCE6A69B795497D49B678E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Resources/TinyBuddyApp/TinyBuddy.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				INFOPLIST_FILE = Resources/TinyBuddyApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy;
+				PRODUCT_NAME = TinyBuddy;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		AC8F07C59706AF0536184486 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = JYL9G28DP3;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		B7DE32BEB24FE0C5745684F1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Resources/TinyBuddyApp/TinyBuddy.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				INFOPLIST_FILE = Resources/TinyBuddyApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy;
+				PRODUCT_NAME = TinyBuddy;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		BB502C57537F9215771F3E14 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddyCore;
+				PRODUCT_NAME = TinyBuddyCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		DB0F2C9E0105990ED65E1B32 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddyCore;
+				PRODUCT_NAME = TinyBuddyCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		E53AD6DF2DBD2D8C5F5900A2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = JYL9G28DP3;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4EB4DE0D52E5A29AA13EE02E /* Build configuration list for PBXProject "TinyBuddy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC8F07C59706AF0536184486 /* Debug */,
+				E53AD6DF2DBD2D8C5F5900A2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		7C51815C0034AD781433887D /* Build configuration list for PBXNativeTarget "TinyBuddy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A7BCE6A69B795497D49B678E /* Debug */,
+				B7DE32BEB24FE0C5745684F1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9A916A14D8192A4006D1D971 /* Build configuration list for PBXNativeTarget "TinyBuddyCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB502C57537F9215771F3E14 /* Debug */,
+				DB0F2C9E0105990ED65E1B32 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FE19C7069D7E63BD6DED3A58 /* Build configuration list for PBXNativeTarget "TinyBuddyWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				47517F769B6A8B75FBED68E9 /* Debug */,
+				054D5BA19724165B7A2531C4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B715EF85393DB90A9DF10851 /* Project object */;
+}
