@@ -57,6 +57,20 @@ case "$MODE" in
     ;;
 esac
 
+clear_release_metadata() {
+  local products_dir="$DERIVED_DATA_DIR/Build/Products/$BUILD_CONFIGURATION"
+
+  if [ -d "$products_dir" ]; then
+    /usr/bin/xattr -cr "$products_dir"
+  fi
+}
+
+case "$MODE" in
+  release-install|--release-install|release-verify|--release-verify)
+    clear_release_metadata
+    ;;
+esac
+
 xcodebuild \
   -project TinyBuddy.xcodeproj \
   -scheme TinyBuddy \
@@ -115,6 +129,7 @@ verify_widget_extension() {
   fi
 
   /usr/bin/codesign --verify --strict --verbose=2 "$appex"
+  /usr/bin/pluginkit -r "$appex" >/dev/null 2>&1 || true
   /usr/bin/pluginkit -a "$appex"
 
   if ! /usr/bin/pluginkit -m -A -p "$WIDGET_EXTENSION_POINT" | /usr/bin/grep -F "$WIDGET_BUNDLE_ID" >/dev/null; then

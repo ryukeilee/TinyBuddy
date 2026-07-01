@@ -205,6 +205,7 @@
 			buildConfigurationList = FE19C7069D7E63BD6DED3A58 /* Build configuration list for PBXNativeTarget "TinyBuddyWidgetExtension" */;
 			buildPhases = (
 				FD368E61C153672F3EE187B3 /* Sources */,
+				BEA0FD5AF7A3E3A9AC695301 /* Clear Signing Metadata */,
 				2A48C3FD7F9F5B37D0C89D32 /* Frameworks */,
 			);
 			buildRules = (
@@ -224,6 +225,7 @@
 			buildConfigurationList = 7C51815C0034AD781433887D /* Build configuration list for PBXNativeTarget "TinyBuddy" */;
 			buildPhases = (
 				644E410F13C2FD081CAD2372 /* Sources */,
+				5FC5C1B37E7B950E29C955B3 /* Clear Signing Metadata */,
 				968C78D25C96ED4DF24C5523 /* Frameworks */,
 				06964E12A42F705C7C6DE689 /* Embed Foundation Extensions */,
 			);
@@ -300,6 +302,44 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		5FC5C1B37E7B950E29C955B3 /* Clear Signing Metadata */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Clear Signing Metadata";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "APP_BUNDLE=\"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nif [ -d \"$APP_BUNDLE\" ]; then\n  /usr/bin/xattr -cr \"$APP_BUNDLE\"\nfi\n";
+		};
+		BEA0FD5AF7A3E3A9AC695301 /* Clear Signing Metadata */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Clear Signing Metadata";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "APP_EXTENSION=\"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nif [ -d \"$APP_EXTENSION\" ]; then\n  /usr/bin/xattr -cr \"$APP_EXTENSION\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

@@ -31,6 +31,7 @@ targets:
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "14.0"
+        LSUIElement: true
         NSPrincipalClass: NSApplication
     entitlements:
       path: Resources/TinyBuddyApp/TinyBuddy.entitlements
@@ -43,6 +44,14 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryukeili.TinyBuddy
         PRODUCT_NAME: TinyBuddy
         ENABLE_APP_SANDBOX: YES
+    postCompileScripts:
+      - name: Clear Signing Metadata
+        basedOnDependencyAnalysis: false
+        script: |
+          APP_BUNDLE="$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          if [ -d "$APP_BUNDLE" ]; then
+            /usr/bin/xattr -cr "$APP_BUNDLE"
+          fi
     dependencies:
       - target: TinyBuddyCore
       - target: TinyBuddyWidgetExtension
@@ -74,6 +83,14 @@ targets:
         PRODUCT_NAME: TinyBuddyWidgetExtension
         APPLICATION_EXTENSION_API_ONLY: YES
         ENABLE_APP_SANDBOX: YES
+    postCompileScripts:
+      - name: Clear Signing Metadata
+        basedOnDependencyAnalysis: false
+        script: |
+          APP_EXTENSION="$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          if [ -d "$APP_EXTENSION" ]; then
+            /usr/bin/xattr -cr "$APP_EXTENSION"
+          fi
     dependencies:
       - target: TinyBuddyCore
       - sdk: WidgetKit.framework

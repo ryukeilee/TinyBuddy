@@ -1,0 +1,59 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+
+# Credentials, keys, and certificates
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.kdbx
+
+# Secret manager and cloud credentials
+.aws/
+.azure/
+.config/gcloud/
+credentials.json
+service-account*.json
+firebase-adminsdk*.json
+
+# Local configuration
+*.local
+*.local.*
+*.secret
+*.secrets
+secrets/
+
+# Dependency and build output
+.build/
+.swiftpm/
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+coverage/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+.cache/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
