@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		07E6115E148BB76947F7EE82 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9D17FC03CB13917BB0D8EB87 /* Assets.xcassets */; };
 		0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C509A181592B4E3F45448EBE /* PetViewModel.swift */; };
 		0F04FAD0AC3F1A648278E4BA /* TinyBuddyWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		407EDCD3CF74BB4793E8EADF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */; };
@@ -72,6 +73,7 @@
 		6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libTinyBuddyCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStatsStore.swift; sourceTree = "<group>"; };
 		7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetView.swift; sourceTree = "<group>"; };
+		9D17FC03CB13917BB0D8EB87 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyWidget.swift; sourceTree = "<group>"; };
 		BED030C13CCAD80054FF21E0 /* TinyBuddy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TinyBuddy.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -111,12 +113,28 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		0C57F06A2A37E706119D8A6A /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				7F72C8D26DC84B7DB8A2D74E /* TinyBuddyApp */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
 		50264E86B3061BB5DA126500 /* TinyBuddyWidget */ = {
 			isa = PBXGroup;
 			children = (
 				AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */,
 			);
 			path = TinyBuddyWidget;
+			sourceTree = "<group>";
+		};
+		7F72C8D26DC84B7DB8A2D74E /* TinyBuddyApp */ = {
+			isa = PBXGroup;
+			children = (
+				9D17FC03CB13917BB0D8EB87 /* Assets.xcassets */,
+			);
+			path = TinyBuddyApp;
 			sourceTree = "<group>";
 		};
 		81B417433D31B522329803B9 /* Products */ = {
@@ -132,6 +150,7 @@
 		869B27CA77E0A25B49698D47 = {
 			isa = PBXGroup;
 			children = (
+				0C57F06A2A37E706119D8A6A /* Resources */,
 				96A34CA0BBCE4C7191E79336 /* Sources */,
 				D77BDC75A46AE254E81A0E96 /* Widget */,
 				00A3C2A1FE5BD2A058969585 /* Frameworks */,
@@ -226,6 +245,7 @@
 			buildPhases = (
 				644E410F13C2FD081CAD2372 /* Sources */,
 				5FC5C1B37E7B950E29C955B3 /* Clear Signing Metadata */,
+				830AAEC95022DB2E91408F8F /* Resources */,
 				968C78D25C96ED4DF24C5523 /* Frameworks */,
 				06964E12A42F705C7C6DE689 /* Embed Foundation Extensions */,
 			);
@@ -285,6 +305,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		830AAEC95022DB2E91408F8F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				07E6115E148BB76947F7EE82 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		1B1D4D746CED1611B1022524 /* Copy Swift Objective-C Interface Header */ = {

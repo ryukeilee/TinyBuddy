@@ -86,28 +86,30 @@ struct TinyBuddyWidgetView: View {
     }
 
     private var mediumBody: some View {
-        HStack(spacing: 18) {
+        HStack(alignment: .center, spacing: 13) {
             arcReactorCore
-                .frame(width: 112, height: 112)
+                .frame(width: 100, height: 100)
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("TINYBUDDY")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundStyle(hudCyan)
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(hudGold.opacity(0.92))
                         Text("COMPANION HUD")
-                            .font(.system(size: 18, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.white)
+                            .font(.system(size: 14, weight: .heavy, design: .rounded))
+                            .foregroundStyle(Color(red: 1.0, green: 0.93, blue: 0.77))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.78)
                     }
+                    .layoutPriority(1)
 
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 4)
 
-                    Text(presentation.expression)
-                        .font(.system(size: 27, weight: .bold, design: .rounded))
-                        .frame(width: 42, height: 42)
-                        .background(Circle().fill(statusColor.opacity(0.24)))
-                        .overlay(Circle().stroke(statusColor.opacity(0.72), lineWidth: 1))
+                    Circle()
+                        .fill(mediumStatusAccent)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: mediumStatusAccent.opacity(0.8), radius: 5)
                 }
 
                 HStack(spacing: 8) {
@@ -117,33 +119,34 @@ struct TinyBuddyWidgetView: View {
 
                 HStack(spacing: 8) {
                     Text("STATUS")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(hudCyan.opacity(0.78))
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(hudGold.opacity(0.82))
                     Text(presentation.statusTitle)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(statusColor)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(mediumStatusAccent)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .minimumScaleFactor(0.75)
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
                 .background(hudPanelFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(statusColor.opacity(0.48), lineWidth: 1)
+                        .stroke(mediumStatusAccent.opacity(0.48), lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
-        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .containerBackground(for: .widget) {
             ZStack {
                 LinearGradient(
                     colors: [
-                        Color(red: 0.02, green: 0.05, blue: 0.08),
-                        Color(red: 0.05, green: 0.12, blue: 0.16),
-                        Color(red: 0.04, green: 0.04, blue: 0.07)
+                        Color(red: 0.05, green: 0.005, blue: 0.012),
+                        Color(red: 0.17, green: 0.018, blue: 0.035),
+                        Color(red: 0.015, green: 0.012, blue: 0.016)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -151,13 +154,42 @@ struct TinyBuddyWidgetView: View {
 
                 RadialGradient(
                     colors: [
-                        hudCyan.opacity(0.22),
+                        reactorRed.opacity(0.40),
+                        emberRed.opacity(0.18),
                         .clear
                     ],
-                    center: .leading,
+                    center: .bottomTrailing,
                     startRadius: 8,
-                    endRadius: 210
+                    endRadius: 220
                 )
+
+                RadialGradient(
+                    colors: [
+                        energyBlueWhite.opacity(0.18),
+                        .clear
+                    ],
+                    center: UnitPoint(x: 0.26, y: 0.48),
+                    startRadius: 2,
+                    endRadius: 120
+                )
+
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.08),
+                        Color(red: 0.95, green: 0.42, blue: 0.24).opacity(0.05),
+                        Color.black.opacity(0.28)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .blendMode(.softLight)
+
+                ForEach(0..<5, id: \.self) { index in
+                    Rectangle()
+                        .fill(index.isMultiple(of: 2) ? hudGold.opacity(0.07) : reactorRed.opacity(0.08))
+                        .frame(height: 0.7)
+                        .offset(y: CGFloat(index) * 26 - 52)
+                }
             }
         }
     }
@@ -173,15 +205,43 @@ struct TinyBuddyWidgetView: View {
         }
     }
 
-    private var hudCyan: Color {
-        Color(red: 0.31, green: 0.91, blue: 1.0)
+    private var energyBlueWhite: Color {
+        Color(red: 0.72, green: 0.96, blue: 1.0)
+    }
+
+    private var hudGold: Color {
+        Color(red: 0.94, green: 0.70, blue: 0.36)
+    }
+
+    private var reactorRed: Color {
+        Color(red: 0.78, green: 0.06, blue: 0.06)
+    }
+
+    private var emberRed: Color {
+        Color(red: 0.34, green: 0.015, blue: 0.025)
+    }
+
+    private var darkMetal: Color {
+        Color(red: 0.035, green: 0.032, blue: 0.036)
+    }
+
+    private var mediumStatusAccent: Color {
+        switch entry.snapshot.status {
+        case .idle:
+            return hudGold
+        case .focusing:
+            return energyBlueWhite
+        case .completedOnce:
+            return Color(red: 0.98, green: 0.86, blue: 0.54)
+        }
     }
 
     private var hudPanelFill: some ShapeStyle {
         LinearGradient(
             colors: [
-                Color.white.opacity(0.13),
-                hudCyan.opacity(0.07)
+                Color.white.opacity(0.075),
+                Color(red: 0.25, green: 0.025, blue: 0.035).opacity(0.42),
+                Color.black.opacity(0.20)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -194,44 +254,105 @@ struct TinyBuddyWidgetView: View {
                 .fill(
                     RadialGradient(
                         colors: [
-                            .white,
-                            hudCyan.opacity(0.92),
-                            hudCyan.opacity(0.18),
-                            .clear
+                            darkMetal.opacity(0.98),
+                            Color(red: 0.11, green: 0.025, blue: 0.03),
+                            Color.black.opacity(0.92)
                         ],
                         center: .center,
                         startRadius: 2,
-                        endRadius: 58
+                        endRadius: 50
                     )
                 )
-                .shadow(color: hudCyan.opacity(0.78), radius: 18)
+                .overlay(
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    hudGold.opacity(0.54),
+                                    reactorRed.opacity(0.62),
+                                    Color.black.opacity(0.36)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 3
+                        )
+                )
+                .shadow(color: reactorRed.opacity(0.42), radius: 16)
+
+            Circle()
+                .stroke(reactorRed.opacity(0.34), lineWidth: 9)
+                .frame(width: 80, height: 80)
 
             ForEach(0..<24, id: \.self) { index in
                 Capsule()
-                    .fill(index.isMultiple(of: 3) ? Color.white.opacity(0.9) : hudCyan.opacity(0.58))
-                    .frame(width: 2, height: index.isMultiple(of: 3) ? 15 : 9)
-                    .offset(y: -49)
+                    .fill(index.isMultiple(of: 3) ? hudGold.opacity(0.86) : reactorRed.opacity(0.58))
+                    .frame(width: 2, height: index.isMultiple(of: 3) ? 12 : 7)
+                    .offset(y: -43)
                     .rotationEffect(.degrees(Double(index) * 15))
             }
 
             Circle()
-                .stroke(hudCyan.opacity(0.62), lineWidth: 2)
-                .frame(width: 84, height: 84)
+                .stroke(hudGold.opacity(0.62), lineWidth: 1.4)
+                .frame(width: 86, height: 86)
 
             Circle()
-                .stroke(Color.white.opacity(0.84), lineWidth: 2)
-                .frame(width: 42, height: 42)
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            energyBlueWhite.opacity(0.18),
+                            .white.opacity(0.92),
+                            energyBlueWhite.opacity(0.90),
+                            energyBlueWhite.opacity(0.18)
+                        ],
+                        center: .center
+                    ),
+                    lineWidth: 5
+                )
+                .frame(width: 72, height: 72)
+                .shadow(color: energyBlueWhite.opacity(0.54), radius: 11)
 
             Circle()
-                .fill(.white)
-                .frame(width: 18, height: 18)
-                .shadow(color: .white.opacity(0.85), radius: 9)
+                .stroke(reactorRed.opacity(0.78), lineWidth: 1.2)
+                .frame(width: 54, height: 54)
+
+            ForEach(0..<6, id: \.self) { index in
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(0.94),
+                                energyBlueWhite.opacity(0.70)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: 4, height: 18)
+                    .offset(y: -18)
+                    .rotationEffect(.degrees(Double(index) * 60))
+            }
+
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            .white,
+                            energyBlueWhite.opacity(0.96),
+                            Color(red: 0.18, green: 0.50, blue: 0.68).opacity(0.52)
+                        ],
+                        center: .center,
+                        startRadius: 1,
+                        endRadius: 20
+                    )
+                )
+                .frame(width: 30, height: 30)
+                .shadow(color: energyBlueWhite.opacity(0.85), radius: 12)
         }
         .overlay(alignment: .bottom) {
             Text("CORE")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(hudCyan.opacity(0.88))
-                .offset(y: 10)
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(hudGold.opacity(0.88))
         }
     }
 
@@ -252,24 +373,34 @@ struct TinyBuddyWidgetView: View {
     private func hudMetric(title: String, value: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(hudCyan.opacity(0.76))
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(hudGold.opacity(0.78))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Text("\(value)")
-                .font(.system(size: 28, weight: .heavy, design: .rounded))
+                .font(.system(size: 23, weight: .heavy, design: .rounded))
                 .foregroundStyle(.white)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
         .background(hudPanelFill)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(hudCyan.opacity(0.34), lineWidth: 1)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            hudGold.opacity(0.38),
+                            reactorRed.opacity(0.34)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }

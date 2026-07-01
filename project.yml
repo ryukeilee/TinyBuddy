@@ -25,6 +25,7 @@ targets:
     platform: macOS
     sources:
       - path: Sources/TinyBuddy
+      - path: Resources/TinyBuddyApp/Assets.xcassets
     info:
       path: Resources/TinyBuddyApp/Info.plist
       properties:
