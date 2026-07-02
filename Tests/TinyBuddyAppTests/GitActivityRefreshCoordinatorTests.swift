@@ -40,6 +40,28 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
+    func testStartTriggersLaunchRefreshAndWidgetReload() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
+    func testReopenTriggersRefreshAndWidgetReload() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.handleReopen()
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
     private func makeHarness(
         authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
     ) -> RefreshHarness {
