@@ -18,9 +18,15 @@ struct TinyBuddyApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let gitActivityRefreshCoordinator = GitActivityRefreshCoordinator()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        WidgetCenter.shared.reloadAllTimelines()
+        gitActivityRefreshCoordinator.start()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        gitActivityRefreshCoordinator.handleDidBecomeActive()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -28,7 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        false
+        gitActivityRefreshCoordinator.handleReopen()
+        return false
     }
 }
 

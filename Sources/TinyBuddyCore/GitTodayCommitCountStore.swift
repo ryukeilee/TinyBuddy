@@ -21,6 +21,8 @@ public final class GitTodayCommitCountStore {
     }
 
     public func loadTodayCount() -> Int? {
+        userDefaults.synchronize()
+
         guard userDefaults.string(forKey: Key.dayIdentifier) == todayIdentifier() else {
             return nil
         }

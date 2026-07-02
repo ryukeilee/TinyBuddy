@@ -27,6 +27,8 @@ targets:
     sources:
       - path: Sources/TinyBuddy
       - path: Resources/TinyBuddyApp/Assets.xcassets
+      - path: script/update_git_completion_count.sh
+        buildPhase: resources
     info:
       path: Resources/TinyBuddyApp/Info.plist
       properties:
