@@ -5,11 +5,13 @@ import WidgetKit
 struct TinyBuddyEntry: TimelineEntry {
     let date: Date
     let snapshot: TinyBuddySnapshot
+    let gitTodayFocusBlockCount: Int?
     let gitTodayCommitCount: Int?
 }
 
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
+    private let gitFocusBlockCountStore = GitTodayFocusBlockCountStore()
     private let gitCommitCountStore = GitTodayCommitCountStore()
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
@@ -19,6 +21,7 @@ struct TinyBuddyProvider: TimelineProvider {
                 status: .idle,
                 stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 0)
             ),
+            gitTodayFocusBlockCount: 0,
             gitTodayCommitCount: 0
         )
     }
@@ -37,6 +40,7 @@ struct TinyBuddyProvider: TimelineProvider {
         TinyBuddyEntry(
             date: date,
             snapshot: store.loadSnapshot(),
+            gitTodayFocusBlockCount: gitFocusBlockCountStore.loadTodayCount(),
             gitTodayCommitCount: gitCommitCountStore.loadTodayCount()
         )
     }
@@ -54,6 +58,7 @@ struct TinyBuddyWidgetView: View {
     private var mediumPresentation: TinyBuddyWidgetPresentation {
         TinyBuddyWidgetPresentation(
             snapshot: entry.snapshot,
+            focusCountOverride: entry.gitTodayFocusBlockCount ?? 0,
             completionCountOverride: entry.gitTodayCommitCount ?? 0
         )
     }
@@ -583,7 +588,15 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                 .previewContext(WidgetPreviewContext(family: .systemSmall))
                 .previewDisplayName("Small")
 
-            TinyBuddyWidgetView(entry: previewEntry(status: .focusing, focusCount: 5, completionCount: 3, gitTodayCommitCount: 7))
+            TinyBuddyWidgetView(
+                entry: previewEntry(
+                    status: .focusing,
+                    focusCount: 5,
+                    completionCount: 3,
+                    gitTodayFocusBlockCount: 4,
+                    gitTodayCommitCount: 7
+                )
+            )
                 .previewContext(WidgetPreviewContext(family: .systemMedium))
                 .previewDisplayName("Medium HUD")
         }
@@ -593,6 +606,7 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
         status: PetStatus,
         focusCount: Int,
         completionCount: Int,
+        gitTodayFocusBlockCount: Int? = nil,
         gitTodayCommitCount: Int? = nil
     ) -> TinyBuddyEntry {
         TinyBuddyEntry(
@@ -605,6 +619,7 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                     completionCount: completionCount
                 )
             ),
+            gitTodayFocusBlockCount: gitTodayFocusBlockCount,
             gitTodayCommitCount: gitTodayCommitCount
         )
     }

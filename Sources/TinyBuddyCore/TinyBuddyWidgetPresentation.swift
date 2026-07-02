@@ -6,10 +6,14 @@ public struct TinyBuddyWidgetPresentation: Equatable, Sendable {
     public let focusCount: Int
     public let completionCount: Int
 
-    public init(snapshot: TinyBuddySnapshot, completionCountOverride: Int? = nil) {
+    public init(
+        snapshot: TinyBuddySnapshot,
+        focusCountOverride: Int? = nil,
+        completionCountOverride: Int? = nil
+    ) {
         self.expression = Self.expression(for: snapshot.status)
         self.statusTitle = snapshot.status.title
-        self.focusCount = snapshot.stats.focusCount
+        self.focusCount = focusCountOverride ?? snapshot.stats.focusCount
         self.completionCount = completionCountOverride ?? snapshot.stats.completionCount
     }
 

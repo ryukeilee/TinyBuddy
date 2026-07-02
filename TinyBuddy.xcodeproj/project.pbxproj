@@ -23,6 +23,7 @@
 		8F69DDB084E9DC2E6A897045 /* TinyBuddyWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */; };
 		97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */; };
 		9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */; };
+		D44D93E752B820DCD0C973A3 /* GitTodayFocusBlockCountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */; };
 		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
 /* End PBXBuildFile section */
 
@@ -66,6 +67,7 @@
 
 /* Begin PBXFileReference section */
 		017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyApp.swift; sourceTree = "<group>"; };
+		01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayFocusBlockCountStore.swift; sourceTree = "<group>"; };
 		21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddySharedData.swift; sourceTree = "<group>"; };
 		26B8B6AD3489E0667BE41379 /* PetSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetSession.swift; sourceTree = "<group>"; };
 		52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TinyBuddyWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -175,6 +177,7 @@
 				C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */,
 				7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */,
 				59CA13CBCA24B5398437BA44 /* GitTodayCommitCountStore.swift */,
+				01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */,
 				26B8B6AD3489E0667BE41379 /* PetSession.swift */,
 				673CA65B4E84452DA7E7E398 /* PetStatus.swift */,
 				21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */,
@@ -368,6 +371,7 @@
 				9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */,
 				8AC0469D9BB8F7ED958A9C02 /* DailyStatsStore.swift in Sources */,
 				6D84274CB66105DB30A81C86 /* GitTodayCommitCountStore.swift in Sources */,
+				D44D93E752B820DCD0C973A3 /* GitTodayFocusBlockCountStore.swift in Sources */,
 				5879C67D8A30489B4A5CC575 /* PetSession.swift in Sources */,
 				4F4EC20336431FED37375AAC /* PetStatus.swift in Sources */,
 				6A2048F95FCCF8BC71FFA2C4 /* TinyBuddySharedData.swift in Sources */,
