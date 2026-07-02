@@ -46,7 +46,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 userDefaults: defaults,
                 calendar: calendar,
                 dateProvider: { today }
-            ).loadTodayCount()
+            ).loadTodayCount(),
+            statusTitleSource: .gitTodayActivity
         )
 
         XCTAssertEqual(widgetSnapshot.status, .completedOnce)
@@ -58,6 +59,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(smallPresentation.completionCount, 1)
         XCTAssertEqual(mediumPresentation.focusCount, 3)
         XCTAssertEqual(mediumPresentation.completionCount, 4)
+        XCTAssertEqual(mediumPresentation.statusTitle, "活跃")
     }
 
     func testWidgetPresentationCanOverrideFocusAndCompletionCountWithGitCounts() {
@@ -69,11 +71,13 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         let presentation = TinyBuddyWidgetPresentation(
             snapshot: snapshot,
             focusCountOverride: 6,
-            completionCountOverride: 9
+            completionCountOverride: 9,
+            statusTitleSource: .gitTodayActivity
         )
 
         XCTAssertEqual(presentation.focusCount, 6)
         XCTAssertEqual(presentation.completionCount, 9)
+        XCTAssertEqual(presentation.statusTitle, "活跃")
     }
 
     func testWidgetPresentationUsesZeroWhenGitCountsAreUnavailable() {
@@ -87,11 +91,65 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         let presentation = TinyBuddyWidgetPresentation(
             snapshot: snapshot,
             focusCountOverride: gitTodayFocusBlockCount ?? 0,
-            completionCountOverride: gitTodayCommitCount ?? 0
+            completionCountOverride: gitTodayCommitCount ?? 0,
+            statusTitleSource: .gitTodayActivity
         )
 
         XCTAssertEqual(presentation.focusCount, 0)
         XCTAssertEqual(presentation.completionCount, 0)
+        XCTAssertEqual(presentation.statusTitle, "待机")
+    }
+
+    func testWidgetPresentationDefaultsToSnapshotStatusTitle() {
+        let snapshot = TinyBuddySnapshot(
+            status: .completedOnce,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            focusCountOverride: 6,
+            completionCountOverride: 9
+        )
+
+        XCTAssertEqual(presentation.statusTitle, "完成一次")
+    }
+
+    func testWidgetPresentationMapsGitTodayActivityStatusTitle() {
+        let snapshot = TinyBuddySnapshot(
+            status: .completedOnce,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+
+        XCTAssertEqual(
+            makeGitActivityPresentation(snapshot: snapshot, focusCount: 0, completionCount: 0).statusTitle,
+            "待机"
+        )
+        XCTAssertEqual(
+            makeGitActivityPresentation(snapshot: snapshot, focusCount: 3, completionCount: 0).statusTitle,
+            "专注中"
+        )
+        XCTAssertEqual(
+            makeGitActivityPresentation(snapshot: snapshot, focusCount: 0, completionCount: 4).statusTitle,
+            "已完成"
+        )
+        XCTAssertEqual(
+            makeGitActivityPresentation(snapshot: snapshot, focusCount: 5, completionCount: 6).statusTitle,
+            "活跃"
+        )
+    }
+
+    private func makeGitActivityPresentation(
+        snapshot: TinyBuddySnapshot,
+        focusCount: Int,
+        completionCount: Int
+    ) -> TinyBuddyWidgetPresentation {
+        TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            focusCountOverride: focusCount,
+            completionCountOverride: completionCount,
+            statusTitleSource: .gitTodayActivity
+        )
     }
 
     private func makeDefaults() -> UserDefaults {

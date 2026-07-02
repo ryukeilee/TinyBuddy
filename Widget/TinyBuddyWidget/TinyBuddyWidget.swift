@@ -59,7 +59,8 @@ struct TinyBuddyWidgetView: View {
         TinyBuddyWidgetPresentation(
             snapshot: entry.snapshot,
             focusCountOverride: entry.gitTodayFocusBlockCount ?? 0,
-            completionCountOverride: entry.gitTodayCommitCount ?? 0
+            completionCountOverride: entry.gitTodayCommitCount ?? 0,
+            statusTitleSource: .gitTodayActivity
         )
     }
 
