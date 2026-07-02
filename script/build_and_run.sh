@@ -33,6 +33,10 @@ if command -v xcodegen >/dev/null 2>&1; then
   xcodegen generate --quiet
 fi
 
+update_git_completion_count() {
+  /bin/bash "$ROOT_DIR/script/update_git_completion_count.sh"
+}
+
 SIGNING_ARGS=()
 case "$SIGNING_MODE" in
   signed)
@@ -152,29 +156,36 @@ verify_release_app() {
 
 case "$MODE" in
   run)
+    update_git_completion_count
     open_app
     ;;
   --debug|debug)
+    update_git_completion_count
     lldb -- "$APP_BINARY"
     ;;
   --logs|logs)
+    update_git_completion_count
     open_app
     /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
     ;;
   --telemetry|telemetry)
+    update_git_completion_count
     open_app
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
+    update_git_completion_count
     open_app
     sleep 1
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   release-install|--release-install)
+    update_git_completion_count
     install_release_app
     verify_release_app
     ;;
   release-verify|--release-verify)
+    update_git_completion_count
     verify_release_app
     ;;
   *)

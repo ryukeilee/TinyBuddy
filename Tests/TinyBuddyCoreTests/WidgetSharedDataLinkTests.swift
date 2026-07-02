@@ -17,6 +17,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         appSession.select(.focusing)
         appSession.select(.focusing)
         appSession.select(.completedOnce)
+        GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        ).saveTodayCount(4)
 
         let widgetStore = DailyStatsStore(
             userDefaults: defaults,
@@ -24,15 +29,54 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             dateProvider: { today }
         )
         let widgetSnapshot = widgetStore.loadSnapshot()
-        let presentation = TinyBuddyWidgetPresentation(snapshot: widgetSnapshot)
+        let smallPresentation = TinyBuddyWidgetPresentation(snapshot: widgetSnapshot)
+        let mediumPresentation = TinyBuddyWidgetPresentation(
+            snapshot: widgetSnapshot,
+            completionCountOverride: GitTodayCommitCountStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today }
+            ).loadTodayCount()
+        )
 
         XCTAssertEqual(widgetSnapshot.status, .completedOnce)
         XCTAssertEqual(widgetSnapshot.stats.focusCount, 2)
         XCTAssertEqual(widgetSnapshot.stats.completionCount, 1)
-        XCTAssertEqual(presentation.expression, "★ᴗ★")
-        XCTAssertEqual(presentation.statusTitle, "完成一次")
+        XCTAssertEqual(smallPresentation.expression, "★ᴗ★")
+        XCTAssertEqual(smallPresentation.statusTitle, "完成一次")
+        XCTAssertEqual(smallPresentation.focusCount, 2)
+        XCTAssertEqual(smallPresentation.completionCount, 1)
+        XCTAssertEqual(mediumPresentation.completionCount, 4)
+    }
+
+    func testWidgetPresentationCanOverrideCompletionCountWithGitCount() {
+        let snapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            completionCountOverride: 9
+        )
+
         XCTAssertEqual(presentation.focusCount, 2)
-        XCTAssertEqual(presentation.completionCount, 1)
+        XCTAssertEqual(presentation.completionCount, 9)
+    }
+
+    func testWidgetPresentationUsesZeroWhenGitCountIsUnavailable() {
+        let snapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+        let gitTodayCommitCount: Int? = nil
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            completionCountOverride: gitTodayCommitCount ?? 0
+        )
+
+        XCTAssertEqual(presentation.completionCount, 0)
     }
 
     private func makeDefaults() -> UserDefaults {
@@ -59,4 +103,3 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         return components.date!
     }
 }
-

@@ -5,10 +5,12 @@ import WidgetKit
 struct TinyBuddyEntry: TimelineEntry {
     let date: Date
     let snapshot: TinyBuddySnapshot
+    let gitTodayCommitCount: Int?
 }
 
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
+    private let gitCommitCountStore = GitTodayCommitCountStore()
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
         TinyBuddyEntry(
@@ -16,18 +18,27 @@ struct TinyBuddyProvider: TimelineProvider {
             snapshot: TinyBuddySnapshot(
                 status: .idle,
                 stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 0)
-            )
+            ),
+            gitTodayCommitCount: 0
         )
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TinyBuddyEntry) -> Void) {
-        completion(TinyBuddyEntry(date: Date(), snapshot: store.loadSnapshot()))
+        completion(makeEntry(for: Date()))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<TinyBuddyEntry>) -> Void) {
-        let entry = TinyBuddyEntry(date: Date(), snapshot: store.loadSnapshot())
+        let entry = makeEntry(for: Date())
         let nextRefresh = Calendar.current.date(byAdding: .minute, value: 15, to: entry.date) ?? entry.date.addingTimeInterval(900)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+    }
+
+    private func makeEntry(for date: Date) -> TinyBuddyEntry {
+        TinyBuddyEntry(
+            date: date,
+            snapshot: store.loadSnapshot(),
+            gitTodayCommitCount: gitCommitCountStore.loadTodayCount()
+        )
     }
 }
 
@@ -36,8 +47,15 @@ struct TinyBuddyWidgetView: View {
 
     let entry: TinyBuddyEntry
 
-    private var presentation: TinyBuddyWidgetPresentation {
+    private var smallPresentation: TinyBuddyWidgetPresentation {
         TinyBuddyWidgetPresentation(snapshot: entry.snapshot)
+    }
+
+    private var mediumPresentation: TinyBuddyWidgetPresentation {
+        TinyBuddyWidgetPresentation(
+            snapshot: entry.snapshot,
+            completionCountOverride: entry.gitTodayCommitCount ?? 0
+        )
     }
 
     var body: some View {
@@ -54,7 +72,7 @@ struct TinyBuddyWidgetView: View {
     private var smallBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Text(presentation.expression)
+                Text(smallPresentation.expression)
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .frame(width: 44, height: 44)
                     .background(Circle().fill(statusColor.opacity(0.22)))
@@ -62,15 +80,15 @@ struct TinyBuddyWidgetView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("TinyBuddy")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    Text(presentation.statusTitle)
+                    Text(smallPresentation.statusTitle)
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
             }
 
             HStack(spacing: 8) {
-                metric(title: "今日专注", value: presentation.focusCount)
-                metric(title: "今日完成", value: presentation.completionCount)
+                metric(title: "今日专注", value: smallPresentation.focusCount)
+                metric(title: "今日完成", value: smallPresentation.completionCount)
             }
         }
         .containerBackground(for: .widget) {
@@ -113,15 +131,15 @@ struct TinyBuddyWidgetView: View {
                 }
 
                 HStack(spacing: 8) {
-                    hudMetric(title: "今日专注", value: presentation.focusCount)
-                    hudMetric(title: "今日完成", value: presentation.completionCount)
+                    hudMetric(title: "今日专注", value: mediumPresentation.focusCount)
+                    hudMetric(title: "今日完成", value: mediumPresentation.completionCount)
                 }
 
                 HStack(spacing: 8) {
                     Text("STATUS")
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .foregroundStyle(hudGold.opacity(0.82))
-                    Text(presentation.statusTitle)
+                    Text(mediumPresentation.statusTitle)
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundStyle(mediumStatusAccent)
                         .lineLimit(1)
@@ -565,13 +583,18 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                 .previewContext(WidgetPreviewContext(family: .systemSmall))
                 .previewDisplayName("Small")
 
-            TinyBuddyWidgetView(entry: previewEntry(status: .focusing, focusCount: 5, completionCount: 3))
+            TinyBuddyWidgetView(entry: previewEntry(status: .focusing, focusCount: 5, completionCount: 3, gitTodayCommitCount: 7))
                 .previewContext(WidgetPreviewContext(family: .systemMedium))
                 .previewDisplayName("Medium HUD")
         }
     }
 
-    private static func previewEntry(status: PetStatus, focusCount: Int, completionCount: Int) -> TinyBuddyEntry {
+    private static func previewEntry(
+        status: PetStatus,
+        focusCount: Int,
+        completionCount: Int,
+        gitTodayCommitCount: Int? = nil
+    ) -> TinyBuddyEntry {
         TinyBuddyEntry(
             date: Date(),
             snapshot: TinyBuddySnapshot(
@@ -581,7 +604,8 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                     focusCount: focusCount,
                     completionCount: completionCount
                 )
-            )
+            ),
+            gitTodayCommitCount: gitTodayCommitCount
         )
     }
 }

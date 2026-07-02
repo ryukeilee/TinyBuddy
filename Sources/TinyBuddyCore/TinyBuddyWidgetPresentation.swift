@@ -6,11 +6,11 @@ public struct TinyBuddyWidgetPresentation: Equatable, Sendable {
     public let focusCount: Int
     public let completionCount: Int
 
-    public init(snapshot: TinyBuddySnapshot) {
+    public init(snapshot: TinyBuddySnapshot, completionCountOverride: Int? = nil) {
         self.expression = Self.expression(for: snapshot.status)
         self.statusTitle = snapshot.status.title
         self.focusCount = snapshot.stats.focusCount
-        self.completionCount = snapshot.stats.completionCount
+        self.completionCount = completionCountOverride ?? snapshot.stats.completionCount
     }
 
     private static func expression(for status: PetStatus) -> String {
@@ -24,4 +24,3 @@ public struct TinyBuddyWidgetPresentation: Equatable, Sendable {
         }
     }
 }
-
