@@ -34,6 +34,8 @@ APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 BUNDLE_ID="com.ryukeili.TinyBuddy"
 INSTALL_DIR="${TINYBUDDY_INSTALL_DIR:-/Applications}"
 INSTALLED_APP="$INSTALL_DIR/$APP_NAME.app"
+APP_PREFERENCES_PLIST="${TINYBUDDY_APP_PREFERENCES_PLIST:-$HOME/Library/Containers/$BUNDLE_ID/Data/Library/Preferences/$BUNDLE_ID.plist}"
+GIT_SCAN_ROOT_BOOKMARK_KEY="tinybuddy.gitScanRoots.bookmarkData"
 
 cd "$ROOT_DIR"
 
@@ -44,7 +46,83 @@ if command -v xcodegen >/dev/null 2>&1; then
 fi
 
 update_git_completion_count() {
-  /bin/bash "$ROOT_DIR/script/update_git_completion_count.sh"
+  local git_scan_roots="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
+
+  if [ -z "$git_scan_roots" ]; then
+    git_scan_roots="$(resolve_saved_git_scan_roots)"
+  fi
+
+  if [ -z "$git_scan_roots" ]; then
+    if [ -f "$APP_PREFERENCES_PLIST" ]; then
+      echo "skipping git pre-refresh: no valid saved authorized Git scan roots could be restored from $APP_PREFERENCES_PLIST" >&2
+    else
+      echo "skipping git pre-refresh: no saved Git scan root authorizations found at $APP_PREFERENCES_PLIST" >&2
+    fi
+    return 0
+  fi
+
+  TINYBUDDY_GIT_SCAN_ROOTS="$git_scan_roots" /bin/bash "$ROOT_DIR/script/update_git_completion_count.sh"
+}
+
+resolve_saved_git_scan_roots() {
+  if [ ! -f "$APP_PREFERENCES_PLIST" ]; then
+    return 0
+  fi
+
+  if ! command -v /usr/bin/xcrun >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local resolved_roots=""
+  if ! resolved_roots="$(
+    /usr/bin/xcrun swift - "$APP_PREFERENCES_PLIST" "$GIT_SCAN_ROOT_BOOKMARK_KEY" <<'SWIFT'
+import Foundation
+
+let arguments = CommandLine.arguments
+guard arguments.count >= 3 else {
+    exit(0)
+}
+
+let plistURL = URL(fileURLWithPath: arguments[1])
+let bookmarkKey = arguments[2]
+
+guard
+    let plistData = try? Data(contentsOf: plistURL),
+    let propertyList = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+    let plistDictionary = propertyList as? [String: Any],
+    let bookmarkDataList = plistDictionary[bookmarkKey] as? [Data]
+else {
+    exit(0)
+}
+
+var emittedPaths = Set<String>()
+for bookmarkData in bookmarkDataList {
+    var isStale = false
+    guard
+        let url = try? URL(
+            resolvingBookmarkData: bookmarkData,
+            options: [],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ),
+        !isStale
+    else {
+        continue
+    }
+
+    let normalizedPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+    guard emittedPaths.insert(normalizedPath).inserted else {
+        continue
+    }
+
+    print(normalizedPath)
+}
+SWIFT
+  )"; then
+    return 0
+  fi
+
+  printf '%s' "$resolved_roots"
 }
 
 SIGNING_ARGS=()

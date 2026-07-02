@@ -17,11 +17,19 @@ struct TinyBuddyApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let gitActivityRefreshCoordinator = GitActivityRefreshCoordinator()
+    private let gitScanRootAuthorizationStore = GitScanRootAuthorizationStore()
+    private lazy var gitActivityRefreshCoordinator = GitActivityRefreshCoordinator(
+        gitScanRootStore: gitScanRootAuthorizationStore
+    )
+    private lazy var gitScanRootAuthorizationController = GitScanRootAuthorizationController(
+        store: gitScanRootAuthorizationStore
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
         gitActivityRefreshCoordinator.start()
     }
 
@@ -34,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
         gitActivityRefreshCoordinator.handleReopen()
         return false
     }

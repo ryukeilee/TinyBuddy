@@ -19,7 +19,10 @@ let package = Package(
         .testTarget(
             name: "TinyBuddyCoreTests",
             dependencies: ["TinyBuddyCore"]
+        ),
+        .testTarget(
+            name: "TinyBuddyAppTests",
+            dependencies: ["TinyBuddy", "TinyBuddyCore"]
         )
     ]
 )
-

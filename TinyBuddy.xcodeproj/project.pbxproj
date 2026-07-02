@@ -30,6 +30,7 @@
 		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
 		EB9D58FB5AB5F5AB5D5E0479 /* GitTodayActivityRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96B45C0592764EBEE0461F5C /* GitTodayActivityRefreshPolicy.swift */; };
 		F60A0FF508F100BCF30472F3 /* GitTodayRecentProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */; };
+		F6D2B174FF12EA89BA853BFD /* GitScanRootAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -75,6 +76,7 @@
 		01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayFocusBlockCountStore.swift; sourceTree = "<group>"; };
 		21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddySharedData.swift; sourceTree = "<group>"; };
 		26B8B6AD3489E0667BE41379 /* PetSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetSession.swift; sourceTree = "<group>"; };
+		2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitScanRootAuthorizationStore.swift; sourceTree = "<group>"; };
 		52B537AA145DD23337326C66 /* TinyBuddyWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TinyBuddyWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyWidgetPresentation.swift; sourceTree = "<group>"; };
 		59CA13CBCA24B5398437BA44 /* GitTodayCommitCountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayCommitCountStore.swift; sourceTree = "<group>"; };
@@ -220,6 +222,7 @@
 			isa = PBXGroup;
 			children = (
 				FEA309302E10538A5325BABB /* GitActivityRefreshCoordinator.swift */,
+				2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */,
 				7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */,
 				C509A181592B4E3F45448EBE /* PetViewModel.swift */,
 				017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */,
@@ -411,6 +414,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5B71B2D72982DC8F5D4300D3 /* GitActivityRefreshCoordinator.swift in Sources */,
+				F6D2B174FF12EA89BA853BFD /* GitScanRootAuthorizationStore.swift in Sources */,
 				7234061598DF198403D751B3 /* PetView.swift in Sources */,
 				0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */,
 				97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */,

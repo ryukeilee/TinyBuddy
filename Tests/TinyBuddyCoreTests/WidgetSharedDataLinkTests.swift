@@ -168,6 +168,42 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(presentation.statusDisplayTitle, "活跃 · TinyBuddy")
     }
 
+    func testWidgetPresentationAppendsRecentProjectNameForFocusingStatus() {
+        let snapshot = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 1, completionCount: 0)
+        )
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            focusCountOverride: 3,
+            completionCountOverride: 0,
+            recentProjectName: "TinyBuddy",
+            statusTitleSource: .gitTodayActivity
+        )
+
+        XCTAssertEqual(presentation.statusTitle, "专注中")
+        XCTAssertEqual(presentation.statusDisplayTitle, "专注中 · TinyBuddy")
+    }
+
+    func testWidgetPresentationAppendsRecentProjectNameForCompletedStatus() {
+        let snapshot = TinyBuddySnapshot(
+            status: .completedOnce,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 1)
+        )
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            focusCountOverride: 0,
+            completionCountOverride: 2,
+            recentProjectName: "TinyBuddy",
+            statusTitleSource: .gitTodayActivity
+        )
+
+        XCTAssertEqual(presentation.statusTitle, "已完成")
+        XCTAssertEqual(presentation.statusDisplayTitle, "已完成 · TinyBuddy")
+    }
+
     func testWidgetPresentationKeepsOriginalStatusDisplayWhenProjectNameIsUnavailable() {
         let snapshot = TinyBuddySnapshot(
             status: .completedOnce,
@@ -184,6 +220,42 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(presentation.statusTitle, "专注中")
         XCTAssertEqual(presentation.statusDisplayTitle, "专注中")
+    }
+
+    func testWidgetPresentationUpdatesRecentProjectNameWhenTodayActiveProjectChanges() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 1)
+        let recentProjectStore = GitTodayRecentProjectStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let snapshot = TinyBuddySnapshot(
+            status: .completedOnce,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+
+        recentProjectStore.saveTodayProjectName("Project A")
+        let firstPresentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            focusCountOverride: 3,
+            completionCountOverride: 1,
+            recentProjectName: recentProjectStore.loadTodayProjectName(),
+            statusTitleSource: .gitTodayActivity
+        )
+
+        recentProjectStore.saveTodayProjectName("Project B")
+        let updatedPresentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            focusCountOverride: 3,
+            completionCountOverride: 1,
+            recentProjectName: recentProjectStore.loadTodayProjectName(),
+            statusTitleSource: .gitTodayActivity
+        )
+
+        XCTAssertEqual(firstPresentation.statusDisplayTitle, "活跃 · Project A")
+        XCTAssertEqual(updatedPresentation.statusDisplayTitle, "活跃 · Project B")
     }
 
     private func makeGitActivityPresentation(
