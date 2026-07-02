@@ -206,7 +206,6 @@
 			buildConfigurationList = 9A916A14D8192A4006D1D971 /* Build configuration list for PBXNativeTarget "TinyBuddyCore" */;
 			buildPhases = (
 				455BD1A23515031AB71575C9 /* Sources */,
-				1B1D4D746CED1611B1022524 /* Copy Swift Objective-C Interface Header */,
 			);
 			buildRules = (
 			);
@@ -318,22 +317,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		1B1D4D746CED1611B1022524 /* Copy Swift Objective-C Interface Header */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
-			);
-			name = "Copy Swift Objective-C Interface Header";
-			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "cp \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
-		};
 		5FC5C1B37E7B950E29C955B3 /* Clear Signing Metadata */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -594,6 +577,7 @@
 				PRODUCT_NAME = TinyBuddyCore;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
 			};
 			name = Debug;
 		};
@@ -609,6 +593,7 @@
 				PRODUCT_NAME = TinyBuddyCore;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
 			};
 			name = Release;
 		};

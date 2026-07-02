@@ -20,6 +20,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryukeili.TinyBuddyCore
         PRODUCT_NAME: TinyBuddyCore
+        SWIFT_INSTALL_OBJC_HEADER: NO
   TinyBuddy:
     type: application
     platform: macOS
