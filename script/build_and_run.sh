@@ -154,6 +154,68 @@ verify_widget_extension() {
   echo "verified widget extension: $appex"
 }
 
+widget_executable_hash() {
+  local appex="$1"
+  local executable="$appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
+
+  if [ ! -f "$executable" ]; then
+    echo "missing widget executable: $executable" >&2
+    exit 1
+  fi
+
+  /usr/bin/shasum -a 256 "$executable" | /usr/bin/awk '{print $1}'
+}
+
+check_widget_runtime_source_match() {
+  local severity="$1"
+  local current_appex
+  local installed_appex
+  local current_hash
+  local installed_hash
+  local message
+
+  current_appex="$(find_widget_extension "$APP_BUNDLE")"
+  if [ -z "$current_appex" ]; then
+    echo "missing $WIDGET_EXTENSION_NAME.appex in current build: $APP_BUNDLE" >&2
+    exit 1
+  fi
+
+  if [ ! -d "$INSTALLED_APP" ]; then
+    return 0
+  fi
+
+  installed_appex="$(find_widget_extension "$INSTALLED_APP")"
+  if [ -z "$installed_appex" ]; then
+    return 0
+  fi
+
+  current_hash="$(widget_executable_hash "$current_appex")"
+  installed_hash="$(widget_executable_hash "$installed_appex")"
+
+  if [ "$current_hash" = "$installed_hash" ]; then
+    return 0
+  fi
+
+  message=$(
+    cat <<EOF
+desktop widget source mismatch:
+- desktop Widget is expected to load the installed extension: $installed_appex
+- current build produced a different extension: $current_appex
+- installed widget executable sha256: $installed_hash
+- current build widget executable sha256: $current_hash
+The app process can start, but the desktop Widget is still not coming from the current build.
+Install a matching app bundle before treating Widget verification as passed.
+EOF
+  )
+
+  if [ "$severity" = "fail" ]; then
+    echo "$message" >&2
+    exit 1
+  fi
+
+  echo "warning: $message" >&2
+}
+
 install_release_app() {
   /usr/bin/ditto "$APP_BUNDLE" "$INSTALLED_APP"
   echo "installed $INSTALLED_APP"
@@ -167,19 +229,23 @@ verify_release_app() {
 case "$MODE" in
   run)
     update_git_completion_count
+    check_widget_runtime_source_match warn
     open_app
     ;;
   --debug|debug)
     update_git_completion_count
+    check_widget_runtime_source_match warn
     lldb -- "$APP_BINARY"
     ;;
   --logs|logs)
     update_git_completion_count
+    check_widget_runtime_source_match warn
     open_app
     /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
     ;;
   --telemetry|telemetry)
     update_git_completion_count
+    check_widget_runtime_source_match warn
     open_app
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
@@ -188,6 +254,7 @@ case "$MODE" in
     open_app
     sleep 1
     pgrep -x "$APP_NAME" >/dev/null
+    check_widget_runtime_source_match fail
     ;;
   release-install|--release-install)
     update_git_completion_count
