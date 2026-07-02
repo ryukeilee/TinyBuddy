@@ -8,6 +8,7 @@ public struct TinyBuddyWidgetPresentation: Equatable, Sendable {
 
     public let expression: String
     public let statusTitle: String
+    public let statusDisplayTitle: String
     public let focusCount: Int
     public let completionCount: Int
 
@@ -15,17 +16,23 @@ public struct TinyBuddyWidgetPresentation: Equatable, Sendable {
         snapshot: TinyBuddySnapshot,
         focusCountOverride: Int? = nil,
         completionCountOverride: Int? = nil,
+        recentProjectName: String? = nil,
         statusTitleSource: StatusTitleSource = .snapshot
     ) {
         let focusCount = focusCountOverride ?? snapshot.stats.focusCount
         let completionCount = completionCountOverride ?? snapshot.stats.completionCount
-
-        self.expression = Self.expression(for: snapshot.status)
-        self.statusTitle = Self.statusTitle(
+        let statusTitle = Self.statusTitle(
             from: snapshot,
             focusCount: focusCount,
             completionCount: completionCount,
             source: statusTitleSource
+        )
+
+        self.expression = Self.expression(for: snapshot.status)
+        self.statusTitle = statusTitle
+        self.statusDisplayTitle = Self.statusDisplayTitle(
+            statusTitle: statusTitle,
+            recentProjectName: recentProjectName
         )
         self.focusCount = focusCount
         self.completionCount = completionCount
@@ -63,5 +70,19 @@ public struct TinyBuddyWidgetPresentation: Equatable, Sendable {
                 return "活跃"
             }
         }
+    }
+
+    private static func statusDisplayTitle(
+        statusTitle: String,
+        recentProjectName: String?
+    ) -> String {
+        guard let recentProjectName = recentProjectName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !recentProjectName.isEmpty
+        else {
+            return statusTitle
+        }
+
+        return "\(statusTitle) · \(recentProjectName)"
     }
 }

@@ -17,6 +17,11 @@ final class GitTodayActivityStoreTests: XCTestCase {
             calendar: calendar,
             dateProvider: { today }
         ).saveTodayCount(4)
+        GitTodayRecentProjectStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        ).saveTodayProjectName("TinyBuddy")
 
         let store = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(
@@ -28,24 +33,46 @@ final class GitTodayActivityStoreTests: XCTestCase {
                 userDefaults: defaults,
                 calendar: calendar,
                 dateProvider: { today }
+            ),
+            recentProjectStore: GitTodayRecentProjectStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today }
             )
         )
 
         XCTAssertEqual(
             store.loadTodaySnapshot(),
-            GitTodayActivitySnapshot(focusBlockCount: 3, commitCount: 4)
+            GitTodayActivitySnapshot(
+                focusBlockCount: 3,
+                commitCount: 4,
+                recentProjectName: "TinyBuddy"
+            )
         )
     }
 
     func testRefreshResultOnlyReportsChangeWhenSnapshotDiffers() {
         let store = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(userDefaults: makeDefaults()),
-            commitCountStore: GitTodayCommitCountStore(userDefaults: makeDefaults())
+            commitCountStore: GitTodayCommitCountStore(userDefaults: makeDefaults()),
+            recentProjectStore: GitTodayRecentProjectStore(userDefaults: makeDefaults())
         )
 
-        let previousSnapshot = GitTodayActivitySnapshot(focusBlockCount: 2, commitCount: 5)
-        let unchangedSnapshot = GitTodayActivitySnapshot(focusBlockCount: 2, commitCount: 5)
-        let changedSnapshot = GitTodayActivitySnapshot(focusBlockCount: 3, commitCount: 5)
+        let previousSnapshot = GitTodayActivitySnapshot(
+            focusBlockCount: 2,
+            commitCount: 5,
+            recentProjectName: "TinyBuddy"
+        )
+        let unchangedSnapshot = GitTodayActivitySnapshot(
+            focusBlockCount: 2,
+            commitCount: 5,
+            recentProjectName: "TinyBuddy"
+        )
+        let changedSnapshot = GitTodayActivitySnapshot(
+            focusBlockCount: 2,
+            commitCount: 5,
+            recentProjectName: "TinyBuddyCore"
+        )
 
         XCTAssertFalse(
             store.makeRefreshResult(

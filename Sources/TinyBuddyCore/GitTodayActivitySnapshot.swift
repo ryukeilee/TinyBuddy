@@ -3,10 +3,12 @@ import Foundation
 public struct GitTodayActivitySnapshot: Equatable, Sendable {
     public let focusBlockCount: Int?
     public let commitCount: Int?
+    public let recentProjectName: String?
 
-    public init(focusBlockCount: Int?, commitCount: Int?) {
+    public init(focusBlockCount: Int?, commitCount: Int?, recentProjectName: String? = nil) {
         self.focusBlockCount = focusBlockCount
         self.commitCount = commitCount
+        self.recentProjectName = recentProjectName
     }
 }
 
@@ -27,19 +29,23 @@ public struct GitTodayActivityRefreshResult: Equatable, Sendable {
 public final class GitTodayActivityStore {
     private let focusBlockCountStore: GitTodayFocusBlockCountStore
     private let commitCountStore: GitTodayCommitCountStore
+    private let recentProjectStore: GitTodayRecentProjectStore
 
     public init(
         focusBlockCountStore: GitTodayFocusBlockCountStore = GitTodayFocusBlockCountStore(),
-        commitCountStore: GitTodayCommitCountStore = GitTodayCommitCountStore()
+        commitCountStore: GitTodayCommitCountStore = GitTodayCommitCountStore(),
+        recentProjectStore: GitTodayRecentProjectStore = GitTodayRecentProjectStore()
     ) {
         self.focusBlockCountStore = focusBlockCountStore
         self.commitCountStore = commitCountStore
+        self.recentProjectStore = recentProjectStore
     }
 
     public func loadTodaySnapshot() -> GitTodayActivitySnapshot {
         GitTodayActivitySnapshot(
             focusBlockCount: focusBlockCountStore.loadTodayCount(),
-            commitCount: commitCountStore.loadTodayCount()
+            commitCount: commitCountStore.loadTodayCount(),
+            recentProjectName: recentProjectStore.loadTodayProjectName()
         )
     }
 

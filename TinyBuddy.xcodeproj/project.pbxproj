@@ -29,6 +29,7 @@
 		D8032BD68E38F54C02BC67F0 /* GitTodayActivitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B2356A5A3AB0BC7E871B67 /* GitTodayActivitySnapshot.swift */; };
 		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
 		EB9D58FB5AB5F5AB5D5E0479 /* GitTodayActivityRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96B45C0592764EBEE0461F5C /* GitTodayActivityRefreshPolicy.swift */; };
+		F60A0FF508F100BCF30472F3 /* GitTodayRecentProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -89,6 +90,7 @@
 		BED030C13CCAD80054FF21E0 /* TinyBuddy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TinyBuddy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C509A181592B4E3F45448EBE /* PetViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetViewModel.swift; sourceTree = "<group>"; };
 		C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStats.swift; sourceTree = "<group>"; };
+		CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayRecentProjectStore.swift; sourceTree = "<group>"; };
 		D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		E8F8EEF00869149828C56CC9 /* update_git_completion_count.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = update_git_completion_count.sh; sourceTree = "<group>"; };
 		FEA309302E10538A5325BABB /* GitActivityRefreshCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitActivityRefreshCoordinator.swift; sourceTree = "<group>"; };
@@ -197,6 +199,7 @@
 				A5B2356A5A3AB0BC7E871B67 /* GitTodayActivitySnapshot.swift */,
 				59CA13CBCA24B5398437BA44 /* GitTodayCommitCountStore.swift */,
 				01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */,
+				CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */,
 				26B8B6AD3489E0667BE41379 /* PetSession.swift */,
 				673CA65B4E84452DA7E7E398 /* PetStatus.swift */,
 				21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */,
@@ -395,6 +398,7 @@
 				D8032BD68E38F54C02BC67F0 /* GitTodayActivitySnapshot.swift in Sources */,
 				6D84274CB66105DB30A81C86 /* GitTodayCommitCountStore.swift in Sources */,
 				D44D93E752B820DCD0C973A3 /* GitTodayFocusBlockCountStore.swift in Sources */,
+				F60A0FF508F100BCF30472F3 /* GitTodayRecentProjectStore.swift in Sources */,
 				5879C67D8A30489B4A5CC575 /* PetSession.swift in Sources */,
 				4F4EC20336431FED37375AAC /* PetStatus.swift in Sources */,
 				6A2048F95FCCF8BC71FFA2C4 /* TinyBuddySharedData.swift in Sources */,

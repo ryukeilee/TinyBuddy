@@ -7,12 +7,14 @@ struct TinyBuddyEntry: TimelineEntry {
     let snapshot: TinyBuddySnapshot
     let gitTodayFocusBlockCount: Int?
     let gitTodayCommitCount: Int?
+    let gitTodayRecentProjectName: String?
 }
 
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
     private let gitFocusBlockCountStore = GitTodayFocusBlockCountStore()
     private let gitCommitCountStore = GitTodayCommitCountStore()
+    private let gitRecentProjectStore = GitTodayRecentProjectStore()
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
         TinyBuddyEntry(
@@ -22,7 +24,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 0)
             ),
             gitTodayFocusBlockCount: 0,
-            gitTodayCommitCount: 0
+            gitTodayCommitCount: 0,
+            gitTodayRecentProjectName: "TinyBuddy"
         )
     }
 
@@ -41,7 +44,8 @@ struct TinyBuddyProvider: TimelineProvider {
             date: date,
             snapshot: store.loadSnapshot(),
             gitTodayFocusBlockCount: gitFocusBlockCountStore.loadTodayCount(),
-            gitTodayCommitCount: gitCommitCountStore.loadTodayCount()
+            gitTodayCommitCount: gitCommitCountStore.loadTodayCount(),
+            gitTodayRecentProjectName: gitRecentProjectStore.loadTodayProjectName()
         )
     }
 }
@@ -60,6 +64,7 @@ struct TinyBuddyWidgetView: View {
             snapshot: entry.snapshot,
             focusCountOverride: entry.gitTodayFocusBlockCount ?? 0,
             completionCountOverride: entry.gitTodayCommitCount ?? 0,
+            recentProjectName: entry.gitTodayRecentProjectName,
             statusTitleSource: .gitTodayActivity
         )
     }
@@ -145,7 +150,7 @@ struct TinyBuddyWidgetView: View {
                     Text("STATUS")
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .foregroundStyle(hudGold.opacity(0.82))
-                    Text(mediumPresentation.statusTitle)
+                    Text(mediumPresentation.statusDisplayTitle)
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundStyle(mediumStatusAccent)
                         .lineLimit(1)
@@ -595,7 +600,8 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                     focusCount: 5,
                     completionCount: 3,
                     gitTodayFocusBlockCount: 4,
-                    gitTodayCommitCount: 7
+                    gitTodayCommitCount: 7,
+                    gitTodayRecentProjectName: "TinyBuddy"
                 )
             )
                 .previewContext(WidgetPreviewContext(family: .systemMedium))
@@ -608,7 +614,8 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
         focusCount: Int,
         completionCount: Int,
         gitTodayFocusBlockCount: Int? = nil,
-        gitTodayCommitCount: Int? = nil
+        gitTodayCommitCount: Int? = nil,
+        gitTodayRecentProjectName: String? = nil
     ) -> TinyBuddyEntry {
         TinyBuddyEntry(
             date: Date(),
@@ -621,7 +628,8 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                 )
             ),
             gitTodayFocusBlockCount: gitTodayFocusBlockCount,
-            gitTodayCommitCount: gitTodayCommitCount
+            gitTodayCommitCount: gitTodayCommitCount,
+            gitTodayRecentProjectName: gitTodayRecentProjectName
         )
     }
 }

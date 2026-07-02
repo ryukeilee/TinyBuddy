@@ -9,10 +9,14 @@ DAY_KEY="tinybuddy.gitTodayCommitCount.dayIdentifier"
 COUNT_KEY="tinybuddy.gitTodayCommitCount.count"
 FOCUS_BLOCK_DAY_KEY="tinybuddy.gitTodayFocusBlockCount.dayIdentifier"
 FOCUS_BLOCK_COUNT_KEY="tinybuddy.gitTodayFocusBlockCount.count"
+RECENT_PROJECT_DAY_KEY="tinybuddy.gitTodayRecentProject.dayIdentifier"
+RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
 SCAN_ROOT="${TINYBUDDY_GIT_SCAN_ROOT:-$HOME}"
 TODAY="$(date +%F)"
 
 total_count=0
+latest_activity_timestamp=""
+recent_project_name=""
 repo_list_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
 trap 'rm -f "$repo_list_file" "$focus_block_list_file"' EXIT
@@ -41,6 +45,7 @@ while IFS= read -r repo_root; do
   fi
 
   repo_count=0
+  repo_latest_timestamp=""
   while IFS=$'\t' read -r record_kind record_value; do
     case "$record_kind" in
       COUNT)
@@ -48,6 +53,9 @@ while IFS= read -r repo_root; do
         ;;
       BLOCK)
         printf '%s\n' "$record_value" >> "$focus_block_list_file"
+        ;;
+      LATEST)
+        repo_latest_timestamp="$record_value"
         ;;
     esac
   done < <(
@@ -63,6 +71,9 @@ while IFS= read -r repo_root; do
           timestamp = $1
           sub(/^HEAD@\{/, "", timestamp)
           sub(/\}$/, "", timestamp)
+          if (timestamp > latest) {
+            latest = timestamp
+          }
           split(timestamp, parts, "T")
           split(parts[2], timeParts, ":")
           hour = timeParts[1] + 0
@@ -72,10 +83,18 @@ while IFS= read -r repo_root; do
         }
         END {
           printf "COUNT\t%d\n", count + 0
+          if (latest != "") {
+            printf "LATEST\t%s\n", latest
+          }
         }
       '
   )
   total_count=$((total_count + repo_count))
+
+  if [[ -n "$repo_latest_timestamp" && ( -z "$latest_activity_timestamp" || "$repo_latest_timestamp" > "$latest_activity_timestamp" ) ]]; then
+    latest_activity_timestamp="$repo_latest_timestamp"
+    recent_project_name="$(basename "$repo_root")"
+  fi
 done < "$repo_list_file"
 
 focus_block_count="$(sort -u "$focus_block_list_file" | awk 'END { print NR + 0 }')"
@@ -85,6 +104,9 @@ focus_block_count="$(sort -u "$focus_block_list_file" | awk 'END { print NR + 0 
 /usr/bin/defaults write "$APP_GROUP_PREFERENCES_PLIST" "$COUNT_KEY" -int "$total_count"
 /usr/bin/defaults write "$APP_GROUP_PREFERENCES_PLIST" "$FOCUS_BLOCK_DAY_KEY" -string "$TODAY"
 /usr/bin/defaults write "$APP_GROUP_PREFERENCES_PLIST" "$FOCUS_BLOCK_COUNT_KEY" -int "$focus_block_count"
+/usr/bin/defaults write "$APP_GROUP_PREFERENCES_PLIST" "$RECENT_PROJECT_DAY_KEY" -string "$TODAY"
+/usr/bin/defaults write "$APP_GROUP_PREFERENCES_PLIST" "$RECENT_PROJECT_NAME_KEY" -string "$recent_project_name"
 
 echo "Updated TinyBuddy git completion count: $total_count"
 echo "Updated TinyBuddy git focus block count: $focus_block_count"
+echo "Updated TinyBuddy recent project name: ${recent_project_name:-<none>}"
