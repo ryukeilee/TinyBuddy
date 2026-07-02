@@ -263,74 +263,161 @@ struct TinyBuddyWidgetView: View {
                         endRadius: 50
                     )
                 )
-                .overlay(
-                    Circle()
-                        .stroke(
-                            LinearGradient(
-                                colors: [
-                                    hudGold.opacity(0.54),
-                                    reactorRed.opacity(0.62),
-                                    Color.black.opacity(0.36)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 3
-                        )
+                .shadow(color: reactorRed.opacity(0.22), radius: 11)
+
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            .white.opacity(0.16),
+                            energyBlueWhite.opacity(0.58),
+                            energyBlueWhite.opacity(0.18),
+                            .clear
+                        ],
+                        center: .center,
+                        startRadius: 6,
+                        endRadius: 56
+                    )
                 )
-                .shadow(color: reactorRed.opacity(0.42), radius: 16)
+                .scaleEffect(1.08)
+                .blur(radius: 10)
 
             Circle()
-                .stroke(reactorRed.opacity(0.34), lineWidth: 9)
-                .frame(width: 80, height: 80)
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            .white.opacity(0.08),
+                            energyBlueWhite.opacity(0.28),
+                            .clear
+                        ],
+                        center: .center,
+                        startRadius: 10,
+                        endRadius: 64
+                    )
+                )
+                .scaleEffect(1.24)
+                .blur(radius: 15)
 
-            ForEach(0..<24, id: \.self) { index in
-                Capsule()
-                    .fill(index.isMultiple(of: 3) ? hudGold.opacity(0.86) : reactorRed.opacity(0.58))
-                    .frame(width: 2, height: index.isMultiple(of: 3) ? 12 : 7)
-                    .offset(y: -43)
-                    .rotationEffect(.degrees(Double(index) * 15))
+            Circle()
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            hudGold.opacity(0.60),
+                            reactorRed.opacity(0.72),
+                            Color.black.opacity(0.38)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 3.2
+                )
+                .frame(width: 94, height: 94)
+
+            ForEach(0..<12, id: \.self) { index in
+                Circle()
+                    .trim(from: 0.02, to: 0.066)
+                    .stroke(
+                        LinearGradient(
+                            colors: index.isMultiple(of: 4) ? [
+                                hudGold.opacity(0.96),
+                                Color(red: 0.70, green: 0.28, blue: 0.14),
+                                reactorRed.opacity(0.72)
+                            ] : [
+                                Color(red: 0.42, green: 0.12, blue: 0.10),
+                                hudGold.opacity(0.72),
+                                reactorRed.opacity(0.64)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        style: StrokeStyle(
+                            lineWidth: index.isMultiple(of: 4) ? 6.5 : 5.2,
+                            lineCap: .round
+                        )
+                    )
+                    .frame(width: 82, height: 82)
+                    .rotationEffect(.degrees(Double(index) * 30 - 90))
+                    .shadow(
+                        color: index.isMultiple(of: 4) ? hudGold.opacity(0.18) : reactorRed.opacity(0.14),
+                        radius: 2
+                    )
             }
-
-            Circle()
-                .stroke(hudGold.opacity(0.62), lineWidth: 1.4)
-                .frame(width: 86, height: 86)
 
             Circle()
                 .stroke(
                     AngularGradient(
                         colors: [
-                            energyBlueWhite.opacity(0.18),
-                            .white.opacity(0.92),
-                            energyBlueWhite.opacity(0.90),
-                            energyBlueWhite.opacity(0.18)
+                            energyBlueWhite.opacity(0.16),
+                            .white.opacity(0.95),
+                            energyBlueWhite.opacity(0.96),
+                            Color(red: 0.45, green: 0.82, blue: 0.95).opacity(0.68),
+                            energyBlueWhite.opacity(0.16)
                         ],
                         center: .center
                     ),
-                    lineWidth: 5
+                    lineWidth: 4.8
                 )
                 .frame(width: 72, height: 72)
-                .shadow(color: energyBlueWhite.opacity(0.54), radius: 11)
+                .shadow(color: energyBlueWhite.opacity(0.62), radius: 12)
 
             Circle()
-                .stroke(reactorRed.opacity(0.78), lineWidth: 1.2)
-                .frame(width: 54, height: 54)
+                .stroke(energyBlueWhite.opacity(0.24), lineWidth: 1.2)
+                .frame(width: 88, height: 88)
+                .blur(radius: 0.2)
 
-            ForEach(0..<6, id: \.self) { index in
-                Capsule()
+            Circle()
+                .stroke(hudGold.opacity(0.50), lineWidth: 1.2)
+                .frame(width: 62, height: 62)
+
+            ForEach(0..<3, id: \.self) { index in
+                ReactorBraceShape()
                     .fill(
                         LinearGradient(
                             colors: [
-                                .white.opacity(0.94),
-                                energyBlueWhite.opacity(0.70)
+                                Color(red: 0.19, green: 0.06, blue: 0.05),
+                                hudGold.opacity(0.92),
+                                reactorRed.opacity(0.72),
+                                darkMetal.opacity(0.96)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
                         )
                     )
-                    .frame(width: 4, height: 18)
-                    .offset(y: -18)
-                    .rotationEffect(.degrees(Double(index) * 60))
+                    .overlay {
+                        ReactorBraceShape()
+                            .stroke(hudGold.opacity(0.34), lineWidth: 0.8)
+                    }
+                    .frame(width: 28, height: 34)
+                    .offset(y: -15)
+                    .rotationEffect(.degrees(Double(index) * 120))
+                    .shadow(color: reactorRed.opacity(0.24), radius: 4, y: 1)
+            }
+
+            Circle()
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            .white.opacity(0.98),
+                            energyBlueWhite.opacity(0.94),
+                            .white.opacity(0.82),
+                            energyBlueWhite.opacity(0.36)
+                        ],
+                        center: .center
+                    ),
+                    lineWidth: 5.2
+                )
+                .frame(width: 46, height: 46)
+                .shadow(color: energyBlueWhite.opacity(0.68), radius: 9)
+
+            ForEach(0..<6, id: \.self) { index in
+                Circle()
+                    .trim(from: 0.12, to: 0.20)
+                    .stroke(
+                        index.isMultiple(of: 2) ? hudGold.opacity(0.88) : reactorRed.opacity(0.64),
+                        style: StrokeStyle(lineWidth: 2.3, lineCap: .round)
+                    )
+                    .frame(width: 56, height: 56)
+                    .rotationEffect(.degrees(Double(index) * 60 - 90))
             }
 
             Circle()
@@ -339,15 +426,34 @@ struct TinyBuddyWidgetView: View {
                         colors: [
                             .white,
                             energyBlueWhite.opacity(0.96),
-                            Color(red: 0.18, green: 0.50, blue: 0.68).opacity(0.52)
+                            Color(red: 0.18, green: 0.50, blue: 0.68).opacity(0.56),
+                            Color(red: 0.07, green: 0.16, blue: 0.22).opacity(0.28)
                         ],
                         center: .center,
                         startRadius: 1,
-                        endRadius: 20
+                        endRadius: 21
                     )
                 )
-                .frame(width: 30, height: 30)
-                .shadow(color: energyBlueWhite.opacity(0.85), radius: 12)
+                .frame(width: 28, height: 28)
+                .shadow(color: energyBlueWhite.opacity(0.95), radius: 13)
+
+            Circle()
+                .fill(.white.opacity(0.92))
+                .frame(width: 11, height: 11)
+                .blur(radius: 0.5)
+
+            ForEach(0..<3, id: \.self) { index in
+                VStack(spacing: 2) {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(hudGold.opacity(0.92))
+                        .frame(width: 10, height: 1.8)
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(reactorRed.opacity(0.68))
+                        .frame(width: 6, height: 1.4)
+                }
+                .offset(y: -43)
+                .rotationEffect(.degrees(Double(index) * 120))
+            }
         }
         .overlay(alignment: .bottom) {
             Text("CORE")
@@ -403,6 +509,31 @@ struct TinyBuddyWidgetView: View {
                 )
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct ReactorBraceShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let top = CGPoint(x: rect.midX, y: rect.minY)
+        let lowerLeft = CGPoint(x: rect.minX + rect.width * 0.18, y: rect.maxY - rect.height * 0.18)
+        let notch = CGPoint(x: rect.midX, y: rect.maxY - rect.height * 0.38)
+        let lowerRight = CGPoint(x: rect.maxX - rect.width * 0.18, y: rect.maxY - rect.height * 0.18)
+
+        path.move(to: top)
+        path.addLine(to: lowerLeft)
+        path.addQuadCurve(
+            to: notch,
+            control: CGPoint(x: rect.minX + rect.width * 0.34, y: rect.maxY + rect.height * 0.04)
+        )
+        path.addQuadCurve(
+            to: lowerRight,
+            control: CGPoint(x: rect.maxX - rect.width * 0.34, y: rect.maxY + rect.height * 0.04)
+        )
+        path.addLine(to: top)
+        path.closeSubpath()
+
+        return path
     }
 }
 
