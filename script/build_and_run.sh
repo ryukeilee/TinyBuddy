@@ -8,7 +8,6 @@ WIDGET_BUNDLE_ID="com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension"
 WIDGET_EXTENSION_POINT="com.apple.widgetkit-extension"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DERIVED_DATA_DIR="$ROOT_DIR/.build/xcode"
 case "$MODE" in
   release-install|--release-install|release-verify|--release-verify)
     BUILD_CONFIGURATION="${TINYBUDDY_BUILD_CONFIGURATION:-Release}"
@@ -19,6 +18,17 @@ case "$MODE" in
     SIGNING_MODE="${TINYBUDDY_SIGNING_MODE:-unsigned}"
     ;;
 esac
+
+default_derived_data_dir() {
+  if [ "$SIGNING_MODE" = "signed" ]; then
+    local temp_root="${TMPDIR:-/tmp}"
+    printf '%s\n' "${temp_root%/}/TinyBuddyDerivedData"
+  else
+    printf '%s\n' "$ROOT_DIR/.build/xcode"
+  fi
+}
+
+DERIVED_DATA_DIR="${TINYBUDDY_DERIVED_DATA_DIR:-$(default_derived_data_dir)}"
 APP_BUNDLE="$DERIVED_DATA_DIR/Build/Products/$BUILD_CONFIGURATION/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 BUNDLE_ID="com.ryukeili.TinyBuddy"
