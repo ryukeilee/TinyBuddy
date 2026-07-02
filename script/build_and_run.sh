@@ -33,6 +33,19 @@ if command -v xcodegen >/dev/null 2>&1; then
   xcodegen generate --quiet
 fi
 
+patch_swift_objc_header_phase() {
+  local project_file="$ROOT_DIR/TinyBuddy.xcodeproj/project.pbxproj"
+
+  if [ ! -f "$project_file" ]; then
+    return 0
+  fi
+
+  /usr/bin/perl -pi -e 's/ditto \\"\$\{SCRIPT_INPUT_FILE_0\}\\" \\"\$\{SCRIPT_OUTPUT_FILE_0\}\\"/cp \\"\$\{SCRIPT_INPUT_FILE_0\}\\" \\"\$\{SCRIPT_OUTPUT_FILE_0\}\\"/g' "$project_file"
+
+}
+
+patch_swift_objc_header_phase
+
 SIGNING_ARGS=()
 case "$SIGNING_MODE" in
   signed)
