@@ -10,6 +10,7 @@ final class GitActivityRefreshCoordinator {
     typealias AuthorizedRootsProvider = () -> [ScopedGitScanRoot]
 
     private let activityStore: GitTodayActivityStore
+    private let refreshStatusStore: GitActivityRefreshStatusStore
     private let widgetReloader: () -> Void
     private let scriptRunner: ScriptRunner
     private let scriptURLProvider: ScriptURLProvider
@@ -30,6 +31,7 @@ final class GitActivityRefreshCoordinator {
 
     init(
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
+        refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
         gitScanRootStore: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
         refreshInterval: TimeInterval = 5 * 60,
         minimumRefreshSpacing: TimeInterval = 60,
@@ -44,6 +46,7 @@ final class GitActivityRefreshCoordinator {
         wakeRefreshCoalescingInterval: TimeInterval = 5
     ) {
         self.activityStore = activityStore
+        self.refreshStatusStore = refreshStatusStore
         self.refreshInterval = refreshInterval
         self.minimumRefreshSpacing = minimumRefreshSpacing
         self.widgetReloader = widgetReloader
@@ -132,11 +135,23 @@ final class GitActivityRefreshCoordinator {
 
         if isRefreshing {
             pendingWakeRefreshTrigger = trigger
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .skipped,
+                reason: "refresh already in progress"
+            )
             return
         }
 
         if let lastWakeRefreshAt,
            now.timeIntervalSince(lastWakeRefreshAt) < wakeRefreshCoalescingInterval {
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .skipped,
+                reason: "wake refresh coalesced"
+            )
             return
         }
 
@@ -163,14 +178,32 @@ final class GitActivityRefreshCoordinator {
         let now = dateProvider()
 
         guard force || shouldRefresh(at: now) else {
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .skipped,
+                reason: "minimum refresh spacing not reached"
+            )
             return false
         }
 
         guard !isRefreshing else {
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .skipped,
+                reason: "refresh already in progress"
+            )
             return false
         }
 
         guard let scriptURL = scriptURLProvider() else {
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .failed,
+                reason: "missing git refresh script"
+            )
             NSLog("TinyBuddy: missing git refresh script for trigger %@", String(describing: trigger))
             return false
         }
@@ -178,6 +211,12 @@ final class GitActivityRefreshCoordinator {
         let scopedRoots = authorizedRootsProvider()
         let authorizedRootURLs = scopedRoots.map(\.url)
         guard !authorizedRootURLs.isEmpty else {
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .skipped,
+                reason: "no authorized Git scan roots"
+            )
             NSLog("TinyBuddy: skipping git refresh for trigger %@ because no Git scan roots are authorized", String(describing: trigger))
             scopedRoots.forEach { $0.stopAccessing() }
             return false
@@ -215,6 +254,13 @@ final class GitActivityRefreshCoordinator {
                     ) {
                         self.widgetReloader()
                     }
+
+                    self.recordRefreshStatus(
+                        refreshedAt: now,
+                        trigger: trigger,
+                        outcome: .succeeded,
+                        reason: nil
+                    )
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -222,6 +268,12 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
+                    self.recordRefreshStatus(
+                        refreshedAt: now,
+                        trigger: trigger,
+                        outcome: .failed,
+                        reason: self.summarizedReason(from: error)
+                    )
                     self.finishRefresh()
                     NSLog("TinyBuddy: git refresh failed for trigger %@: %@", String(describing: trigger), error.localizedDescription)
                 }
@@ -237,6 +289,50 @@ final class GitActivityRefreshCoordinator {
         }
 
         return now.timeIntervalSince(lastRefreshAttemptAt) >= minimumRefreshSpacing
+    }
+
+    private func recordRefreshStatus(
+        refreshedAt: Date,
+        trigger: GitTodayActivityRefreshTrigger,
+        outcome: GitActivityRefreshOutcome,
+        reason: String?
+    ) {
+        refreshStatusStore.save(
+            GitActivityRefreshStatus(
+                refreshedAt: refreshedAt,
+                trigger: trigger,
+                outcome: outcome,
+                reason: summarizedReason(reason)
+            )
+        )
+    }
+
+    private func summarizedReason(from error: Error) -> String? {
+        summarizedReason(error.localizedDescription)
+    }
+
+    private func summarizedReason(_ reason: String?) -> String? {
+        guard let reason else {
+            return nil
+        }
+
+        let singleLineReason = reason
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let singleLineReason, !singleLineReason.isEmpty else {
+            return nil
+        }
+
+        let maxLength = 160
+        guard singleLineReason.count > maxLength else {
+            return singleLineReason
+        }
+
+        let endIndex = singleLineReason.index(singleLineReason.startIndex, offsetBy: maxLength)
+        return String(singleLineReason[..<endIndex])
     }
 
     private static func locateRefreshScript() -> URL? {

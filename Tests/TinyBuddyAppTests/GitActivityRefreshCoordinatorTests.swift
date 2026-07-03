@@ -12,6 +12,15 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.scriptRunCount, 0)
         XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(
+            harness.lastRefreshStatus,
+            GitActivityRefreshStatus(
+                refreshedAt: harness.currentDate,
+                trigger: .becameActive,
+                outcome: .skipped,
+                reason: "no authorized Git scan roots"
+            )
+        )
     }
 
     func testRefreshPassesAuthorizedGitScanRootsToScript() {
@@ -39,6 +48,42 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.scriptRunCount, 1)
         XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(
+            harness.lastRefreshStatus,
+            GitActivityRefreshStatus(
+                refreshedAt: harness.currentDate,
+                trigger: .becameActive,
+                outcome: .succeeded
+            )
+        )
+    }
+
+    func testRefreshFailureRecordsFailedStatusWithSummarizedReason() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { _ in
+            struct ScriptFailure: LocalizedError {
+                var errorDescription: String? {
+                    "refresh script exited with status 1:\nfull stderr details"
+                }
+            }
+
+            throw ScriptFailure()
+        }
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(
+            harness.lastRefreshStatus,
+            GitActivityRefreshStatus(
+                refreshedAt: harness.currentDate,
+                trigger: .becameActive,
+                outcome: .failed,
+                reason: "refresh script exited with status 1:"
+            )
+        )
     }
 
     func testStartTriggersLaunchRefreshAndWidgetReload() {
@@ -172,6 +217,51 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
+    func testFailedRefreshDoesNotOverwriteQueuedWakeRefreshStatus() {
+        let harness = makeHarness()
+        let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 2 else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                harness.authorizedRoots = []
+                harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+                queuedWakeNotificationPosted.fulfill()
+            }
+
+            struct ScriptFailure: LocalizedError {
+                var errorDescription: String? {
+                    "refresh script exited with status 1"
+                }
+            }
+
+            throw ScriptFailure()
+        }
+
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        wait(for: [queuedWakeNotificationPosted], timeout: 1.0)
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(
+            harness.lastRefreshStatus,
+            GitActivityRefreshStatus(
+                refreshedAt: harness.currentDate,
+                trigger: .sessionDidBecomeActive,
+                outcome: .skipped,
+                reason: "no authorized Git scan roots"
+            )
+        )
+    }
+
     private func makeHarness(
         authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
     ) -> RefreshHarness {
@@ -185,6 +275,7 @@ private final class RefreshHarness {
     private let refreshExpectationQueue = DispatchQueue(label: "TinyBuddyTests.RefreshHarness")
     private let workspaceNotificationCenter = NotificationCenter()
     private var pendingRefreshExpectation: XCTestExpectation?
+    private let refreshStatusStore: GitActivityRefreshStatusStore
 
     let coordinator: GitActivityRefreshCoordinator
 
@@ -194,6 +285,7 @@ private final class RefreshHarness {
         self.state.authorizedRoots = authorizedRoots
 
         let defaults = UserDefaults(suiteName: "TinyBuddyAppTests.\(UUID().uuidString)")!
+        self.refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
         let calendar = Self.makeCalendar()
         let activityStore = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(
@@ -215,6 +307,7 @@ private final class RefreshHarness {
 
         self.coordinator = GitActivityRefreshCoordinator(
             activityStore: activityStore,
+            refreshStatusStore: refreshStatusStore,
             refreshInterval: 300,
             minimumRefreshSpacing: 60,
             widgetReloader: { [weak testCase, state] in
@@ -229,7 +322,7 @@ private final class RefreshHarness {
             scriptRunner: { [state] _, rootURLs in
                 state.scriptRunCount += 1
                 state.capturedRootPaths = rootURLs.map(\.standardizedFileURL.path)
-                state.scriptRunnerHook?(state.scriptRunCount)
+                try state.scriptRunnerHook?(state.scriptRunCount)
             },
             authorizedRootsProvider: { [state] in
                 state.authorizedRoots.map { url in
@@ -252,6 +345,8 @@ private final class RefreshHarness {
     var widgetReloadCount: Int { state.widgetReloadCount }
     var capturedRootPaths: [String] { state.capturedRootPaths }
     var stopAccessCount: Int { state.stopAccessCount }
+    var currentDate: Date { state.currentDate }
+    var lastRefreshStatus: GitActivityRefreshStatus? { refreshStatusStore.load() }
     var authorizedRoots: [URL] {
         get { state.authorizedRoots }
         set { state.authorizedRoots = newValue }
@@ -261,7 +356,7 @@ private final class RefreshHarness {
         workspaceNotificationCenter.post(name: name, object: nil)
     }
 
-    func setScriptRunnerHook(_ hook: @escaping (Int) -> Void) {
+    func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
         state.scriptRunnerHook = hook
     }
 
@@ -354,7 +449,7 @@ private final class RefreshHarness {
         var stopAccessCount = 0
         var expectedWidgetReloadCount = 0
         var onWidgetReload: ((Int) -> Void)?
-        var scriptRunnerHook: ((Int) -> Void)?
+        var scriptRunnerHook: ((Int) throws -> Void)?
 
         init(currentDate: Date) {
             self.currentDate = currentDate

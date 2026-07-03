@@ -1,6 +1,6 @@
 import Foundation
 
-public enum GitTodayActivityRefreshTrigger: Equatable, Sendable {
+public enum GitTodayActivityRefreshTrigger: String, Equatable, Sendable {
     case launch
     case becameActive
     case reopen
