@@ -98,6 +98,15 @@ final class GitTodayActivityStoreTests: XCTestCase {
         XCTAssertTrue(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .reopen, didChange: false)
         )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .didWake, didChange: false)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .screensDidWake, didChange: false)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .sessionDidBecomeActive, didChange: false)
+        )
     }
 
     func testRefreshPolicyOnlyReloadsTimerWhenGitActivityActuallyChanged() {

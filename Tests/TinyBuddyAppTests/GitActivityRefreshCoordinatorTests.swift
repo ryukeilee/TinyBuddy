@@ -1,6 +1,7 @@
 import XCTest
 @testable import TinyBuddy
 @testable import TinyBuddyCore
+import Foundation
 
 final class GitActivityRefreshCoordinatorTests: XCTestCase {
     func testRefreshSkipsScriptWhenNoGitScanRootsAreAuthorized() {
@@ -62,6 +63,115 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
+    func testDidWakeNotificationTriggersRefreshAndWidgetReload() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
+    func testScreensDidWakeNotificationTriggersRefreshAndWidgetReload() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.postWorkspaceNotification(named: NSWorkspace.screensDidWakeNotification)
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
+    func testSessionDidBecomeActiveNotificationTriggersRefreshAndWidgetReload() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
+    func testWakeNotificationBurstQueuesAtMostOneFollowUpRefresh() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.performAndWaitForWidgetReloadCount(3) {
+            harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+            harness.postWorkspaceNotification(named: NSWorkspace.screensDidWakeNotification)
+            harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 3)
+        XCTAssertEqual(harness.widgetReloadCount, 3)
+    }
+
+    func testWakeNotificationDuringRefreshQueuesOneFollowUpRefresh() {
+        let harness = makeHarness()
+        let allowWakeRefreshToFinish = DispatchSemaphore(value: 0)
+        let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 2 else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+                queuedWakeNotificationPosted.fulfill()
+            }
+            allowWakeRefreshToFinish.wait()
+        }
+
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        wait(for: [queuedWakeNotificationPosted], timeout: 1.0)
+        allowWakeRefreshToFinish.signal()
+        harness.waitForWidgetReloadCount(3)
+
+        XCTAssertEqual(harness.scriptRunCount, 3)
+        XCTAssertEqual(harness.widgetReloadCount, 3)
+    }
+
+    func testWakeNotificationRetriesWhenFirstWakeRefreshCannotStart() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+
+        harness.authorizedRoots = []
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+
+        harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
     private func makeHarness(
         authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
     ) -> RefreshHarness {
@@ -73,6 +183,7 @@ private final class RefreshHarness {
     private let testCase: XCTestCase
     private let state: State
     private let refreshExpectationQueue = DispatchQueue(label: "TinyBuddyTests.RefreshHarness")
+    private let workspaceNotificationCenter = NotificationCenter()
     private var pendingRefreshExpectation: XCTestExpectation?
 
     let coordinator: GitActivityRefreshCoordinator
@@ -118,6 +229,7 @@ private final class RefreshHarness {
             scriptRunner: { [state] _, rootURLs in
                 state.scriptRunCount += 1
                 state.capturedRootPaths = rootURLs.map(\.standardizedFileURL.path)
+                state.scriptRunnerHook?(state.scriptRunCount)
             },
             authorizedRootsProvider: { [state] in
                 state.authorizedRoots.map { url in
@@ -128,7 +240,8 @@ private final class RefreshHarness {
             },
             dateProvider: { [state] in
                 state.currentDate
-            }
+            },
+            workspaceNotificationCenter: workspaceNotificationCenter
         )
         state.onWidgetReload = { [weak self] _ in
             self?.fulfillPendingRefreshExpectation()
@@ -139,13 +252,49 @@ private final class RefreshHarness {
     var widgetReloadCount: Int { state.widgetReloadCount }
     var capturedRootPaths: [String] { state.capturedRootPaths }
     var stopAccessCount: Int { state.stopAccessCount }
+    var authorizedRoots: [URL] {
+        get { state.authorizedRoots }
+        set { state.authorizedRoots = newValue }
+    }
+
+    func postWorkspaceNotification(named name: Notification.Name) {
+        workspaceNotificationCenter.post(name: name, object: nil)
+    }
+
+    func setScriptRunnerHook(_ hook: @escaping (Int) -> Void) {
+        state.scriptRunnerHook = hook
+    }
 
     func performAndWaitForRefresh(_ action: () -> Void) {
+        performAndWaitForWidgetReloadCount(1, action: action)
+    }
+
+    func performAndWaitForWidgetReloadCount(_ expectedReloadCount: Int, action: () -> Void) {
         let expectation = testCase.expectation(description: "refresh completed")
         refreshExpectationQueue.sync {
             pendingRefreshExpectation = expectation
+            state.expectedWidgetReloadCount = expectedReloadCount
+            if state.widgetReloadCount >= expectedReloadCount {
+                expectation.fulfill()
+                pendingRefreshExpectation = nil
+                state.expectedWidgetReloadCount = 0
+            }
         }
         action()
+        testCase.wait(for: [expectation], timeout: 1.0)
+    }
+
+    func waitForWidgetReloadCount(_ expectedReloadCount: Int) {
+        let expectation = testCase.expectation(description: "refresh count \(expectedReloadCount)")
+        refreshExpectationQueue.sync {
+            pendingRefreshExpectation = expectation
+            state.expectedWidgetReloadCount = expectedReloadCount
+            if state.widgetReloadCount >= expectedReloadCount {
+                expectation.fulfill()
+                pendingRefreshExpectation = nil
+                state.expectedWidgetReloadCount = 0
+            }
+        }
         testCase.wait(for: [expectation], timeout: 1.0)
     }
 
@@ -163,8 +312,17 @@ private final class RefreshHarness {
 
     private func fulfillPendingRefreshExpectation() {
         refreshExpectationQueue.sync {
-            pendingRefreshExpectation?.fulfill()
+            guard let expectation = pendingRefreshExpectation else {
+                return
+            }
+
+            guard state.widgetReloadCount >= state.expectedWidgetReloadCount else {
+                return
+            }
+
+            expectation.fulfill()
             pendingRefreshExpectation = nil
+            state.expectedWidgetReloadCount = 0
         }
     }
 
@@ -194,7 +352,9 @@ private final class RefreshHarness {
         var scriptRunCount = 0
         var widgetReloadCount = 0
         var stopAccessCount = 0
+        var expectedWidgetReloadCount = 0
         var onWidgetReload: ((Int) -> Void)?
+        var scriptRunnerHook: ((Int) -> Void)?
 
         init(currentDate: Date) {
             self.currentDate = currentDate

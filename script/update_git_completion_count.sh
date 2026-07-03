@@ -19,6 +19,9 @@ PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 total_count=0
 latest_activity_timestamp=""
 recent_project_name=""
+readable_reflog_repo_count=0
+successful_reflog_repo_count=0
+failed_reflog_repo_count=0
 scan_roots_file="$(mktemp)"
 valid_scan_roots_file=""
 repo_list_file="$(mktemp)"
@@ -246,34 +249,58 @@ while IFS= read -r repo_root; do
   if [ ! -r "$reflog_path" ]; then
     continue
   fi
+  if [ ! -f "$reflog_path" ]; then
+    readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
+    failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+    log_error "git reflog path is not a regular file for one repository; preserving previous shared data"
+    continue
+  fi
 
+  readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
   repo_count=0
   repo_latest_timestamp=""
   : > "$repo_reflog_file"
-  git --git-dir="$git_dir" --work-tree="$repo_root" \
-    reflog show HEAD --date=iso-strict-local --format='%gd%x09%gs' 2>/dev/null | awk -F '\t' -v today="$TODAY" '
-      $1 ~ ("^HEAD@\\{" today "T") && $2 ~ /^commit( \(.+\))?:|^merge([[:space:]][^:]*)?:/ {
-        count++
-        timestamp = $1
-        sub(/^HEAD@\{/, "", timestamp)
-        sub(/\}$/, "", timestamp)
-        if (timestamp > latest) {
-          latest = timestamp
-        }
-        split(timestamp, parts, "T")
-        split(parts[2], timeParts, ":")
-        hour = timeParts[1] + 0
-        minute = timeParts[2] + 0
-        blockMinute = (minute >= 30) ? 30 : 0
-        printf "BLOCK\t%sT%02d:%02d\n", today, hour, blockMinute
+  if ! perl -MPOSIX=strftime -e '
+      use strict;
+      use warnings;
+
+      my $today = shift @ARGV;
+      my $count = 0;
+      my $latest_epoch = 0;
+
+      while (my $line = <>) {
+          chomp $line;
+          my ($metadata, $message) = split /\t/, $line, 2;
+          next unless defined $message;
+          next unless $message =~ /^commit( \(.+\))?:|^merge(\s+[^:]*)?:/;
+
+          my @parts = split / /, $metadata;
+          next if @parts < 2;
+
+          my $epoch = $parts[-2];
+          next unless defined $epoch && $epoch =~ /^\d+$/;
+
+          my @local = localtime($epoch);
+          my $day_identifier = sprintf("%04d-%02d-%02d", $local[5] + 1900, $local[4] + 1, $local[3]);
+          next unless $day_identifier eq $today;
+
+          $count++;
+          $latest_epoch = $epoch if $epoch > $latest_epoch;
+
+          my $block_minute = $local[1] >= 30 ? 30 : 0;
+          printf "BLOCK\t%sT%02d:%02d\n", $day_identifier, $local[2], $block_minute;
       }
-      END {
-        printf "COUNT\t%d\n", count + 0
-        if (latest != "") {
-          printf "LATEST\t%s\n", latest
-        }
+
+      printf "COUNT\t%d\n", $count;
+      if ($latest_epoch > 0) {
+          printf "LATEST\t%s\n", strftime("%Y-%m-%dT%H:%M:%S%z", localtime($latest_epoch));
       }
-    ' > "$repo_reflog_file"
+    ' "$TODAY" "$reflog_path" > "$repo_reflog_file"; then
+    failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+    log_error "failed to parse git reflog for one repository; preserving previous shared data"
+    continue
+  fi
+  successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
 
   while IFS=$'\t' read -r record_kind record_value; do
     case "$record_kind" in
@@ -303,6 +330,18 @@ if [ ! -s "$repo_list_file" ]; then
   emit_runtime_diagnostics_once
   log_error "no git repositories discovered under authorized roots"
   emit_find_stderr_sample
+fi
+
+if [ "$readable_reflog_repo_count" -gt 0 ] && [ "$successful_reflog_repo_count" -eq 0 ]; then
+  emit_runtime_diagnostics_once
+  log_error "failed to read git reflog for every readable repository; preserving previous shared data"
+  exit 1
+fi
+
+if [ "$failed_reflog_repo_count" -gt 0 ]; then
+  emit_runtime_diagnostics_once
+  log_error "failed to parse one or more readable git reflogs; preserving previous shared data"
+  exit 1
 fi
 
 /bin/mkdir -p "$APP_GROUP_PREFERENCES_DIR"

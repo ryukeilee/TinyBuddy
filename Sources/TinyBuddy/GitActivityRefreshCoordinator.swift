@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TinyBuddyCore
 import WidgetKit
@@ -14,13 +15,18 @@ final class GitActivityRefreshCoordinator {
     private let scriptURLProvider: ScriptURLProvider
     private let authorizedRootsProvider: AuthorizedRootsProvider
     private let dateProvider: () -> Date
+    private let workspaceNotificationCenter: NotificationCenter
     private let refreshInterval: TimeInterval
     private let minimumRefreshSpacing: TimeInterval
+    private let wakeRefreshCoalescingInterval: TimeInterval
     private let refreshQueue = DispatchQueue(label: "TinyBuddy.GitActivityRefresh", qos: .utility)
 
     private var timer: Timer?
+    private var workspaceNotificationObservers: [NSObjectProtocol] = []
     private var isRefreshing = false
     private var lastRefreshAttemptAt: Date?
+    private var lastWakeRefreshAt: Date?
+    private var pendingWakeRefreshTrigger: GitTodayActivityRefreshTrigger?
 
     init(
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
@@ -33,7 +39,9 @@ final class GitActivityRefreshCoordinator {
         scriptURLProvider: @escaping ScriptURLProvider = GitActivityRefreshCoordinator.locateRefreshScript,
         scriptRunner: @escaping ScriptRunner = GitActivityRefreshCoordinator.runScript(at:scanningRoots:),
         authorizedRootsProvider: AuthorizedRootsProvider? = nil,
-        dateProvider: @escaping () -> Date = Date.init
+        dateProvider: @escaping () -> Date = Date.init,
+        workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+        wakeRefreshCoalescingInterval: TimeInterval = 5
     ) {
         self.activityStore = activityStore
         self.refreshInterval = refreshInterval
@@ -43,9 +51,12 @@ final class GitActivityRefreshCoordinator {
         self.scriptRunner = scriptRunner
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRoots
         self.dateProvider = dateProvider
+        self.workspaceNotificationCenter = workspaceNotificationCenter
+        self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
     }
 
     func start() {
+        registerWorkspaceNotificationsIfNeeded()
         scheduleTimerIfNeeded()
         refresh(trigger: .launch, force: true)
     }
@@ -56,6 +67,22 @@ final class GitActivityRefreshCoordinator {
 
     func handleReopen() {
         refresh(trigger: .reopen, force: true)
+    }
+
+    func handleDidWake() {
+        requestWakeRefresh(trigger: .didWake)
+    }
+
+    func handleScreensDidWake() {
+        requestWakeRefresh(trigger: .screensDidWake)
+    }
+
+    func handleSessionDidBecomeActive() {
+        requestWakeRefresh(trigger: .sessionDidBecomeActive)
+    }
+
+    deinit {
+        workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
     }
 
     private func scheduleTimerIfNeeded() {
@@ -70,20 +97,82 @@ final class GitActivityRefreshCoordinator {
         }
     }
 
-    private func refresh(trigger: GitTodayActivityRefreshTrigger, force: Bool = false) {
-        let now = dateProvider()
-
-        guard force || shouldRefresh(at: now) else {
+    private func registerWorkspaceNotificationsIfNeeded() {
+        guard workspaceNotificationObservers.isEmpty else {
             return
         }
 
-        guard !isRefreshing else {
+        workspaceNotificationObservers = [
+            workspaceNotificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.handleDidWake()
+            },
+            workspaceNotificationCenter.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.handleScreensDidWake()
+            },
+            workspaceNotificationCenter.addObserver(
+                forName: NSWorkspace.sessionDidBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.handleSessionDidBecomeActive()
+            }
+        ]
+    }
+
+    private func requestWakeRefresh(trigger: GitTodayActivityRefreshTrigger) {
+        let now = dateProvider()
+
+        if isRefreshing {
+            pendingWakeRefreshTrigger = trigger
             return
+        }
+
+        if let lastWakeRefreshAt,
+           now.timeIntervalSince(lastWakeRefreshAt) < wakeRefreshCoalescingInterval {
+            return
+        }
+
+        if refresh(trigger: trigger, force: true) {
+            lastWakeRefreshAt = now
+        }
+    }
+
+    private func finishRefresh() {
+        isRefreshing = false
+
+        guard let pendingWakeRefreshTrigger else {
+            return
+        }
+
+        self.pendingWakeRefreshTrigger = nil
+        if refresh(trigger: pendingWakeRefreshTrigger, force: true) {
+            lastWakeRefreshAt = dateProvider()
+        }
+    }
+
+    @discardableResult
+    private func refresh(trigger: GitTodayActivityRefreshTrigger, force: Bool = false) -> Bool {
+        let now = dateProvider()
+
+        guard force || shouldRefresh(at: now) else {
+            return false
+        }
+
+        guard !isRefreshing else {
+            return false
         }
 
         guard let scriptURL = scriptURLProvider() else {
             NSLog("TinyBuddy: missing git refresh script for trigger %@", String(describing: trigger))
-            return
+            return false
         }
 
         let scopedRoots = authorizedRootsProvider()
@@ -91,7 +180,7 @@ final class GitActivityRefreshCoordinator {
         guard !authorizedRootURLs.isEmpty else {
             NSLog("TinyBuddy: skipping git refresh for trigger %@ because no Git scan roots are authorized", String(describing: trigger))
             scopedRoots.forEach { $0.stopAccessing() }
-            return
+            return false
         }
 
         isRefreshing = true
@@ -112,7 +201,7 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     defer {
-                        self.isRefreshing = false
+                        self.finishRefresh()
                     }
 
                     let currentSnapshot = self.activityStore.loadTodaySnapshot()
@@ -133,11 +222,13 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    self.isRefreshing = false
+                    self.finishRefresh()
                     NSLog("TinyBuddy: git refresh failed for trigger %@: %@", String(describing: trigger), error.localizedDescription)
                 }
             }
         }
+
+        return true
     }
 
     private func shouldRefresh(at now: Date) -> Bool {
