@@ -57,6 +57,53 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 77)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "PreviousProject")
     }
+
+    func testScriptSkipsSharedDataRewriteWhenSnapshotDidNotChange() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': result")
+            ]
+        )
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.standardOutput.contains("TinyBuddy git shared data unchanged; skipped plist rewrite"))
+    }
+
+    func testScriptRewritesNumericStringsBackToIntegerSharedData() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': result")
+            ]
+        )
+        try harness.seedPreferencesPlist([
+            "tinybuddy.gitTodayCommitCount.dayIdentifier": harness.todayIdentifier,
+            "tinybuddy.gitTodayCommitCount.count": "2",
+            "tinybuddy.gitTodayFocusBlockCount.dayIdentifier": harness.todayIdentifier,
+            "tinybuddy.gitTodayFocusBlockCount.count": "2",
+            "tinybuddy.gitTodayRecentProject.dayIdentifier": harness.todayIdentifier,
+            "tinybuddy.gitTodayRecentProject.projectName": "ProjectAlpha"
+        ])
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(plist["tinybuddy.gitTodayCommitCount.count"] is Int)
+        XCTAssertTrue(plist["tinybuddy.gitTodayFocusBlockCount.count"] is Int)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+    }
 }
 
 private struct ScriptHarness {

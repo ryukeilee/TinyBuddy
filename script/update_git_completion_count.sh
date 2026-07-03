@@ -31,6 +31,7 @@ repo_git_paths_file="$(mktemp)"
 find_stderr_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
 diagnostics_emitted=0
+shared_data_rewritten=0
 
 log_error() {
   echo "TinyBuddy refresh script: $*" >&2
@@ -158,6 +159,63 @@ write_plist_integer() {
   /usr/bin/defaults write "$APP_GROUP_PREFERENCES_PLIST" "$key" -int "$value"
 }
 
+plist_integer_matches() {
+  local key="$1"
+  local value="$2"
+  local extracted_value
+
+  if ! extracted_value="$(/usr/bin/plutil -p "$APP_GROUP_PREFERENCES_PLIST" 2>/dev/null | awk -v key="$key" '
+      index($0, "\"" key "\" => ") {
+        sub(/^.*=> /, "", $0)
+        print
+        exit
+      }
+    ')"; then
+    return 1
+  fi
+
+  [ "$extracted_value" = "$value" ]
+}
+
+read_plist_value() {
+  local key="$1"
+  local value
+
+  if ! value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP_GROUP_PREFERENCES_PLIST" 2>/dev/null)"; then
+    return 1
+  fi
+
+  printf '%s\n' "$value"
+}
+
+write_plist_string_if_changed() {
+  local key="$1"
+  local value="$2"
+  local current_value=""
+
+  if current_value="$(read_plist_value "$key")" && [ "$current_value" = "$value" ]; then
+    return
+  fi
+
+  shared_data_rewritten=1
+  write_plist_string "$key" "$value"
+}
+
+write_plist_integer_if_changed() {
+  local key="$1"
+  local value="$2"
+  local current_value=""
+
+  if current_value="$(read_plist_value "$key")" &&
+     [ "$current_value" = "$value" ] &&
+     plist_integer_matches "$key" "$value"; then
+    return
+  fi
+
+  shared_data_rewritten=1
+  write_plist_integer "$key" "$value"
+}
+
 handle_error() {
   local exit_code="$1"
   local line_number="$2"
@@ -227,7 +285,7 @@ while IFS= read -r scan_root; do
 done < "$scan_roots_file"
 
 while IFS= read -r -d '' git_path; do
-  dirname "$git_path"
+  printf '%s\n' "${git_path%/.git}"
 done < "$repo_git_paths_file" > "$repo_scan_file"
 
 if [ "$find_exit_code" -ne 0 ]; then
@@ -349,12 +407,16 @@ if [ ! -f "$APP_GROUP_PREFERENCES_PLIST" ]; then
   /usr/bin/plutil -create xml1 "$APP_GROUP_PREFERENCES_PLIST"
 fi
 
-write_plist_string "$DAY_KEY" "$TODAY"
-write_plist_integer "$COUNT_KEY" "$total_count"
-write_plist_string "$FOCUS_BLOCK_DAY_KEY" "$TODAY"
-write_plist_integer "$FOCUS_BLOCK_COUNT_KEY" "$focus_block_count"
-write_plist_string "$RECENT_PROJECT_DAY_KEY" "$TODAY"
-write_plist_string "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
+write_plist_string_if_changed "$DAY_KEY" "$TODAY"
+write_plist_integer_if_changed "$COUNT_KEY" "$total_count"
+write_plist_string_if_changed "$FOCUS_BLOCK_DAY_KEY" "$TODAY"
+write_plist_integer_if_changed "$FOCUS_BLOCK_COUNT_KEY" "$focus_block_count"
+write_plist_string_if_changed "$RECENT_PROJECT_DAY_KEY" "$TODAY"
+write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
+
+if [ "$shared_data_rewritten" -eq 0 ]; then
+  echo "TinyBuddy git shared data unchanged; skipped plist rewrite"
+fi
 
 echo "Updated TinyBuddy git completion count: $total_count"
 echo "Updated TinyBuddy git focus block count: $focus_block_count"
