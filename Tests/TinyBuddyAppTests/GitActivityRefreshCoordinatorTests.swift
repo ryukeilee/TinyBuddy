@@ -58,6 +58,71 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
+    func testRefreshMirrorsGitActivitySnapshotToStandardDefaults() {
+        withRestoredStandardDefaults(keys: mirroredGitActivityKeys) {
+            let harness = makeHarness()
+            harness.setActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "  TinyBuddy  ")
+
+            harness.performAndWaitForRefresh {
+                harness.coordinator.handleDidBecomeActive()
+            }
+
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier),
+                harness.currentDayIdentifier
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.integer(forKey: GitTodayFocusBlockCountStore.Key.count),
+                4
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayCommitCountStore.Key.dayIdentifier),
+                harness.currentDayIdentifier
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.integer(forKey: GitTodayCommitCountStore.Key.count),
+                7
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.dayIdentifier),
+                harness.currentDayIdentifier
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.projectName),
+                "TinyBuddy"
+            )
+
+            harness.setActivitySnapshot(focusBlockCount: nil, commitCount: nil, recentProjectName: nil)
+            harness.performAndWaitForWidgetReloadCount(2) {
+                harness.coordinator.handleReopen()
+            }
+
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier),
+                harness.currentDayIdentifier
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.integer(forKey: GitTodayFocusBlockCountStore.Key.count),
+                0
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayCommitCountStore.Key.dayIdentifier),
+                harness.currentDayIdentifier
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.integer(forKey: GitTodayCommitCountStore.Key.count),
+                0
+            )
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.dayIdentifier),
+                harness.currentDayIdentifier
+            )
+            XCTAssertNil(
+                UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.projectName)
+            )
+        }
+    }
+
     func testRefreshFailureRecordsFailedStatusWithSummarizedReason() {
         let harness = makeHarness()
         harness.setScriptRunnerHook { _ in
@@ -267,6 +332,43 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
     ) -> RefreshHarness {
         RefreshHarness(testCase: self, authorizedRoots: authorizedRoots)
     }
+
+    private var mirroredGitActivityKeys: [String] {
+        [
+            GitTodayFocusBlockCountStore.Key.dayIdentifier,
+            GitTodayFocusBlockCountStore.Key.count,
+            GitTodayCommitCountStore.Key.dayIdentifier,
+            GitTodayCommitCountStore.Key.count,
+            GitTodayRecentProjectStore.Key.dayIdentifier,
+            GitTodayRecentProjectStore.Key.projectName
+        ]
+    }
+
+    private func withRestoredStandardDefaults(
+        keys: [String],
+        operation: () -> Void
+    ) {
+        let defaults = UserDefaults.standard
+        let originalValues = Dictionary(uniqueKeysWithValues: keys.map { key in
+            (key, defaults.object(forKey: key))
+        })
+
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        defaults.synchronize()
+
+        defer {
+            for key in keys {
+                if let value = originalValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+            defaults.synchronize()
+        }
+
+        operation()
+    }
 }
 
 private final class RefreshHarness {
@@ -276,6 +378,8 @@ private final class RefreshHarness {
     private let workspaceNotificationCenter = NotificationCenter()
     private var pendingRefreshExpectation: XCTestExpectation?
     private let refreshStatusStore: GitActivityRefreshStatusStore
+    private let activityDefaults: UserDefaults
+    private let calendar: Calendar
 
     let coordinator: GitActivityRefreshCoordinator
 
@@ -285,8 +389,10 @@ private final class RefreshHarness {
         self.state.authorizedRoots = authorizedRoots
 
         let defaults = UserDefaults(suiteName: "TinyBuddyAppTests.\(UUID().uuidString)")!
+        self.activityDefaults = defaults
         self.refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
         let calendar = Self.makeCalendar()
+        self.calendar = calendar
         let activityStore = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(
                 userDefaults: defaults,
@@ -349,6 +455,7 @@ private final class RefreshHarness {
     var capturedRootPaths: [String] { state.capturedRootPaths }
     var stopAccessCount: Int { state.stopAccessCount }
     var currentDate: Date { state.currentDate }
+    var currentDayIdentifier: String { Self.dayIdentifier(for: currentDate, calendar: calendar) }
     var lastRefreshStatus: GitActivityRefreshStatus? { refreshStatusStore.load() }
     var authorizedRoots: [URL] {
         get { state.authorizedRoots }
@@ -361,6 +468,35 @@ private final class RefreshHarness {
 
     func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
         state.scriptRunnerHook = hook
+    }
+
+    func setActivitySnapshot(
+        focusBlockCount: Int?,
+        commitCount: Int?,
+        recentProjectName: String?
+    ) {
+        let focusStore = GitTodayFocusBlockCountStore(
+            userDefaults: activityDefaults,
+            calendar: calendar,
+            dateProvider: { self.currentDate },
+            sharedFallbacksEnabled: false
+        )
+        let commitStore = GitTodayCommitCountStore(
+            userDefaults: activityDefaults,
+            calendar: calendar,
+            dateProvider: { self.currentDate },
+            sharedFallbacksEnabled: false
+        )
+        let recentProjectStore = GitTodayRecentProjectStore(
+            userDefaults: activityDefaults,
+            calendar: calendar,
+            dateProvider: { self.currentDate },
+            sharedFallbacksEnabled: false
+        )
+
+        focusStore.saveTodayCount(focusBlockCount ?? 0)
+        commitStore.saveTodayCount(commitCount ?? 0)
+        recentProjectStore.saveTodayProjectName(recentProjectName)
     }
 
     func performAndWaitForRefresh(_ action: () -> Void) {
@@ -441,6 +577,14 @@ private final class RefreshHarness {
         components.minute = 0
         components.second = second
         return components.date!
+    }
+
+    private static func dayIdentifier(for date: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let year = components.year ?? 0
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     private final class State {

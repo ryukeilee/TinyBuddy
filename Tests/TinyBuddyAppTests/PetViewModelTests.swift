@@ -173,6 +173,73 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "还没有可用的 Git 目录授权，暂时无法刷新。")
     }
 
+    func testHUDPresentationAndDisplayStateMatchSharedWidgetSemanticsForAllGitActivityStates() {
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let cases: [(focus: Int?, completion: Int?, projectName: String?, statusTitle: String, displayState: PetViewModel.DisplayState)] = [
+            (0, 0, nil, "待机", .idle),
+            (2, 0, " Focus Repo ", "专注中", .focusing),
+            (0, 3, "ShipIt", "已完成", .completed),
+            (2, 3, "TinyBuddy", "活跃", .active)
+        ]
+
+        for testCase in cases {
+            let defaults = makeDefaults()
+            let store = DailyStatsStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today }
+            )
+            store.saveStatus(.completedOnce)
+            let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+
+            if let focus = testCase.focus {
+                GitTodayFocusBlockCountStore(
+                    userDefaults: defaults,
+                    calendar: calendar,
+                    dateProvider: { today },
+                    sharedFallbacksEnabled: false
+                ).saveTodayCount(focus)
+            }
+            if let completion = testCase.completion {
+                GitTodayCommitCountStore(
+                    userDefaults: defaults,
+                    calendar: calendar,
+                    dateProvider: { today },
+                    sharedFallbacksEnabled: false
+                ).saveTodayCount(completion)
+            }
+            if let projectName = testCase.projectName {
+                GitTodayRecentProjectStore(
+                    userDefaults: defaults,
+                    calendar: calendar,
+                    dateProvider: { today },
+                    sharedFallbacksEnabled: false
+                ).saveTodayProjectName(projectName)
+            }
+
+            let viewModel = PetViewModel(
+                store: store,
+                activityStore: activityStore,
+                refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+                notificationCenter: NotificationCenter()
+            )
+            let expectedPresentation = TinyBuddyWidgetPresentation(
+                snapshot: store.loadSnapshot(),
+                activitySnapshot: activityStore.loadTodaySnapshot()
+            )
+
+            XCTAssertEqual(viewModel.hudPresentation, expectedPresentation)
+            XCTAssertEqual(viewModel.hudPresentation.statusTitle, testCase.statusTitle)
+            XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, expectedPresentation.statusDisplayTitle)
+            XCTAssertEqual(viewModel.displayState, testCase.displayState)
+            XCTAssertEqual(
+                viewModel.displayState.selectedStatus,
+                expectedSelectedStatus(for: testCase.displayState)
+            )
+        }
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "TinyBuddyPetViewModelTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -241,5 +308,18 @@ final class PetViewModelTests: XCTestCase {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "MM-dd HH:mm:ss"
         return formatter.string(from: date)
+    }
+
+    private func expectedSelectedStatus(for displayState: PetViewModel.DisplayState) -> PetStatus? {
+        switch displayState {
+        case .idle:
+            return .idle
+        case .focusing:
+            return .focusing
+        case .completed:
+            return .completedOnce
+        case .active:
+            return nil
+        }
     }
 }

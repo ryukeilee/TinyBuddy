@@ -55,17 +55,18 @@ final class PetViewModel: ObservableObject {
         let session = PetSession(store: store)
         let snapshot = store.loadSnapshot()
         let activitySnapshot = activityStore.loadTodaySnapshot()
+        let hudPresentation = Self.makeHUDPresentation(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot
+        )
         self.session = session
         self.activityStore = activityStore
         self.refreshStatusStore = refreshStatusStore
         self.notificationCenter = notificationCenter
         self.status = snapshot.status
         self.stats = snapshot.stats
-        self.hudPresentation = Self.makeHUDPresentation(
-            snapshot: snapshot,
-            activitySnapshot: activitySnapshot
-        )
-        self.displayState = Self.makeDisplayState(from: activitySnapshot)
+        self.hudPresentation = hudPresentation
+        self.displayState = Self.makeDisplayState(from: hudPresentation)
         self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: refreshStatusStore.load())
         self.refreshStatusObserver = notificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
@@ -121,37 +122,32 @@ final class PetViewModel: ObservableObject {
     private func reloadHUDState() {
         let snapshot = store.loadSnapshot()
         let activitySnapshot = activityStore.loadTodaySnapshot()
-        status = snapshot.status
-        stats = snapshot.stats
-        hudPresentation = Self.makeHUDPresentation(
+        let hudPresentation = Self.makeHUDPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot
         )
-        displayState = Self.makeDisplayState(from: activitySnapshot)
+        status = snapshot.status
+        stats = snapshot.stats
+        self.hudPresentation = hudPresentation
+        displayState = Self.makeDisplayState(from: hudPresentation)
     }
 
     private static func makeHUDPresentation(
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot
     ) -> TinyBuddyWidgetPresentation {
-        TinyBuddyWidgetPresentation(
-            snapshot: snapshot,
-            focusCountOverride: activitySnapshot.focusBlockCount ?? 0,
-            completionCountOverride: activitySnapshot.commitCount ?? 0,
-            recentProjectName: activitySnapshot.recentProjectName,
-            statusTitleSource: .gitTodayActivity
-        )
+        TinyBuddyWidgetPresentation(snapshot: snapshot, activitySnapshot: activitySnapshot)
     }
 
-    private static func makeDisplayState(from activitySnapshot: GitTodayActivitySnapshot) -> DisplayState {
-        switch ((activitySnapshot.focusBlockCount ?? 0) > 0, (activitySnapshot.commitCount ?? 0) > 0) {
-        case (false, false):
+    private static func makeDisplayState(from presentation: TinyBuddyWidgetPresentation) -> DisplayState {
+        switch presentation.displayState {
+        case .idle:
             return .idle
-        case (true, false):
+        case .focusing:
             return .focusing
-        case (false, true):
+        case .completed:
             return .completed
-        case (true, true):
+        case .active:
             return .active
         }
     }

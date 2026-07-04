@@ -2,14 +2,67 @@ import XCTest
 @testable import TinyBuddyCore
 
 final class GitTodayActivityStoreTests: XCTestCase {
-    func testSharedPreferencesDictionaryReadsAppGroupGitValues() {
-        let preferences = TinyBuddySharedData.loadAppGroupPreferencesDictionary()
+    func testSharedPreferencesDictionaryMatchesStoreReadSemantics() throws {
+        guard let preferences = TinyBuddySharedData.loadAppGroupPreferencesDictionary() else {
+            throw XCTSkip("App Group shared preferences plist is unavailable in this environment")
+        }
 
-        XCTAssertEqual(preferences?["tinybuddy.gitTodayFocusBlockCount.dayIdentifier"] as? String, "2026-07-04")
-        XCTAssertEqual((preferences?["tinybuddy.gitTodayFocusBlockCount.count"] as? NSNumber)?.intValue, 1)
-        XCTAssertEqual(preferences?["tinybuddy.gitTodayCommitCount.dayIdentifier"] as? String, "2026-07-04")
-        XCTAssertEqual((preferences?["tinybuddy.gitTodayCommitCount.count"] as? NSNumber)?.intValue, 2)
-        XCTAssertEqual(preferences?["tinybuddy.gitTodayRecentProject.projectName"] as? String, "TinyBuddy")
+        guard let dayIdentifier = preferences[GitTodayFocusBlockCountStore.Key.dayIdentifier] as? String,
+              let today = makeDate(dayIdentifier: dayIdentifier) else {
+            XCTFail("Expected a valid focus-block day identifier in shared preferences")
+            return
+        }
+
+        XCTAssertEqual(
+            preferences[GitTodayCommitCountStore.Key.dayIdentifier] as? String,
+            dayIdentifier
+        )
+
+        if let recentProjectDayIdentifier = preferences[GitTodayRecentProjectStore.Key.dayIdentifier] as? String {
+            XCTAssertEqual(recentProjectDayIdentifier, dayIdentifier)
+        }
+
+        let expectedFocusCount = normalizedInteger(
+            preferences[GitTodayFocusBlockCountStore.Key.count]
+        )
+        let expectedCommitCount = normalizedInteger(
+            preferences[GitTodayCommitCountStore.Key.count]
+        )
+        let expectedRecentProjectName = normalizedProjectName(
+            preferences[GitTodayRecentProjectStore.Key.projectName]
+        )
+
+        XCTAssertNotNil(expectedFocusCount)
+        XCTAssertNotNil(expectedCommitCount)
+
+        let isolatedDefaults = makeDefaults()
+        let calendar = makeCalendar()
+        let store = GitTodayActivityStore(
+            focusBlockCountStore: GitTodayFocusBlockCountStore(
+                userDefaults: isolatedDefaults,
+                calendar: calendar,
+                dateProvider: { today }
+            ),
+            commitCountStore: GitTodayCommitCountStore(
+                userDefaults: isolatedDefaults,
+                calendar: calendar,
+                dateProvider: { today }
+            ),
+            recentProjectStore: GitTodayRecentProjectStore(
+                userDefaults: isolatedDefaults,
+                calendar: calendar,
+                dateProvider: { today }
+            )
+        )
+
+        XCTAssertEqual(
+            store.loadTodaySnapshot(),
+            GitTodayActivitySnapshot(
+                focusBlockCount: expectedFocusCount,
+                commitCount: expectedCommitCount,
+                recentProjectName: expectedRecentProjectName
+            )
+        )
     }
 
     func testLoadsSnapshotFromBothStores() {
@@ -156,5 +209,42 @@ final class GitTodayActivityStoreTests: XCTestCase {
         components.day = day
         components.hour = 12
         return components.date!
+    }
+
+    private func makeDate(dayIdentifier: String) -> Date? {
+        let parts = dayIdentifier.split(separator: "-")
+        guard parts.count == 3,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2]) else {
+            return nil
+        }
+
+        return makeDate(year: year, month: month, day: day)
+    }
+
+    private func normalizedInteger(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber {
+            return max(0, number.intValue)
+        }
+
+        if let integer = value as? Int {
+            return max(0, integer)
+        }
+
+        return nil
+    }
+
+    private func normalizedProjectName(_ value: Any?) -> String? {
+        guard let projectName = value as? String else {
+            return nil
+        }
+
+        let trimmedProjectName = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProjectName.isEmpty else {
+            return nil
+        }
+
+        return trimmedProjectName
     }
 }
