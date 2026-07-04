@@ -7,9 +7,8 @@ struct TinyBuddyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings {
-            EmptyView()
-                .frame(width: 0, height: 0)
+        WindowGroup {
+            PetView()
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
@@ -44,11 +43,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
         gitActivityRefreshCoordinator.handleReopen()
-        return false
+        if flag == false {
+            restoreHUDWindow(from: sender)
+        }
+        return true
+    }
+
+    private func restoreHUDWindow(from application: NSApplication) {
+        guard let window = application.windows.first(where: { $0.canBecomeKey && $0.contentViewController != nil }) else {
+            return
+        }
+
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+
+        application.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 }
 
 struct WindowConfigurator: NSViewRepresentable {
+    private let fixedWidth: CGFloat = 284
+    private let fixedHeight: CGFloat = 520
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
@@ -75,9 +93,16 @@ struct WindowConfigurator: NSViewRepresentable {
         window.hasShadow = false
         window.isMovableByWindowBackground = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.setContentSize(NSSize(width: 260, height: 320))
-        window.minSize = NSSize(width: 260, height: 320)
-        window.maxSize = NSSize(width: 260, height: 320)
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        let targetSize = NSSize(width: fixedWidth, height: fixedHeight)
+
+        if window.contentLayoutRect.size != targetSize {
+            window.setContentSize(targetSize)
+        }
+
+        window.minSize = targetSize
+        window.maxSize = targetSize
         window.standardWindowButton(.zoomButton)?.isHidden = true
     }
 }

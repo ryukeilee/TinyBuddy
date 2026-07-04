@@ -9,7 +9,8 @@ final class GitTodayFocusBlockCountStoreTests: XCTestCase {
         let store = GitTodayFocusBlockCountStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { date }
+            dateProvider: { date },
+            sharedFallbacksEnabled: false
         )
 
         XCTAssertNil(store.loadTodayCount())
@@ -26,7 +27,8 @@ final class GitTodayFocusBlockCountStoreTests: XCTestCase {
         let store = GitTodayFocusBlockCountStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { currentDate }
+            dateProvider: { currentDate },
+            sharedFallbacksEnabled: false
         )
 
         store.saveTodayCount(-7)

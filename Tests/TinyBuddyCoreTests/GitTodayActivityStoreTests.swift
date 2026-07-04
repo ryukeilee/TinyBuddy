@@ -2,6 +2,16 @@ import XCTest
 @testable import TinyBuddyCore
 
 final class GitTodayActivityStoreTests: XCTestCase {
+    func testSharedPreferencesDictionaryReadsAppGroupGitValues() {
+        let preferences = TinyBuddySharedData.loadAppGroupPreferencesDictionary()
+
+        XCTAssertEqual(preferences?["tinybuddy.gitTodayFocusBlockCount.dayIdentifier"] as? String, "2026-07-04")
+        XCTAssertEqual((preferences?["tinybuddy.gitTodayFocusBlockCount.count"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual(preferences?["tinybuddy.gitTodayCommitCount.dayIdentifier"] as? String, "2026-07-04")
+        XCTAssertEqual((preferences?["tinybuddy.gitTodayCommitCount.count"] as? NSNumber)?.intValue, 2)
+        XCTAssertEqual(preferences?["tinybuddy.gitTodayRecentProject.projectName"] as? String, "TinyBuddy")
+    }
+
     func testLoadsSnapshotFromBothStores() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
@@ -10,34 +20,40 @@ final class GitTodayActivityStoreTests: XCTestCase {
         GitTodayFocusBlockCountStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         ).saveTodayCount(3)
         GitTodayCommitCountStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         ).saveTodayCount(4)
         GitTodayRecentProjectStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         ).saveTodayProjectName("TinyBuddy")
 
         let store = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { today }
+                dateProvider: { today },
+                sharedFallbacksEnabled: false
             ),
             commitCountStore: GitTodayCommitCountStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { today }
+                dateProvider: { today },
+                sharedFallbacksEnabled: false
             ),
             recentProjectStore: GitTodayRecentProjectStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { today }
+                dateProvider: { today },
+                sharedFallbacksEnabled: false
             )
         )
 
@@ -53,9 +69,9 @@ final class GitTodayActivityStoreTests: XCTestCase {
 
     func testRefreshResultOnlyReportsChangeWhenSnapshotDiffers() {
         let store = GitTodayActivityStore(
-            focusBlockCountStore: GitTodayFocusBlockCountStore(userDefaults: makeDefaults()),
-            commitCountStore: GitTodayCommitCountStore(userDefaults: makeDefaults()),
-            recentProjectStore: GitTodayRecentProjectStore(userDefaults: makeDefaults())
+            focusBlockCountStore: GitTodayFocusBlockCountStore(userDefaults: makeDefaults(), sharedFallbacksEnabled: false),
+            commitCountStore: GitTodayCommitCountStore(userDefaults: makeDefaults(), sharedFallbacksEnabled: false),
+            recentProjectStore: GitTodayRecentProjectStore(userDefaults: makeDefaults(), sharedFallbacksEnabled: false)
         )
 
         let previousSnapshot = GitTodayActivitySnapshot(

@@ -9,7 +9,8 @@ final class GitTodayRecentProjectStoreTests: XCTestCase {
         let store = GitTodayRecentProjectStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { date }
+            dateProvider: { date },
+            sharedFallbacksEnabled: false
         )
 
         XCTAssertNil(store.loadTodayProjectName())
@@ -26,7 +27,8 @@ final class GitTodayRecentProjectStoreTests: XCTestCase {
         let store = GitTodayRecentProjectStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { currentDate }
+            dateProvider: { currentDate },
+            sharedFallbacksEnabled: false
         )
 
         store.saveTodayProjectName("  \n  ")

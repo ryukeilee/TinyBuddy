@@ -20,17 +20,20 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         GitTodayFocusBlockCountStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         ).saveTodayCount(3)
         GitTodayCommitCountStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         ).saveTodayCount(4)
         GitTodayRecentProjectStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         ).saveTodayProjectName("TinyBuddy")
 
         let widgetStore = DailyStatsStore(
@@ -38,39 +41,95 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             calendar: calendar,
             dateProvider: { today }
         )
+        let activityStore = GitTodayActivityStore(
+            focusBlockCountStore: GitTodayFocusBlockCountStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today },
+                sharedFallbacksEnabled: false
+            ),
+            commitCountStore: GitTodayCommitCountStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today },
+                sharedFallbacksEnabled: false
+            ),
+            recentProjectStore: GitTodayRecentProjectStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today },
+                sharedFallbacksEnabled: false
+            )
+        )
         let widgetSnapshot = widgetStore.loadSnapshot()
-        let smallPresentation = TinyBuddyWidgetPresentation(snapshot: widgetSnapshot)
+        let activitySnapshot = activityStore.loadTodaySnapshot()
+        let smallPresentation = TinyBuddyWidgetPresentation(
+            snapshot: widgetSnapshot,
+            activitySnapshot: activitySnapshot
+        )
         let mediumPresentation = TinyBuddyWidgetPresentation(
             snapshot: widgetSnapshot,
-            focusCountOverride: GitTodayFocusBlockCountStore(
-                userDefaults: defaults,
-                calendar: calendar,
-                dateProvider: { today }
-            ).loadTodayCount(),
-            completionCountOverride: GitTodayCommitCountStore(
-                userDefaults: defaults,
-                calendar: calendar,
-                dateProvider: { today }
-            ).loadTodayCount(),
-            recentProjectName: GitTodayRecentProjectStore(
-                userDefaults: defaults,
-                calendar: calendar,
-                dateProvider: { today }
-            ).loadTodayProjectName(),
-            statusTitleSource: .gitTodayActivity
+            activitySnapshot: activitySnapshot
         )
 
         XCTAssertEqual(widgetSnapshot.status, .completedOnce)
         XCTAssertEqual(widgetSnapshot.stats.focusCount, 2)
         XCTAssertEqual(widgetSnapshot.stats.completionCount, 1)
         XCTAssertEqual(smallPresentation.expression, "★ᴗ★")
-        XCTAssertEqual(smallPresentation.statusTitle, "完成一次")
-        XCTAssertEqual(smallPresentation.focusCount, 2)
-        XCTAssertEqual(smallPresentation.completionCount, 1)
+        XCTAssertEqual(smallPresentation.statusTitle, "活跃")
+        XCTAssertEqual(smallPresentation.focusCount, 3)
+        XCTAssertEqual(smallPresentation.completionCount, 4)
+        XCTAssertEqual(smallPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
         XCTAssertEqual(mediumPresentation.focusCount, 3)
         XCTAssertEqual(mediumPresentation.completionCount, 4)
         XCTAssertEqual(mediumPresentation.statusTitle, "活跃")
         XCTAssertEqual(mediumPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+    }
+
+    func testUnifiedWidgetPresentationDoesNotFallBackToSnapshotStatsForSmallFamily() {
+        let snapshot = TinyBuddySnapshot(
+            status: .completedOnce,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+        let activitySnapshot = GitTodayActivitySnapshot(
+            focusBlockCount: 8,
+            commitCount: 13,
+            recentProjectName: "TinyBuddy"
+        )
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot
+        )
+
+        XCTAssertEqual(presentation.focusCount, 8)
+        XCTAssertEqual(presentation.completionCount, 13)
+        XCTAssertEqual(presentation.statusTitle, "活跃")
+        XCTAssertEqual(presentation.statusDisplayTitle, "活跃 · TinyBuddy")
+    }
+
+    func testUnifiedWidgetPresentationUsesZeroWhenGitActivityCountsAreUnavailable() {
+        let snapshot = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
+        )
+        let activitySnapshot = GitTodayActivitySnapshot(
+            focusBlockCount: nil,
+            commitCount: nil,
+            recentProjectName: nil
+        )
+
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot
+        )
+
+        XCTAssertEqual(presentation.focusCount, 0)
+        XCTAssertEqual(presentation.completionCount, 0)
+        XCTAssertEqual(presentation.statusTitle, "待机")
+        XCTAssertEqual(presentation.statusDisplayTitle, "待机")
+        XCTAssertEqual(presentation.displayState, .idle)
+        XCTAssertEqual(presentation.expression, "•ᴗ•")
     }
 
     func testWidgetPresentationCanOverrideFocusAndCompletionCountWithGitCounts() {
@@ -229,7 +288,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         let recentProjectStore = GitTodayRecentProjectStore(
             userDefaults: defaults,
             calendar: calendar,
-            dateProvider: { today }
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
         )
         let snapshot = TinyBuddySnapshot(
             status: .completedOnce,

@@ -291,17 +291,20 @@ private final class RefreshHarness {
             focusBlockCountStore: GitTodayFocusBlockCountStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { Self.makeDate(second: 0) }
+                dateProvider: { Self.makeDate(second: 0) },
+                sharedFallbacksEnabled: false
             ),
             commitCountStore: GitTodayCommitCountStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { Self.makeDate(second: 0) }
+                dateProvider: { Self.makeDate(second: 0) },
+                sharedFallbacksEnabled: false
             ),
             recentProjectStore: GitTodayRecentProjectStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { Self.makeDate(second: 0) }
+                dateProvider: { Self.makeDate(second: 0) },
+                sharedFallbacksEnabled: false
             )
         )
 

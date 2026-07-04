@@ -4,6 +4,10 @@ import TinyBuddyCore
 import WidgetKit
 import Darwin
 
+extension Notification.Name {
+    static let gitActivityRefreshStatusDidChange = Notification.Name("TinyBuddy.gitActivityRefreshStatusDidChange")
+}
+
 final class GitActivityRefreshCoordinator {
     typealias ScriptRunner = (URL, [URL]) throws -> Void
     typealias ScriptURLProvider = () -> URL?
@@ -248,6 +252,10 @@ final class GitActivityRefreshCoordinator {
                         previousSnapshot: previousSnapshot,
                         currentSnapshot: currentSnapshot
                     )
+                    self.mirrorActivitySnapshotToStandardDefaults(
+                        currentSnapshot,
+                        refreshedAt: now
+                    )
                     if GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
                         didChange: refreshResult.didChange
@@ -297,14 +305,14 @@ final class GitActivityRefreshCoordinator {
         outcome: GitActivityRefreshOutcome,
         reason: String?
     ) {
-        refreshStatusStore.save(
-            GitActivityRefreshStatus(
-                refreshedAt: refreshedAt,
-                trigger: trigger,
-                outcome: outcome,
-                reason: summarizedReason(reason)
-            )
+        let status = GitActivityRefreshStatus(
+            refreshedAt: refreshedAt,
+            trigger: trigger,
+            outcome: outcome,
+            reason: summarizedReason(reason)
         )
+        refreshStatusStore.save(status)
+        NotificationCenter.default.post(name: .gitActivityRefreshStatusDidChange, object: status)
     }
 
     private func summarizedReason(from error: Error) -> String? {
@@ -333,6 +341,39 @@ final class GitActivityRefreshCoordinator {
 
         let endIndex = singleLineReason.index(singleLineReason.startIndex, offsetBy: maxLength)
         return String(singleLineReason[..<endIndex])
+    }
+
+    private func mirrorActivitySnapshotToStandardDefaults(
+        _ snapshot: GitTodayActivitySnapshot,
+        refreshedAt: Date
+    ) {
+        let defaults = UserDefaults.standard
+        let dayIdentifier = Self.dayIdentifier(for: refreshedAt)
+
+        defaults.set(dayIdentifier, forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier)
+        defaults.set(snapshot.focusBlockCount ?? 0, forKey: GitTodayFocusBlockCountStore.Key.count)
+        defaults.set(dayIdentifier, forKey: GitTodayCommitCountStore.Key.dayIdentifier)
+        defaults.set(snapshot.commitCount ?? 0, forKey: GitTodayCommitCountStore.Key.count)
+        defaults.set(dayIdentifier, forKey: GitTodayRecentProjectStore.Key.dayIdentifier)
+
+        if let recentProjectName = snapshot.recentProjectName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !recentProjectName.isEmpty {
+            defaults.set(recentProjectName, forKey: GitTodayRecentProjectStore.Key.projectName)
+        } else {
+            defaults.removeObject(forKey: GitTodayRecentProjectStore.Key.projectName)
+        }
+
+        defaults.synchronize()
+    }
+
+    private static func dayIdentifier(for date: Date) -> String {
+        let calendar = Calendar.current
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let year = components.year ?? 0
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     private static func locateRefreshScript() -> URL? {
