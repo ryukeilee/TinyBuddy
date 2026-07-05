@@ -69,7 +69,7 @@ final class GitActivityRefreshCoordinator {
     }
 
     func handleDidBecomeActive() {
-        refresh(trigger: .becameActive, force: true)
+        refresh(trigger: .becameActive)
     }
 
     func handleReopen() {

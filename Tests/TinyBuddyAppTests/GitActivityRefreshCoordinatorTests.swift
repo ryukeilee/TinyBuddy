@@ -162,6 +162,29 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
+    func testDidBecomeActiveSkipsWhenMinimumRefreshSpacingNotReached() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.advanceCurrentDate(by: 30)
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(
+            harness.lastRefreshStatus,
+            GitActivityRefreshStatus(
+                refreshedAt: harness.currentDate,
+                trigger: .becameActive,
+                outcome: .skipped,
+                reason: "minimum refresh spacing not reached"
+            )
+        )
+    }
+
     func testReopenTriggersRefreshAndWidgetReload() {
         let harness = makeHarness()
 
@@ -460,6 +483,10 @@ private final class RefreshHarness {
     var authorizedRoots: [URL] {
         get { state.authorizedRoots }
         set { state.authorizedRoots = newValue }
+    }
+
+    func advanceCurrentDate(by seconds: TimeInterval) {
+        state.currentDate = state.currentDate.addingTimeInterval(seconds)
     }
 
     func postWorkspaceNotification(named name: Notification.Name) {

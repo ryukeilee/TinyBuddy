@@ -76,6 +76,25 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertTrue(result.standardOutput.contains("TinyBuddy git shared data unchanged; skipped plist rewrite"))
     }
 
+    func testScriptParsesTodayActivityFromGitFileWorktreeMetadata() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepositoryWithExternalGitDir(named: "ProjectBeta")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 14, minute: 5, message: "commit: worktree")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+    }
+
     func testScriptRewritesNumericStringsBackToIntegerSharedData() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -143,8 +162,26 @@ private struct ScriptHarness {
         return repoURL
     }
 
+    func makeRepositoryWithExternalGitDir(named name: String) throws -> URL {
+        let repoURL = scanRootURL.appendingPathComponent(name, isDirectory: true)
+        let gitDirectoryURL = scanRootURL
+            .appendingPathComponent(".tinybuddy-gitdirs", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+        let gitLogsURL = gitDirectoryURL.appendingPathComponent("logs", isDirectory: true)
+
+        try fileManager.createDirectory(at: repoURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: gitLogsURL, withIntermediateDirectories: true)
+        try "gitdir: \(gitDirectoryURL.path)\n".write(
+            to: repoURL.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        return repoURL
+    }
+
     func writeHeadReflog(for repoURL: URL, lines: [String]) throws {
-        let reflogURL = repoURL.appendingPathComponent(".git/logs/HEAD")
+        let reflogURL = try headReflogURL(for: repoURL)
         try lines.joined(separator: "\n").appending("\n").write(to: reflogURL, atomically: true, encoding: .utf8)
     }
 
@@ -212,6 +249,25 @@ private struct ScriptHarness {
         let timezoneOffset = String(format: "%@%02d%02d", offsetSign, abs(offsetHours), offsetMinutes)
 
         return "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 Tiny Buddy <tinybuddy@example.com> \(epoch) \(timezoneOffset)\t\(message)"
+    }
+
+    private func headReflogURL(for repoURL: URL) throws -> URL {
+        let dotGitURL = repoURL.appendingPathComponent(".git")
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: dotGitURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return dotGitURL.appendingPathComponent("logs/HEAD")
+        }
+
+        let gitdirDeclaration = try String(contentsOf: dotGitURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "gitdir: "
+        guard gitdirDeclaration.hasPrefix(prefix) else {
+            throw NSError(domain: "GitActivityRefreshScriptTests", code: 3)
+        }
+
+        let gitDirectoryPath = String(gitdirDeclaration.dropFirst(prefix.count))
+        return URL(fileURLWithPath: gitDirectoryPath, isDirectory: true)
+            .appendingPathComponent("logs/HEAD")
     }
 
     private static let dayFormatter: DateFormatter = {

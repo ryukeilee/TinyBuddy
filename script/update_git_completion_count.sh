@@ -281,7 +281,8 @@ while IFS= read -r scan_root; do
       -path '*/.build' -o \
       -path '*/DerivedData' \
     \) -prune -o \
-    \( -name .git -type d -o -name .git -type f \) -print0 >> "$repo_git_paths_file" 2>> "$find_stderr_file" || find_exit_code="$?"
+    -type d -name .git -print0 -prune -o \
+    -type f -name .git -print0 >> "$repo_git_paths_file" 2>> "$find_stderr_file" || find_exit_code="$?"
 done < "$scan_roots_file"
 
 while IFS= read -r -d '' git_path; do
