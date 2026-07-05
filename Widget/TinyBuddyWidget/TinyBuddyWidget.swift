@@ -58,6 +58,17 @@ struct TinyBuddyWidgetView: View {
         )
     }
 
+    private var recentProjectName: String {
+        let trimmedName = entry.activitySnapshot.recentProjectName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let trimmedName, !trimmedName.isEmpty {
+            return trimmedName
+        }
+
+        return "最近无活跃项目"
+    }
+
     var body: some View {
         Group {
             switch family {
@@ -104,18 +115,18 @@ struct TinyBuddyWidgetView: View {
     }
 
     private var mediumBody: some View {
-        HStack(alignment: .center, spacing: 13) {
+        HStack(alignment: .center, spacing: 10) {
             TinyBuddyArcReactorCore()
-                .frame(width: 100, height: 100)
+                .frame(width: 94, height: 94)
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .center, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 1) {
                         Text("TINYBUDDY")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundStyle(hudGold.opacity(0.92))
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(hudGold.opacity(0.88))
                         Text("COMPANION HUD")
-                            .font(.system(size: 14, weight: .heavy, design: .rounded))
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
                             .foregroundStyle(Color(red: 1.0, green: 0.93, blue: 0.77))
                             .lineLimit(1)
                             .minimumScaleFactor(0.78)
@@ -135,24 +146,29 @@ struct TinyBuddyWidgetView: View {
                     hudMetric(title: "今日完成", value: presentation.completionCount)
                 }
 
-                HStack(spacing: 8) {
-                    Text("STATUS")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(hudGold.opacity(0.82))
-                    Text(presentation.statusDisplayTitle)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(mediumStatusAccent)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                    Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 5) {
+                    hudStatusRow
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        hudPanelLabel("RECENT PROJECT")
+
+                        Text(recentProjectName)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(0.92))
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .lineSpacing(0)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .layoutPriority(1)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
                 .background(hudPanelFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(mediumStatusAccent.opacity(0.48), lineWidth: 1)
+                        .stroke(mediumStatusAccent.opacity(0.42), lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
@@ -183,30 +199,30 @@ struct TinyBuddyWidgetView: View {
 
                 RadialGradient(
                     colors: [
-                        energyBlueWhite.opacity(0.18),
+                        energyBlueWhite.opacity(0.12),
                         .clear
                     ],
                     center: UnitPoint(x: 0.26, y: 0.48),
                     startRadius: 2,
-                    endRadius: 120
+                    endRadius: 104
                 )
 
                 LinearGradient(
                     colors: [
-                        Color.white.opacity(0.08),
-                        Color(red: 0.95, green: 0.42, blue: 0.24).opacity(0.05),
-                        Color.black.opacity(0.28)
+                        Color.white.opacity(0.05),
+                        Color(red: 0.95, green: 0.42, blue: 0.24).opacity(0.03),
+                        Color.black.opacity(0.22)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
                 .blendMode(.softLight)
 
-                ForEach(0..<5, id: \.self) { index in
+                ForEach(0..<4, id: \.self) { index in
                     Rectangle()
-                        .fill(index.isMultiple(of: 2) ? hudGold.opacity(0.07) : reactorRed.opacity(0.08))
+                        .fill(index.isMultiple(of: 2) ? hudGold.opacity(0.05) : reactorRed.opacity(0.06))
                         .frame(height: 0.7)
-                        .offset(y: CGFloat(index) * 26 - 52)
+                        .offset(y: CGFloat(index) * 28 - 42)
                 }
             }
         }
@@ -283,20 +299,20 @@ struct TinyBuddyWidgetView: View {
     private func hudMetric(title: String, value: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
                 .foregroundStyle(hudGold.opacity(0.78))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Text("\(value)")
-                .font(.system(size: 23, weight: .heavy, design: .rounded))
+                .font(.system(size: 20, weight: .heavy, design: .rounded))
                 .foregroundStyle(.white)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
         .background(hudPanelFill)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -313,6 +329,28 @@ struct TinyBuddyWidgetView: View {
                 )
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var hudStatusRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            hudPanelLabel("STATUS")
+
+            Text(presentation.statusTitle)
+                .font(.system(size: 12, weight: .heavy, design: .rounded))
+                .foregroundStyle(mediumStatusAccent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func hudPanelLabel(
+        _ text: String
+    ) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundStyle(hudGold.opacity(0.82))
     }
 }
 
@@ -358,6 +396,21 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
             )
                 .previewContext(WidgetPreviewContext(family: .systemMedium))
                 .previewDisplayName("Medium HUD")
+
+            TinyBuddyWidgetView(
+                entry: previewEntry(
+                    status: .completedOnce,
+                    focusCount: 3,
+                    completionCount: 8,
+                    activitySnapshot: GitTodayActivitySnapshot(
+                        focusBlockCount: 3,
+                        commitCount: 8,
+                        recentProjectName: "TinyBuddyDesktopWidgetPrototype"
+                    )
+                )
+            )
+                .previewContext(WidgetPreviewContext(family: .systemMedium))
+                .previewDisplayName("Medium Long Project")
         }
     }
 
