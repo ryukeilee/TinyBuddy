@@ -60,8 +60,13 @@ final class PetViewModelTests: XCTestCase {
 
     func testLoadsRefreshDiagnosticsFromStoreOnInit() {
         let defaults = makeDefaults()
-        let refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let calendar = makeCalendar()
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 9, minute: 8, second: 7)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
         refreshStatusStore.save(
             GitActivityRefreshStatus(
                 refreshedAt: refreshedAt,
@@ -81,6 +86,40 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "系统唤醒触发 刷新失败")
         XCTAssertEqual(viewModel.refreshDiagnostics.detail, formattedDetail(for: refreshedAt))
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "刷新组件缺失，暂时无法读取 Git 活动。")
+    }
+
+    func testInitDoesNotShowRefreshDiagnosticsFromPreviousDay() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 7, day: 4, hour: 9, minute: 0, second: 0)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { currentDate }
+        )
+        refreshStatusStore.save(
+            GitActivityRefreshStatus(
+                refreshedAt: currentDate,
+                trigger: .didWake,
+                outcome: .failed,
+                reason: "missing git refresh script"
+            )
+        )
+        currentDate = makeDate(year: 2026, month: 7, day: 5, hour: 8, minute: 0, second: 0)
+
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { currentDate }
+            ),
+            refreshStatusStore: refreshStatusStore,
+            notificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(viewModel.refreshDiagnostics.badgeTitle, "未刷新")
+        XCTAssertEqual(viewModel.refreshDiagnostics.summary, "等待首次 Git 刷新")
+        XCTAssertNil(viewModel.refreshDiagnostics.reason)
     }
 
     func testRefreshDiagnosticsUpdateWhenRefreshStatusNotificationArrives() async {
@@ -153,8 +192,13 @@ final class PetViewModelTests: XCTestCase {
 
     func testRefreshDiagnosticsMapsUnauthorizedRootsReasonToChinese() {
         let defaults = makeDefaults()
-        let refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let calendar = makeCalendar()
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 12, minute: 13, second: 14)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
         refreshStatusStore.save(
             GitActivityRefreshStatus(
                 refreshedAt: refreshedAt,

@@ -86,6 +86,36 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(mediumPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
     }
 
+    func testWidgetSnapshotDoesNotCarryYesterdayStatusIntoToday() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 7, day: 1)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { currentDate }
+        )
+        let session = PetSession(store: store)
+
+        session.select(.focusing)
+        currentDate = makeDate(year: 2026, month: 7, day: 2)
+
+        let widgetSnapshot = store.loadSnapshot()
+        let presentation = TinyBuddyWidgetPresentation(
+            snapshot: widgetSnapshot,
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: nil,
+                commitCount: nil,
+                recentProjectName: nil
+            )
+        )
+
+        XCTAssertEqual(widgetSnapshot.status, .idle)
+        XCTAssertEqual(widgetSnapshot.stats, DailyStats(dayIdentifier: "2026-07-02", focusCount: 0, completionCount: 0))
+        XCTAssertEqual(presentation.statusTitle, "待机")
+        XCTAssertEqual(presentation.displayState, .idle)
+    }
+
     func testUnifiedWidgetPresentationDoesNotFallBackToSnapshotStatsForSmallFamily() {
         let snapshot = TinyBuddySnapshot(
             status: .completedOnce,

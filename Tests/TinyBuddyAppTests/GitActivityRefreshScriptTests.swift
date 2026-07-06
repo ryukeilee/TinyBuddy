@@ -230,6 +230,40 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(metrics["shared_data_written"], "1")
     }
 
+    func testScriptDoesNotReuseCachedReflogStatsAcrossDayBoundary() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let perlProbe = try harness.makePerlProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path,
+            "TINYBUDDY_TODAY": harness.todayIdentifier
+        ])
+        XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 1)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path,
+            "TINYBUDDY_TODAY": harness.dayIdentifier(daysOffset: 1)
+        ])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.dayIdentifier"] as? String, harness.dayIdentifier(daysOffset: 1))
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "0")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+    }
+
     func testScriptRebuildsRepositoryCacheWhenAuthorizedDirectoryChanges() throws {
         let harness = try ScriptHarness()
         let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -565,6 +599,11 @@ private struct ScriptHarness {
         let timezoneOffset = String(format: "%@%02d%02d", offsetSign, abs(offsetHours), offsetMinutes)
 
         return "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 Tiny Buddy <tinybuddy@example.com> \(epoch) \(timezoneOffset)\t\(message)"
+    }
+
+    func dayIdentifier(daysOffset: Int) -> String {
+        let date = calendar.date(byAdding: .day, value: daysOffset, to: Date())!
+        return Self.dayFormatter.string(from: date)
     }
 
     private func headReflogURL(for repoURL: URL) throws -> URL {

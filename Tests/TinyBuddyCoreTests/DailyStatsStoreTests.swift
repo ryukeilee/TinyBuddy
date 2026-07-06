@@ -44,6 +44,26 @@ final class DailyStatsStoreTests: XCTestCase {
         XCTAssertEqual(store.loadToday(), DailyStats(dayIdentifier: "2026-07-02", focusCount: 0, completionCount: 0))
     }
 
+    func testResetsStatusWhenTheDayChanges() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 7, day: 1)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { currentDate }
+        )
+
+        store.saveStatus(.focusing)
+        XCTAssertEqual(store.loadStatus(), .focusing)
+
+        currentDate = makeDate(year: 2026, month: 7, day: 2)
+
+        XCTAssertEqual(store.loadStatus(), .idle)
+        XCTAssertEqual(store.loadToday(), DailyStats(dayIdentifier: "2026-07-02", focusCount: 0, completionCount: 0))
+        XCTAssertEqual(store.loadStatus(), .idle)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "TinyBuddyTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -68,4 +88,3 @@ final class DailyStatsStoreTests: XCTestCase {
         return components.date!
     }
 }
-

@@ -84,9 +84,17 @@ public final class GitActivityRefreshStatusStore {
     }
 
     private let userDefaults: UserDefaults
+    private let calendar: Calendar
+    private let dateProvider: () -> Date
 
-    public init(userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults()) {
+    public init(
+        userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
+        calendar: Calendar = .current,
+        dateProvider: @escaping () -> Date = Date.init
+    ) {
         self.userDefaults = userDefaults
+        self.calendar = calendar
+        self.dateProvider = dateProvider
     }
 
     public func load() -> GitActivityRefreshStatus? {
@@ -99,6 +107,10 @@ public final class GitActivityRefreshStatusStore {
             let outcomeRawValue = userDefaults.string(forKey: Key.outcome),
             let outcome = GitActivityRefreshOutcome(rawValue: outcomeRawValue)
         else {
+            return nil
+        }
+
+        guard calendar.isDate(refreshedAt, inSameDayAs: dateProvider()) else {
             return nil
         }
 

@@ -4,8 +4,13 @@ import XCTest
 final class GitActivityRefreshStatusStoreTests: XCTestCase {
     func testLoadsSavedRefreshStatus() {
         let defaults = makeDefaults()
-        let store = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let calendar = makeCalendar()
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 12, minute: 34, second: 56)
+        let store = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
 
         store.save(
             GitActivityRefreshStatus(
@@ -27,8 +32,13 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
 
     func testSaveTrimsBlankReasonsAndLoadRequiresCompleteRecord() {
         let defaults = makeDefaults()
-        let store = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let calendar = makeCalendar()
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
 
         store.save(
             GitActivityRefreshStatus(
@@ -54,8 +64,13 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
 
     func testSaveAndLoadMetrics() {
         let defaults = makeDefaults()
-        let store = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let calendar = makeCalendar()
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 9, minute: 1, second: 2)
+        let store = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
 
         store.save(
             GitActivityRefreshStatus(
@@ -97,11 +112,41 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
         )
     }
 
+    func testDoesNotLoadRefreshStatusFromPreviousLocalDay() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { currentDate }
+        )
+
+        store.save(
+            GitActivityRefreshStatus(
+                refreshedAt: currentDate,
+                trigger: .launch,
+                outcome: .succeeded
+            )
+        )
+        XCTAssertNotNil(store.load())
+
+        currentDate = makeDate(year: 2026, month: 7, day: 5, hour: 8, minute: 0, second: 0)
+
+        XCTAssertNil(store.load())
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "TinyBuddyGitActivityRefreshStatusStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+
+    private func makeCalendar() -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
     }
 
     private func makeDate(

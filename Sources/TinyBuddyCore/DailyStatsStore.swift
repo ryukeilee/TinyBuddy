@@ -6,6 +6,7 @@ public final class DailyStatsStore {
         static let focusCount = "tinybuddy.dailyStats.focusCount"
         static let completionCount = "tinybuddy.dailyStats.completionCount"
         static let currentStatus = "tinybuddy.currentStatus"
+        static let currentStatusDayIdentifier = "tinybuddy.currentStatus.dayIdentifier"
     }
 
     private let userDefaults: UserDefaults
@@ -27,6 +28,7 @@ public final class DailyStatsStore {
         let storedDay = userDefaults.string(forKey: Key.dayIdentifier)
 
         guard storedDay == today else {
+            resetStatusForNewDay(todayIdentifier: today)
             return save(DailyStats(dayIdentifier: today, focusCount: 0, completionCount: 0))
         }
 
@@ -52,6 +54,10 @@ public final class DailyStatsStore {
     }
 
     public func loadStatus() -> PetStatus {
+        guard userDefaults.string(forKey: Key.currentStatusDayIdentifier) == todayIdentifier() else {
+            return .idle
+        }
+
         guard let rawValue = userDefaults.string(forKey: Key.currentStatus),
               let status = PetStatus(rawValue: rawValue) else {
             return .idle
@@ -62,6 +68,7 @@ public final class DailyStatsStore {
 
     public func saveStatus(_ status: PetStatus) {
         userDefaults.set(status.rawValue, forKey: Key.currentStatus)
+        userDefaults.set(todayIdentifier(), forKey: Key.currentStatusDayIdentifier)
     }
 
     public func loadSnapshot() -> TinyBuddySnapshot {
@@ -73,6 +80,11 @@ public final class DailyStatsStore {
         userDefaults.set(stats.focusCount, forKey: Key.focusCount)
         userDefaults.set(stats.completionCount, forKey: Key.completionCount)
         return stats
+    }
+
+    private func resetStatusForNewDay(todayIdentifier: String) {
+        userDefaults.set(PetStatus.idle.rawValue, forKey: Key.currentStatus)
+        userDefaults.set(todayIdentifier, forKey: Key.currentStatusDayIdentifier)
     }
 
     private func todayIdentifier() -> String {

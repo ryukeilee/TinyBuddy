@@ -612,26 +612,30 @@ private final class RefreshHarness {
 
         let defaults = UserDefaults(suiteName: "TinyBuddyAppTests.\(UUID().uuidString)")!
         self.activityDefaults = defaults
-        self.refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
         let calendar = Self.makeCalendar()
         self.calendar = calendar
+        self.refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { [state] in state.currentDate }
+        )
         let activityStore = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { Self.makeDate(second: 0) },
+                dateProvider: { [state] in state.currentDate },
                 sharedFallbacksEnabled: false
             ),
             commitCountStore: GitTodayCommitCountStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { Self.makeDate(second: 0) },
+                dateProvider: { [state] in state.currentDate },
                 sharedFallbacksEnabled: false
             ),
             recentProjectStore: GitTodayRecentProjectStore(
                 userDefaults: defaults,
                 calendar: calendar,
-                dateProvider: { Self.makeDate(second: 0) },
+                dateProvider: { [state] in state.currentDate },
                 sharedFallbacksEnabled: false
             )
         )
