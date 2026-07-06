@@ -157,30 +157,45 @@ final class GitTodayActivityStoreTests: XCTestCase {
         )
     }
 
-    func testRefreshPolicyAlwaysReloadsForLaunchAndUserVisibleRefreshes() {
-        XCTAssertTrue(
+    func testRefreshPolicyOnlyReloadsWhenGitActivityActuallyChanged() {
+        XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .launch, didChange: false)
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .becameActive, didChange: false)
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .reopen, didChange: false)
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .didWake, didChange: false)
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .screensDidWake, didChange: false)
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .sessionDidBecomeActive, didChange: false)
         )
-    }
-
-    func testRefreshPolicyOnlyReloadsTimerWhenGitActivityActuallyChanged() {
         XCTAssertFalse(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .timer, didChange: false)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .launch, didChange: true)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .becameActive, didChange: true)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .reopen, didChange: true)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .didWake, didChange: true)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .screensDidWake, didChange: true)
+        )
+        XCTAssertTrue(
+            GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .sessionDidBecomeActive, didChange: true)
         )
         XCTAssertTrue(
             GitTodayActivityRefreshPolicy.shouldReloadWidget(for: .timer, didChange: true)

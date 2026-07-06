@@ -15,11 +15,6 @@ public enum GitTodayActivityRefreshPolicy {
         for trigger: GitTodayActivityRefreshTrigger,
         didChange: Bool
     ) -> Bool {
-        switch trigger {
-        case .launch, .becameActive, .reopen, .didWake, .screensDidWake, .sessionDidBecomeActive:
-            return true
-        case .timer:
-            return didChange
-        }
+        didChange
     }
 }

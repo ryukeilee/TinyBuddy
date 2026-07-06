@@ -30,7 +30,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         ]
         let harness = makeHarness(authorizedRoots: roots)
 
-        harness.performAndWaitForRefresh {
+        harness.performAndWaitForScriptRunCount(1) {
             harness.coordinator.handleDidBecomeActive()
         }
 
@@ -39,15 +39,16 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.stopAccessCount, roots.count)
     }
 
-    func testVisibleRefreshTriggersScriptAndWidgetReload() {
+    func testVisibleRefreshSkipsWidgetReloadWhenGitActivityIsUnchanged() {
         let harness = makeHarness()
 
-        harness.performAndWaitForRefresh {
+        harness.performAndWaitForScriptRunCount(1) {
             harness.coordinator.handleDidBecomeActive()
         }
+        harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 1)
-        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
         XCTAssertEqual(
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
@@ -58,10 +59,37 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
+    func testVisibleRefreshReloadsWidgetWhenGitActivityChanges() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "TinyBuddy")
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.handleDidBecomeActive()
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
     func testRefreshMirrorsGitActivitySnapshotToStandardDefaults() {
         withRestoredStandardDefaults(keys: mirroredGitActivityKeys) {
             let harness = makeHarness()
-            harness.setActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "  TinyBuddy  ")
+            harness.setScriptRunnerHook { runCount in
+                switch runCount {
+                case 1:
+                    harness.setActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "  TinyBuddy  ")
+                case 2:
+                    harness.setActivitySnapshot(focusBlockCount: nil, commitCount: nil, recentProjectName: nil)
+                default:
+                    return
+                }
+            }
 
             harness.performAndWaitForRefresh {
                 harness.coordinator.handleDidBecomeActive()
@@ -92,7 +120,6 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 "TinyBuddy"
             )
 
-            harness.setActivitySnapshot(focusBlockCount: nil, commitCount: nil, recentProjectName: nil)
             harness.performAndWaitForWidgetReloadCount(2) {
                 harness.coordinator.handleReopen()
             }
@@ -153,6 +180,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testStartTriggersLaunchRefreshAndWidgetReload() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -164,6 +198,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testDidBecomeActiveSkipsWhenMinimumRefreshSpacingNotReached() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -187,6 +228,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testReopenTriggersRefreshAndWidgetReload() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 1, recentProjectName: "TinyBuddy")
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.handleReopen()
@@ -198,6 +246,16 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testDidWakeNotificationTriggersRefreshAndWidgetReload() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
+            default:
+                return
+            }
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -212,6 +270,16 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testScreensDidWakeNotificationTriggersRefreshAndWidgetReload() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 1, recentProjectName: "TinyBuddy")
+            default:
+                return
+            }
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -226,6 +294,16 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testSessionDidBecomeActiveNotificationTriggersRefreshAndWidgetReload() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "Project B")
+            default:
+                return
+            }
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -240,6 +318,18 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testWakeNotificationBurstQueuesAtMostOneFollowUpRefresh() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 3:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 1, recentProjectName: "TinyBuddy")
+            default:
+                return
+            }
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -259,19 +349,29 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         let allowWakeRefreshToFinish = DispatchSemaphore(value: 0)
         let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
 
-        harness.performAndWaitForRefresh {
-            harness.coordinator.start()
-        }
         harness.setScriptRunnerHook { runCount in
-            guard runCount == 2 else {
+            if runCount == 1 {
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
                 return
             }
 
+            guard runCount == 2 else {
+                if runCount == 3 {
+                    harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 1, recentProjectName: "TinyBuddy")
+                }
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
             DispatchQueue.main.async {
                 harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
                 queuedWakeNotificationPosted.fulfill()
             }
             allowWakeRefreshToFinish.wait()
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
         }
 
         harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
@@ -285,6 +385,16 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testWakeNotificationRetriesWhenFirstWakeRefreshCannotStart() {
         let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
+            default:
+                return
+            }
+        }
 
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
@@ -309,11 +419,12 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         let harness = makeHarness()
         let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
 
-        harness.performAndWaitForRefresh {
-            harness.coordinator.start()
-        }
-
         harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+                return
+            }
+
             guard runCount == 2 else {
                 return
             }
@@ -331,6 +442,10 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             }
 
             throw ScriptFailure()
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
         }
 
         harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
@@ -455,6 +570,7 @@ private final class RefreshHarness {
                 state.scriptRunCount += 1
                 state.capturedRootPaths = rootURLs.map(\.standardizedFileURL.path)
                 try state.scriptRunnerHook?(state.scriptRunCount)
+                state.onScriptRun?(state.scriptRunCount)
             },
             authorizedRootsProvider: { [state] in
                 state.authorizedRoots.map { url in
@@ -469,6 +585,9 @@ private final class RefreshHarness {
             workspaceNotificationCenter: workspaceNotificationCenter
         )
         state.onWidgetReload = { [weak self] _ in
+            self?.fulfillPendingRefreshExpectation()
+        }
+        state.onScriptRun = { [weak self] _ in
             self?.fulfillPendingRefreshExpectation()
         }
     }
@@ -530,6 +649,21 @@ private final class RefreshHarness {
         performAndWaitForWidgetReloadCount(1, action: action)
     }
 
+    func performAndWaitForScriptRunCount(_ expectedRunCount: Int, action: () -> Void) {
+        let expectation = testCase.expectation(description: "script run count \(expectedRunCount)")
+        refreshExpectationQueue.sync {
+            pendingRefreshExpectation = expectation
+            state.expectedScriptRunCount = expectedRunCount
+            if state.scriptRunCount >= expectedRunCount {
+                expectation.fulfill()
+                pendingRefreshExpectation = nil
+                state.expectedScriptRunCount = 0
+            }
+        }
+        action()
+        testCase.wait(for: [expectation], timeout: 1.0)
+    }
+
     func performAndWaitForWidgetReloadCount(_ expectedReloadCount: Int, action: () -> Void) {
         let expectation = testCase.expectation(description: "refresh completed")
         refreshExpectationQueue.sync {
@@ -577,13 +711,20 @@ private final class RefreshHarness {
                 return
             }
 
-            guard state.widgetReloadCount >= state.expectedWidgetReloadCount else {
+            if state.expectedWidgetReloadCount > 0,
+               state.widgetReloadCount < state.expectedWidgetReloadCount {
+                return
+            }
+
+            if state.expectedScriptRunCount > 0,
+               state.scriptRunCount < state.expectedScriptRunCount {
                 return
             }
 
             expectation.fulfill()
             pendingRefreshExpectation = nil
             state.expectedWidgetReloadCount = 0
+            state.expectedScriptRunCount = 0
         }
     }
 
@@ -622,7 +763,9 @@ private final class RefreshHarness {
         var widgetReloadCount = 0
         var stopAccessCount = 0
         var expectedWidgetReloadCount = 0
+        var expectedScriptRunCount = 0
         var onWidgetReload: ((Int) -> Void)?
+        var onScriptRun: ((Int) -> Void)?
         var scriptRunnerHook: ((Int) throws -> Void)?
 
         init(currentDate: Date) {
