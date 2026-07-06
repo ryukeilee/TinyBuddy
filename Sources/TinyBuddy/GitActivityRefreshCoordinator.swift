@@ -115,6 +115,7 @@ final class GitActivityRefreshCoordinator {
     private var lastRefreshAttemptAt: Date?
     private var lastWakeRefreshAt: Date?
     private var pendingWakeRefreshTrigger: GitTodayActivityRefreshTrigger?
+    private var pendingWakeRefreshRequestedAt: Date?
 
     init(
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
@@ -222,6 +223,7 @@ final class GitActivityRefreshCoordinator {
 
         if isRefreshing {
             pendingWakeRefreshTrigger = trigger
+            pendingWakeRefreshRequestedAt = now
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
@@ -257,14 +259,24 @@ final class GitActivityRefreshCoordinator {
         }
     }
 
-    private func finishRefresh() {
+    private func finishRefresh(succeeded: Bool) {
         isRefreshing = false
 
         guard let pendingWakeRefreshTrigger else {
             return
         }
 
+        let pendingWakeRefreshRequestedAt = self.pendingWakeRefreshRequestedAt
         self.pendingWakeRefreshTrigger = nil
+        self.pendingWakeRefreshRequestedAt = nil
+
+        if succeeded,
+           let lastWakeRefreshAt,
+           let pendingWakeRefreshRequestedAt,
+           pendingWakeRefreshRequestedAt.timeIntervalSince(lastWakeRefreshAt) < wakeRefreshCoalescingInterval {
+            return
+        }
+
         if refresh(trigger: pendingWakeRefreshTrigger, force: true) {
             lastWakeRefreshAt = dateProvider()
         }
@@ -358,7 +370,7 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     defer {
-                        self.finishRefresh()
+                        self.finishRefresh(succeeded: true)
                     }
 
                     let currentSnapshot = self.activityStore.loadTodaySnapshot()
@@ -414,7 +426,7 @@ final class GitActivityRefreshCoordinator {
                             reason: self.summarizedReason(from: error)
                         )
                     )
-                    self.finishRefresh()
+                    self.finishRefresh(succeeded: false)
                     NSLog("TinyBuddy: git refresh failed for trigger %@: %@", String(describing: trigger), error.localizedDescription)
                 }
             }

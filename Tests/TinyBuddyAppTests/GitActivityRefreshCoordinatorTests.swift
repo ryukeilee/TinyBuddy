@@ -360,7 +360,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
-    func testWakeNotificationBurstQueuesAtMostOneFollowUpRefresh() {
+    func testWakeNotificationBurstCoalescesQueuedWakeRefreshAfterSuccessfulRefresh() {
         let harness = makeHarness()
         harness.setScriptRunnerHook { runCount in
             switch runCount {
@@ -368,8 +368,6 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
             case 2:
                 harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
-            case 3:
-                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 1, recentProjectName: "TinyBuddy")
             default:
                 return
             }
@@ -378,17 +376,18 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForRefresh {
             harness.coordinator.start()
         }
-        harness.performAndWaitForWidgetReloadCount(3) {
+        harness.performAndWaitForWidgetReloadCount(2) {
             harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
             harness.postWorkspaceNotification(named: NSWorkspace.screensDidWakeNotification)
             harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
         }
 
-        XCTAssertEqual(harness.scriptRunCount, 3)
-        XCTAssertEqual(harness.widgetReloadCount, 3)
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
-    func testWakeNotificationDuringRefreshQueuesOneFollowUpRefresh() {
+    func testWakeNotificationDuringRefreshCoalescesQueuedWakeRefreshWithinWakeWindow() {
         let harness = makeHarness()
         let allowWakeRefreshToFinish = DispatchSemaphore(value: 0)
         let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
@@ -400,9 +399,6 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             }
 
             guard runCount == 2 else {
-                if runCount == 3 {
-                    harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 1, recentProjectName: "TinyBuddy")
-                }
                 return
             }
 
@@ -412,6 +408,44 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 queuedWakeNotificationPosted.fulfill()
             }
             allowWakeRefreshToFinish.wait()
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        wait(for: [queuedWakeNotificationPosted], timeout: 1.0)
+        allowWakeRefreshToFinish.signal()
+        harness.waitForWidgetReloadCount(2)
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
+    func testWakeNotificationDuringLongRefreshRunsFollowUpAfterCoalescingWindow() {
+        let harness = makeHarness()
+        let allowWakeRefreshToFinish = DispatchSemaphore(value: 0)
+        let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
+
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
+                harness.advanceCurrentDate(by: 6)
+                DispatchQueue.main.async {
+                    harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+                    queuedWakeNotificationPosted.fulfill()
+                }
+                allowWakeRefreshToFinish.wait()
+            case 3:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 1, recentProjectName: "TinyBuddy")
+            default:
+                return
+            }
         }
 
         harness.performAndWaitForRefresh {
