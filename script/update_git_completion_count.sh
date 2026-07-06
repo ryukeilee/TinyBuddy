@@ -17,10 +17,13 @@ TODAY="$(date +%F)"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 FIND_BIN="${TINYBUDDY_FIND_BIN:-find}"
 STAT_BIN="${TINYBUDDY_STAT_BIN:-stat}"
+PERL_BIN="${TINYBUDDY_PERL_BIN:-perl}"
 CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-repository-cache}"
 CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
+CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
+EMPTY_CACHE_VALUE="__TINYBUDDY_EMPTY__"
 
 total_count=0
 latest_activity_timestamp=""
@@ -34,6 +37,8 @@ repo_list_file="$(mktemp)"
 repo_scan_file="$(mktemp)"
 repo_reflog_file="$(mktemp)"
 repo_git_paths_file="$(mktemp)"
+repo_stats_cache_file="$(mktemp)"
+new_repo_stats_file="$(mktemp)"
 find_stderr_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
 diagnostics_emitted=0
@@ -44,7 +49,7 @@ log_error() {
 }
 
 cleanup() {
-  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$find_stderr_file" "$focus_block_list_file"
+  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
 emit_runtime_diagnostics_once() {
@@ -161,6 +166,7 @@ reset_activity_snapshot() {
   successful_reflog_repo_count=0
   failed_reflog_repo_count=0
   : > "$focus_block_list_file"
+  : > "$new_repo_stats_file"
 }
 
 build_scan_root_signature() {
@@ -262,13 +268,86 @@ load_cached_repository_list() {
   cp "$CACHE_REPO_LIST_FILE" "$repo_list_file"
 }
 
+load_cached_repository_stats() {
+  if [ -f "$CACHE_REPO_STATS_FILE" ]; then
+    cp "$CACHE_REPO_STATS_FILE" "$repo_stats_cache_file"
+  else
+    : > "$repo_stats_cache_file"
+  fi
+}
+
+write_repository_stats_cache() {
+  /bin/mkdir -p "$CACHE_DIR"
+  cp "$new_repo_stats_file" "$CACHE_REPO_STATS_FILE"
+}
+
+read_reflog_mtime() {
+  local reflog_path="$1"
+  "$STAT_BIN" -f '%m' "$reflog_path"
+}
+
+append_cached_focus_blocks() {
+  local encoded_focus_blocks="$1"
+
+  if [ "$encoded_focus_blocks" = "$EMPTY_CACHE_VALUE" ] || [ -z "$encoded_focus_blocks" ]; then
+    return
+  fi
+
+  printf '%s\n' "$encoded_focus_blocks" | tr ',' '\n' >> "$focus_block_list_file"
+}
+
+write_repository_stats_entry() {
+  local repo_root="$1"
+  local git_dir="$2"
+  local reflog_path="$3"
+  local reflog_mtime="$4"
+  local repo_count="$5"
+  local repo_latest_timestamp="${6:-}"
+  local encoded_focus_blocks="${7:-}"
+
+  case "$repo_root$git_dir$reflog_path$repo_latest_timestamp$encoded_focus_blocks" in
+    *$'\t'*|*$'\n'*|*$'\r'*)
+      return
+      ;;
+  esac
+
+  if [ -z "$repo_latest_timestamp" ]; then
+    repo_latest_timestamp="$EMPTY_CACHE_VALUE"
+  fi
+
+  if [ -z "$encoded_focus_blocks" ]; then
+    encoded_focus_blocks="$EMPTY_CACHE_VALUE"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$repo_root" \
+    "$git_dir" \
+    "$reflog_path" \
+    "$TODAY" \
+    "$reflog_mtime" \
+    "$repo_count" \
+    "$repo_latest_timestamp" \
+    "$encoded_focus_blocks" >> "$new_repo_stats_file"
+}
+
 process_repository_list() {
   local using_cached_repo_list="$1"
   local repo_root
   local git_dir
   local reflog_path
+  local reflog_mtime
   local repo_count
   local repo_latest_timestamp
+  local repo_focus_blocks
+  local cached_repo_stats
+  local cached_repo_root
+  local cached_git_dir
+  local cached_reflog_path
+  local cached_day
+  local cached_reflog_mtime
+  local cached_repo_count
+  local cached_repo_latest_timestamp
+  local cached_repo_focus_blocks
 
   reset_activity_snapshot
 
@@ -319,8 +398,41 @@ process_repository_list() {
     readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
     repo_count=0
     repo_latest_timestamp=""
+    repo_focus_blocks=""
+    reflog_mtime="$(read_reflog_mtime "$reflog_path")" || {
+      failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+      log_error "failed to read git reflog metadata for one repository; preserving previous shared data"
+      continue
+    }
+
+    cached_repo_stats="$(awk -F '\t' -v repo_root="$repo_root" '$1 == repo_root { print; exit }' "$repo_stats_cache_file")"
+    if [ -n "$cached_repo_stats" ]; then
+      IFS=$'\t' read -r cached_repo_root cached_git_dir cached_reflog_path cached_day cached_reflog_mtime cached_repo_count cached_repo_latest_timestamp cached_repo_focus_blocks <<< "$cached_repo_stats"
+
+      if [ "$cached_repo_root" = "$repo_root" ] &&
+         [ "$cached_git_dir" = "$git_dir" ] &&
+         [ "$cached_reflog_path" = "$reflog_path" ] &&
+         [ "$cached_day" = "$TODAY" ] &&
+         [ "$cached_reflog_mtime" = "$reflog_mtime" ]; then
+        successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
+        repo_count="$cached_repo_count"
+        if [ "$cached_repo_latest_timestamp" != "$EMPTY_CACHE_VALUE" ]; then
+          repo_latest_timestamp="$cached_repo_latest_timestamp"
+        fi
+        append_cached_focus_blocks "$cached_repo_focus_blocks"
+        write_repository_stats_entry "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" "$repo_count" "$repo_latest_timestamp" "$cached_repo_focus_blocks"
+        total_count=$((total_count + repo_count))
+
+        if [ -n "$repo_latest_timestamp" ] && { [ -z "$latest_activity_timestamp" ] || [[ "$repo_latest_timestamp" > "$latest_activity_timestamp" ]]; }; then
+          latest_activity_timestamp="$repo_latest_timestamp"
+          recent_project_name="$(basename "$repo_root")"
+        fi
+        continue
+      fi
+    fi
+
     : > "$repo_reflog_file"
-    if ! perl -MPOSIX=strftime -e '
+    if ! "$PERL_BIN" -MPOSIX=strftime -e '
         use strict;
         use warnings;
 
@@ -375,6 +487,9 @@ process_repository_list() {
           ;;
       esac
     done < "$repo_reflog_file"
+
+    repo_focus_blocks="$(awk -F '\t' '$1 == "BLOCK" { print $2 }' "$repo_reflog_file" | sort -u | paste -sd, -)"
+    write_repository_stats_entry "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" "$repo_count" "$repo_latest_timestamp" "$repo_focus_blocks"
 
     total_count=$((total_count + repo_count))
 
@@ -503,10 +618,12 @@ fi
 using_cached_repo_list=0
 if cache_matches_current_roots; then
   load_cached_repository_list
+  load_cached_repository_stats
   using_cached_repo_list=1
 else
   refresh_repository_list_from_scan
   write_repository_cache
+  load_cached_repository_stats
 fi
 
 process_repository_list "$using_cached_repo_list" || process_result="$?"
@@ -551,6 +668,7 @@ write_plist_string_if_changed "$FOCUS_BLOCK_DAY_KEY" "$TODAY"
 write_plist_integer_if_changed "$FOCUS_BLOCK_COUNT_KEY" "$focus_block_count"
 write_plist_string_if_changed "$RECENT_PROJECT_DAY_KEY" "$TODAY"
 write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
+write_repository_stats_cache
 
 if [ "$shared_data_rewritten" -eq 0 ]; then
   echo "TinyBuddy git shared data unchanged; skipped plist rewrite"

@@ -149,6 +149,75 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(secondRecursiveScanCount, 1)
     }
 
+    func testScriptSkipsReflogReparseWhenCachedMtimeDidNotChange() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let perlProbe = try harness.makePerlProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path
+        ])
+        let firstParseCount = try harness.perlInvocationCount(from: perlProbe.logURL)
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path
+        ])
+        let secondParseCount = try harness.perlInvocationCount(from: perlProbe.logURL)
+
+        XCTAssertEqual(firstParseCount, 1)
+        XCTAssertEqual(secondParseCount, 1)
+    }
+
+    func testScriptReparsesOnlyRepositoryWhoseReflogMtimeChanged() throws {
+        let harness = try ScriptHarness()
+        let alphaURL = try harness.makeRepository(named: "ProjectAlpha")
+        let betaURL = try harness.makeRepository(named: "ProjectBeta")
+        let perlProbe = try harness.makePerlProbe()
+        try harness.writeHeadReflog(
+            for: alphaURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha")
+            ]
+        )
+        try harness.writeHeadReflog(
+            for: betaURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: beta-first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path
+        ])
+        XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 2)
+
+        try harness.writeHeadReflog(
+            for: betaURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: beta-first"),
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 45, message: "commit: beta-second")
+            ]
+        )
+        try harness.setReflogModificationDate(for: betaURL, to: Date().addingTimeInterval(5))
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path
+        ])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 3)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 3)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+    }
+
     func testScriptRebuildsRepositoryCacheWhenAuthorizedDirectoryChanges() throws {
         let harness = try ScriptHarness()
         let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -235,6 +304,45 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
     }
+
+    func testScriptDoesNotReuseCachedStatsWhenGitDirEscapesAuthorizedRoots() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepositoryWithExternalGitDir(named: "ProjectBeta")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 14, minute: 5, message: "commit: worktree")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+
+        let escapedGitDirURL = harness.rootURL.appendingPathComponent("escaped-gitdir", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: escapedGitDirURL.appendingPathComponent("logs", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try "gitdir: \(escapedGitDirURL.path)\n".write(
+            to: repoURL.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try harness.writeHeadReflog(
+            at: escapedGitDirURL.appendingPathComponent("logs/HEAD"),
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 15, minute: 10, message: "commit: escaped")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.standardError.contains("escaped authorized roots"))
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+    }
 }
 
 private struct ScriptHarness {
@@ -300,7 +408,16 @@ private struct ScriptHarness {
 
     func writeHeadReflog(for repoURL: URL, lines: [String]) throws {
         let reflogURL = try headReflogURL(for: repoURL)
+        try writeHeadReflog(at: reflogURL, lines: lines)
+    }
+
+    func writeHeadReflog(at reflogURL: URL, lines: [String]) throws {
         try lines.joined(separator: "\n").appending("\n").write(to: reflogURL, atomically: true, encoding: .utf8)
+    }
+
+    func setReflogModificationDate(for repoURL: URL, to date: Date) throws {
+        let reflogURL = try headReflogURL(for: repoURL)
+        try fileManager.setAttributes([.modificationDate: date], ofItemAtPath: reflogURL.path)
     }
 
     func makeUnreadableAsFileHeadReflog(for repoURL: URL) throws {
@@ -335,6 +452,19 @@ private struct ScriptHarness {
         return FindProbe(scriptURL: scriptURL, logURL: logURL)
     }
 
+    func makePerlProbe() throws -> PerlProbe {
+        let scriptURL = rootURL.appendingPathComponent("perl-probe.sh")
+        let logURL = rootURL.appendingPathComponent("perl-probe.log")
+        let script = """
+        #!/bin/bash
+        printf 'perl\\n' >> "\(logURL.path)"
+        exec /usr/bin/perl "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return PerlProbe(scriptURL: scriptURL, logURL: logURL)
+    }
+
     func recursiveScanInvocationCount(from logURL: URL) throws -> Int {
         guard fileManager.fileExists(atPath: logURL.path) else {
             return 0
@@ -345,6 +475,15 @@ private struct ScriptHarness {
             .split(separator: "\n")
             .filter { $0.contains("-name .git") }
             .count
+    }
+
+    func perlInvocationCount(from logURL: URL) throws -> Int {
+        guard fileManager.fileExists(atPath: logURL.path) else {
+            return 0
+        }
+
+        let content = try String(contentsOf: logURL, encoding: .utf8)
+        return content.split(separator: "\n").count
     }
 
     func run(scanRoots: [URL], extraEnvironment: [String: String] = [:]) throws -> ScriptRunResult {
@@ -434,6 +573,11 @@ private struct ScriptRunResult {
 }
 
 private struct FindProbe {
+    let scriptURL: URL
+    let logURL: URL
+}
+
+private struct PerlProbe {
     let scriptURL: URL
     let logURL: URL
 }
