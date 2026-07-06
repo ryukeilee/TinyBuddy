@@ -18,7 +18,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 refreshedAt: harness.currentDate,
                 trigger: .becameActive,
                 outcome: .skipped,
-                reason: "no authorized Git scan roots"
+                reason: "no authorized Git scan roots",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: 0,
+                    widgetReloaded: false,
+                    reason: "no authorized Git scan roots"
+                )
             )
         )
     }
@@ -54,13 +60,27 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             GitActivityRefreshStatus(
                 refreshedAt: harness.currentDate,
                 trigger: .becameActive,
-                outcome: .succeeded
+                outcome: .succeeded,
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: 1,
+                    widgetReloaded: false
+                )
             )
         )
     }
 
     func testVisibleRefreshReloadsWidgetWhenGitActivityChanges() {
         let harness = makeHarness()
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 5,
+                cacheHitCount: 3,
+                reflogUnchangedSkipCount: 2,
+                recomputedRepositoryCount: 3,
+                sharedDataWritten: true
+            )
+        )
         harness.setScriptRunnerHook { runCount in
             guard runCount == 1 else {
                 return
@@ -75,6 +95,19 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.scriptRunCount, 1)
         XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.metrics,
+            GitActivityRefreshMetrics(
+                durationMilliseconds: 0,
+                authorizedRootCount: 1,
+                repositoryCount: 5,
+                cacheHitCount: 3,
+                reflogUnchangedSkipCount: 2,
+                recomputedRepositoryCount: 3,
+                sharedDataWritten: true,
+                widgetReloaded: true
+            )
+        )
     }
 
     func testRefreshMirrorsGitActivitySnapshotToStandardDefaults() {
@@ -173,7 +206,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 refreshedAt: harness.currentDate,
                 trigger: .becameActive,
                 outcome: .failed,
-                reason: "refresh script exited with status 1:"
+                reason: "refresh script exited with status 1:",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: 1,
+                    widgetReloaded: false,
+                    reason: "refresh script exited with status 1:"
+                )
             )
         )
     }
@@ -221,7 +260,12 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 refreshedAt: harness.currentDate,
                 trigger: .becameActive,
                 outcome: .skipped,
-                reason: "minimum refresh spacing not reached"
+                reason: "minimum refresh spacing not reached",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: "minimum refresh spacing not reached"
+                )
             )
         )
     }
@@ -460,7 +504,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 refreshedAt: harness.currentDate,
                 trigger: .sessionDidBecomeActive,
                 outcome: .skipped,
-                reason: "no authorized Git scan roots"
+                reason: "no authorized Git scan roots",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: 0,
+                    widgetReloaded: false,
+                    reason: "no authorized Git scan roots"
+                )
             )
         )
     }
@@ -571,6 +621,11 @@ private final class RefreshHarness {
                 state.capturedRootPaths = rootURLs.map(\.standardizedFileURL.path)
                 try state.scriptRunnerHook?(state.scriptRunCount)
                 state.onScriptRun?(state.scriptRunCount)
+                return GitRefreshScriptResult(
+                    standardOutput: "",
+                    standardError: "",
+                    metrics: state.scriptMetrics
+                )
             },
             authorizedRootsProvider: { [state] in
                 state.authorizedRoots.map { url in
@@ -614,6 +669,10 @@ private final class RefreshHarness {
 
     func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
         state.scriptRunnerHook = hook
+    }
+
+    func setScriptMetrics(_ metrics: GitRefreshScriptMetrics?) {
+        state.scriptMetrics = metrics
     }
 
     func setActivitySnapshot(
@@ -767,6 +826,7 @@ private final class RefreshHarness {
         var onWidgetReload: ((Int) -> Void)?
         var onScriptRun: ((Int) -> Void)?
         var scriptRunnerHook: ((Int) throws -> Void)?
+        var scriptMetrics: GitRefreshScriptMetrics?
 
         init(currentDate: Date) {
             self.currentDate = currentDate

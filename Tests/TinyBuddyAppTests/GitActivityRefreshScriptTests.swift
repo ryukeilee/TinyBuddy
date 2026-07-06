@@ -71,9 +71,15 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         _ = try harness.run(scanRoots: [harness.scanRootURL])
 
         let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
 
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertTrue(result.standardOutput.contains("TinyBuddy git shared data unchanged; skipped plist rewrite"))
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["cache_hit_count"], "1")
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "1")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "0")
+        XCTAssertEqual(metrics["shared_data_written"], "0")
     }
 
     func testScriptParsesTodayActivityFromGitFileWorktreeMetadata() throws {
@@ -210,12 +216,18 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path
         ])
         let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
 
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 3)
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 3)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(metrics["cache_hit_count"], "2")
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "1")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+        XCTAssertEqual(metrics["shared_data_written"], "1")
     }
 
     func testScriptRebuildsRepositoryCacheWhenAuthorizedDirectoryChanges() throws {
@@ -484,6 +496,24 @@ private struct ScriptHarness {
 
         let content = try String(contentsOf: logURL, encoding: .utf8)
         return content.split(separator: "\n").count
+    }
+
+    func metrics(from standardOutput: String) -> [String: String]? {
+        guard let line = standardOutput
+            .split(whereSeparator: \.isNewline)
+            .first(where: { $0.hasPrefix("TINYBUDDY_REFRESH_METRICS\t") }) else {
+            return nil
+        }
+
+        var values: [String: String] = [:]
+        for field in line.split(separator: "\t").dropFirst() {
+            let parts = field.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else {
+                continue
+            }
+            values[parts[0]] = parts[1]
+        }
+        return values
     }
 
     func run(scanRoots: [URL], extraEnvironment: [String: String] = [:]) throws -> ScriptRunResult {

@@ -8,8 +8,91 @@ extension Notification.Name {
     static let gitActivityRefreshStatusDidChange = Notification.Name("TinyBuddy.gitActivityRefreshStatusDidChange")
 }
 
+struct GitRefreshScriptMetrics: Equatable {
+    let repositoryCount: Int?
+    let cacheHitCount: Int?
+    let reflogUnchangedSkipCount: Int?
+    let recomputedRepositoryCount: Int?
+    let sharedDataWritten: Bool?
+}
+
+struct GitRefreshScriptResult {
+    let standardOutput: String
+    let standardError: String
+    let metrics: GitRefreshScriptMetrics?
+}
+
+private struct GitRefreshScriptResultParser {
+    static let metricsPrefix = "TINYBUDDY_REFRESH_METRICS\t"
+
+    static func parseMetrics(from standardOutput: String) -> GitRefreshScriptMetrics? {
+        let metricsLine = standardOutput
+            .split(whereSeparator: \.isNewline)
+            .last { $0.hasPrefix(metricsPrefix) }
+            .map(String.init)
+
+        guard let metricsLine else {
+            return nil
+        }
+
+        let payload = String(metricsLine.dropFirst(metricsPrefix.count))
+        var values: [String: String] = [:]
+        for field in payload.split(separator: "\t") {
+            let parts = field.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else {
+                continue
+            }
+            values[parts[0]] = parts[1]
+        }
+
+        return GitRefreshScriptMetrics(
+            repositoryCount: values["repository_count"].flatMap(Int.init),
+            cacheHitCount: values["cache_hit_count"].flatMap(Int.init),
+            reflogUnchangedSkipCount: values["reflog_unchanged_skip_count"].flatMap(Int.init),
+            recomputedRepositoryCount: values["recomputed_repository_count"].flatMap(Int.init),
+            sharedDataWritten: values["shared_data_written"].flatMap { value in
+                switch value {
+                case "1":
+                    return true
+                case "0":
+                    return false
+                default:
+                    return nil
+                }
+            }
+        )
+    }
+
+    static func outputWithoutMetricsLine(_ standardOutput: String) -> String {
+        standardOutput
+            .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .filter { !$0.hasPrefix(metricsPrefix) }
+            .map(String.init)
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct GitRefreshScriptExecutionError: LocalizedError {
+    let terminationStatus: Int32
+    let standardOutput: String
+    let standardError: String
+    let metrics: GitRefreshScriptMetrics?
+
+    var errorDescription: String? {
+        let scriptDiagnostics = [standardOutput, standardError]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        if scriptDiagnostics.isEmpty {
+            return "refresh script exited with status \(terminationStatus)"
+        }
+
+        return "refresh script exited with status \(terminationStatus):\n\(scriptDiagnostics)"
+    }
+}
+
 final class GitActivityRefreshCoordinator {
-    typealias ScriptRunner = (URL, [URL]) throws -> Void
+    typealias ScriptRunner = (URL, [URL]) throws -> GitRefreshScriptResult
     typealias ScriptURLProvider = () -> URL?
     typealias AuthorizedRootsProvider = () -> [ScopedGitScanRoot]
 
@@ -143,7 +226,12 @@ final class GitActivityRefreshCoordinator {
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: "refresh already in progress"
+                reason: "refresh already in progress",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: "refresh already in progress"
+                )
             )
             return
         }
@@ -154,7 +242,12 @@ final class GitActivityRefreshCoordinator {
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: "wake refresh coalesced"
+                reason: "wake refresh coalesced",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: "wake refresh coalesced"
+                )
             )
             return
         }
@@ -186,7 +279,12 @@ final class GitActivityRefreshCoordinator {
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: "minimum refresh spacing not reached"
+                reason: "minimum refresh spacing not reached",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: "minimum refresh spacing not reached"
+                )
             )
             return false
         }
@@ -196,7 +294,12 @@ final class GitActivityRefreshCoordinator {
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: "refresh already in progress"
+                reason: "refresh already in progress",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: "refresh already in progress"
+                )
             )
             return false
         }
@@ -206,7 +309,12 @@ final class GitActivityRefreshCoordinator {
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .failed,
-                reason: "missing git refresh script"
+                reason: "missing git refresh script",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: "missing git refresh script"
+                )
             )
             NSLog("TinyBuddy: missing git refresh script for trigger %@", String(describing: trigger))
             return false
@@ -219,7 +327,13 @@ final class GitActivityRefreshCoordinator {
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: "no authorized Git scan roots"
+                reason: "no authorized Git scan roots",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: 0,
+                    widgetReloaded: false,
+                    reason: "no authorized Git scan roots"
+                )
             )
             NSLog("TinyBuddy: skipping git refresh for trigger %@ because no Git scan roots are authorized", String(describing: trigger))
             scopedRoots.forEach { $0.stopAccessing() }
@@ -237,7 +351,7 @@ final class GitActivityRefreshCoordinator {
             }
 
             do {
-                try scriptRunner(scriptURL, authorizedRootURLs)
+                let scriptResult = try scriptRunner(scriptURL, authorizedRootURLs)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else {
                         return
@@ -256,10 +370,11 @@ final class GitActivityRefreshCoordinator {
                         currentSnapshot,
                         refreshedAt: now
                     )
-                    if GitTodayActivityRefreshPolicy.shouldReloadWidget(
+                    let didReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
                         didChange: refreshResult.didChange
-                    ) {
+                    )
+                    if didReloadWidget {
                         self.widgetReloader()
                     }
 
@@ -267,7 +382,15 @@ final class GitActivityRefreshCoordinator {
                         refreshedAt: now,
                         trigger: trigger,
                         outcome: .succeeded,
-                        reason: nil
+                        reason: nil,
+                        metrics: self.makeMetrics(
+                            startedAt: now,
+                            finishedAt: self.dateProvider(),
+                            authorizedRootCount: authorizedRootURLs.count,
+                            scriptMetrics: scriptResult.metrics,
+                            widgetReloaded: didReloadWidget,
+                            reason: nil
+                        )
                     )
                 }
             } catch {
@@ -276,11 +399,20 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
+                    let scriptMetrics = (error as? GitRefreshScriptExecutionError)?.metrics
                     self.recordRefreshStatus(
                         refreshedAt: now,
                         trigger: trigger,
                         outcome: .failed,
-                        reason: self.summarizedReason(from: error)
+                        reason: self.summarizedReason(from: error),
+                        metrics: self.makeMetrics(
+                            startedAt: now,
+                            finishedAt: self.dateProvider(),
+                            authorizedRootCount: authorizedRootURLs.count,
+                            scriptMetrics: scriptMetrics,
+                            widgetReloaded: false,
+                            reason: self.summarizedReason(from: error)
+                        )
                     )
                     self.finishRefresh()
                     NSLog("TinyBuddy: git refresh failed for trigger %@: %@", String(describing: trigger), error.localizedDescription)
@@ -303,16 +435,39 @@ final class GitActivityRefreshCoordinator {
         refreshedAt: Date,
         trigger: GitTodayActivityRefreshTrigger,
         outcome: GitActivityRefreshOutcome,
-        reason: String?
+        reason: String?,
+        metrics: GitActivityRefreshMetrics? = nil
     ) {
         let status = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
             trigger: trigger,
             outcome: outcome,
-            reason: summarizedReason(reason)
+            reason: summarizedReason(reason),
+            metrics: metrics
         )
         refreshStatusStore.save(status)
         NotificationCenter.default.post(name: .gitActivityRefreshStatusDidChange, object: status)
+    }
+
+    private func makeMetrics(
+        startedAt: Date,
+        finishedAt: Date,
+        authorizedRootCount: Int,
+        scriptMetrics: GitRefreshScriptMetrics?,
+        widgetReloaded: Bool,
+        reason: String?
+    ) -> GitActivityRefreshMetrics {
+        GitActivityRefreshMetrics(
+            durationMilliseconds: max(0, Int(finishedAt.timeIntervalSince(startedAt) * 1000)),
+            authorizedRootCount: authorizedRootCount,
+            repositoryCount: scriptMetrics?.repositoryCount,
+            cacheHitCount: scriptMetrics?.cacheHitCount,
+            reflogUnchangedSkipCount: scriptMetrics?.reflogUnchangedSkipCount,
+            recomputedRepositoryCount: scriptMetrics?.recomputedRepositoryCount,
+            sharedDataWritten: scriptMetrics?.sharedDataWritten,
+            widgetReloaded: widgetReloaded,
+            reason: summarizedReason(reason)
+        )
     }
 
     private func summarizedReason(from error: Error) -> String? {
@@ -393,7 +548,7 @@ final class GitActivityRefreshCoordinator {
         return fallbackURL
     }
 
-    private static func runScript(at scriptURL: URL, scanningRoots rootURLs: [URL]) throws {
+    private static func runScript(at scriptURL: URL, scanningRoots rootURLs: [URL]) throws -> GitRefreshScriptResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptURL.path]
@@ -450,26 +605,32 @@ final class GitActivityRefreshCoordinator {
             encoding: .utf8
         )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
+        let metrics = GitRefreshScriptResultParser.parseMetrics(from: standardOutput)
+        let visibleOutput = GitRefreshScriptResultParser.outputWithoutMetricsLine(standardOutput)
+
         guard process.terminationStatus == 0 else {
-            let scriptDiagnostics = [standardOutput, standardError]
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
-            throw NSError(
-                domain: "TinyBuddy.GitActivityRefreshCoordinator",
-                code: Int(process.terminationStatus),
-                userInfo: [
-                    NSLocalizedDescriptionKey: scriptDiagnostics.isEmpty
-                        ? "refresh script exited with status \(process.terminationStatus)"
-                        : "refresh script exited with status \(process.terminationStatus):\n\(scriptDiagnostics)"
-                ]
+            throw GitRefreshScriptExecutionError(
+                terminationStatus: process.terminationStatus,
+                standardOutput: visibleOutput,
+                standardError: standardError,
+                metrics: metrics
             )
         }
 
         guard !standardError.isEmpty else {
-            return
+            return GitRefreshScriptResult(
+                standardOutput: visibleOutput,
+                standardError: standardError,
+                metrics: metrics
+            )
         }
 
         NSLog("TinyBuddy: git refresh script diagnostics: %@", standardError)
+        return GitRefreshScriptResult(
+            standardOutput: visibleOutput,
+            standardError: standardError,
+            metrics: metrics
+        )
     }
 
     private static func resolvedUserHomeDirectoryPath() -> String {

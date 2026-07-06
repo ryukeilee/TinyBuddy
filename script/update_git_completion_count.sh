@@ -43,6 +43,10 @@ find_stderr_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
 diagnostics_emitted=0
 shared_data_rewritten=0
+repository_count=0
+cache_hit_count=0
+reflog_unchanged_skip_count=0
+recomputed_repository_count=0
 
 log_error() {
   echo "TinyBuddy refresh script: $*" >&2
@@ -165,8 +169,25 @@ reset_activity_snapshot() {
   readable_reflog_repo_count=0
   successful_reflog_repo_count=0
   failed_reflog_repo_count=0
+  repository_count=0
+  cache_hit_count=0
+  reflog_unchanged_skip_count=0
+  recomputed_repository_count=0
   : > "$focus_block_list_file"
   : > "$new_repo_stats_file"
+}
+
+emit_refresh_metrics() {
+  local authorized_root_count
+  authorized_root_count="$(awk 'END { print NR + 0 }' "$scan_roots_file")"
+
+  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tshared_data_written=%s\n' \
+    "$authorized_root_count" \
+    "$repository_count" \
+    "$cache_hit_count" \
+    "$reflog_unchanged_skip_count" \
+    "$recomputed_repository_count" \
+    "$shared_data_rewritten"
 }
 
 build_scan_root_signature() {
@@ -352,6 +373,8 @@ process_repository_list() {
   reset_activity_snapshot
 
   while IFS= read -r repo_root; do
+    repository_count=$((repository_count + 1))
+
     if [ ! -e "$repo_root" ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
         log_error "cached repository path is no longer available; rebuilding repository cache"
@@ -407,6 +430,7 @@ process_repository_list() {
 
     cached_repo_stats="$(awk -F '\t' -v repo_root="$repo_root" '$1 == repo_root { print; exit }' "$repo_stats_cache_file")"
     if [ -n "$cached_repo_stats" ]; then
+      cache_hit_count=$((cache_hit_count + 1))
       IFS=$'\t' read -r cached_repo_root cached_git_dir cached_reflog_path cached_day cached_reflog_mtime cached_repo_count cached_repo_latest_timestamp cached_repo_focus_blocks <<< "$cached_repo_stats"
 
       if [ "$cached_repo_root" = "$repo_root" ] &&
@@ -415,6 +439,7 @@ process_repository_list() {
          [ "$cached_day" = "$TODAY" ] &&
          [ "$cached_reflog_mtime" = "$reflog_mtime" ]; then
         successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
+        reflog_unchanged_skip_count=$((reflog_unchanged_skip_count + 1))
         repo_count="$cached_repo_count"
         if [ "$cached_repo_latest_timestamp" != "$EMPTY_CACHE_VALUE" ]; then
           repo_latest_timestamp="$cached_repo_latest_timestamp"
@@ -431,6 +456,7 @@ process_repository_list() {
       fi
     fi
 
+    recomputed_repository_count=$((recomputed_repository_count + 1))
     : > "$repo_reflog_file"
     if ! "$PERL_BIN" -MPOSIX=strftime -e '
         use strict;
@@ -612,6 +638,7 @@ mv "$valid_scan_roots_file" "$scan_roots_file"
 
 if [ ! -s "$scan_roots_file" ]; then
   log_error "no authorized git scan roots supplied; skipping refresh"
+  emit_refresh_metrics
   exit 0
 fi
 
@@ -648,12 +675,14 @@ fi
 if [ "$readable_reflog_repo_count" -gt 0 ] && [ "$successful_reflog_repo_count" -eq 0 ]; then
   emit_runtime_diagnostics_once
   log_error "failed to read git reflog for every readable repository; preserving previous shared data"
+  emit_refresh_metrics
   exit 1
 fi
 
 if [ "$failed_reflog_repo_count" -gt 0 ]; then
   emit_runtime_diagnostics_once
   log_error "failed to parse one or more readable git reflogs; preserving previous shared data"
+  emit_refresh_metrics
   exit 1
 fi
 
@@ -674,6 +703,7 @@ if [ "$shared_data_rewritten" -eq 0 ]; then
   echo "TinyBuddy git shared data unchanged; skipped plist rewrite"
 fi
 
+emit_refresh_metrics
 echo "Updated TinyBuddy git completion count: $total_count"
 echo "Updated TinyBuddy git focus block count: $focus_block_count"
 echo "Updated TinyBuddy recent project name: ${recent_project_name:-<none>}"

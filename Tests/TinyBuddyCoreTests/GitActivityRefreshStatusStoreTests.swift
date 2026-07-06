@@ -52,6 +52,51 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
         XCTAssertNil(store.load())
     }
 
+    func testSaveAndLoadMetrics() {
+        let defaults = makeDefaults()
+        let store = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 9, minute: 1, second: 2)
+
+        store.save(
+            GitActivityRefreshStatus(
+                refreshedAt: refreshedAt,
+                trigger: .launch,
+                outcome: .succeeded,
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 4321,
+                    authorizedRootCount: 2,
+                    repositoryCount: 7,
+                    cacheHitCount: 4,
+                    reflogUnchangedSkipCount: 3,
+                    recomputedRepositoryCount: 4,
+                    sharedDataWritten: true,
+                    widgetReloaded: false,
+                    reason: "cached refresh"
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            store.load(),
+            GitActivityRefreshStatus(
+                refreshedAt: refreshedAt,
+                trigger: .launch,
+                outcome: .succeeded,
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 4321,
+                    authorizedRootCount: 2,
+                    repositoryCount: 7,
+                    cacheHitCount: 4,
+                    reflogUnchangedSkipCount: 3,
+                    recomputedRepositoryCount: 4,
+                    sharedDataWritten: true,
+                    widgetReloaded: false,
+                    reason: "cached refresh"
+                )
+            )
+        )
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "TinyBuddyGitActivityRefreshStatusStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
