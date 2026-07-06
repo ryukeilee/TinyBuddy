@@ -123,6 +123,118 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
     }
+
+    func testScriptReusesCachedRepositoryListWithoutRecursiveRescan() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let firstRecursiveScanCount = try harness.recursiveScanInvocationCount(from: findProbe.logURL)
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let secondRecursiveScanCount = try harness.recursiveScanInvocationCount(from: findProbe.logURL)
+
+        XCTAssertEqual(firstRecursiveScanCount, 1)
+        XCTAssertEqual(secondRecursiveScanCount, 1)
+    }
+
+    func testScriptRebuildsRepositoryCacheWhenAuthorizedDirectoryChanges() throws {
+        let harness = try ScriptHarness()
+        let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: firstRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+
+        let secondRepoURL = try harness.makeRepository(named: "ProjectBeta")
+        try harness.writeHeadReflog(
+            for: secondRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: second")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+    }
+
+    func testScriptRebuildsRepositoryCacheWhenCacheIsMissing() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        try FileManager.default.removeItem(at: harness.repositoryCacheFileURL)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+    }
+
+    func testScriptRebuildsRepositoryCacheWhenCachedRepositoryBecomesUnavailable() throws {
+        let harness = try ScriptHarness()
+        let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: firstRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+
+        try FileManager.default.removeItem(at: firstRepoURL.appendingPathComponent(".git/logs/HEAD"))
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.standardError.contains("rebuilding repository cache"))
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+    }
 }
 
 private struct ScriptHarness {
@@ -134,12 +246,14 @@ private struct ScriptHarness {
     let scriptURL: URL
     let calendar: Calendar
     let todayIdentifier: String
+    let cacheDirectoryURL: URL
 
     init() throws {
         rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         homeURL = rootURL.appendingPathComponent("home", isDirectory: true)
         scanRootURL = rootURL.appendingPathComponent("scan-root", isDirectory: true)
         plistURL = rootURL.appendingPathComponent("group.plist")
+        cacheDirectoryURL = rootURL.appendingPathComponent("repository-cache", isDirectory: true)
         scriptURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -153,6 +267,10 @@ private struct ScriptHarness {
 
         try fileManager.createDirectory(at: homeURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: scanRootURL, withIntermediateDirectories: true)
+    }
+
+    var repositoryCacheFileURL: URL {
+        cacheDirectoryURL.appendingPathComponent("repositories.txt")
     }
 
     func makeRepository(named name: String) throws -> URL {
@@ -204,7 +322,32 @@ private struct ScriptHarness {
         return dictionary
     }
 
-    func run(scanRoots: [URL]) throws -> ScriptRunResult {
+    func makeFindProbe() throws -> FindProbe {
+        let scriptURL = rootURL.appendingPathComponent("find-probe.sh")
+        let logURL = rootURL.appendingPathComponent("find-probe.log")
+        let script = """
+        #!/bin/bash
+        printf '%s\\n' "$*" >> "\(logURL.path)"
+        exec /usr/bin/find "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return FindProbe(scriptURL: scriptURL, logURL: logURL)
+    }
+
+    func recursiveScanInvocationCount(from logURL: URL) throws -> Int {
+        guard fileManager.fileExists(atPath: logURL.path) else {
+            return 0
+        }
+
+        let content = try String(contentsOf: logURL, encoding: .utf8)
+        return content
+            .split(separator: "\n")
+            .filter { $0.contains("-name .git") }
+            .count
+    }
+
+    func run(scanRoots: [URL], extraEnvironment: [String: String] = [:]) throws -> ScriptRunResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptURL.path]
@@ -215,7 +358,11 @@ private struct ScriptHarness {
         environment["TINYBUDDY_APP_GROUP_CONTAINER"] = rootURL.appendingPathComponent("group-container", isDirectory: true).path
         environment["TINYBUDDY_APP_GROUP_PREFERENCES_DIR"] = plistURL.deletingLastPathComponent().path
         environment["TINYBUDDY_APP_GROUP_PREFERENCES_PLIST"] = plistURL.path
+        environment["TINYBUDDY_GIT_REPOSITORY_CACHE_DIR"] = cacheDirectoryURL.path
         environment["TINYBUDDY_GIT_SCAN_ROOTS"] = scanRoots.map(\.path).joined(separator: "\n")
+        for (key, value) in extraEnvironment {
+            environment[key] = value
+        }
         process.environment = environment
 
         let stdoutPipe = Pipe()
@@ -284,4 +431,9 @@ private struct ScriptRunResult {
     let exitCode: Int32
     let standardOutput: String
     let standardError: String
+}
+
+private struct FindProbe {
+    let scriptURL: URL
+    let logURL: URL
 }

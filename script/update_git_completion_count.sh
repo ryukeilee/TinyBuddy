@@ -15,6 +15,12 @@ RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
 TODAY="$(date +%F)"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
+FIND_BIN="${TINYBUDDY_FIND_BIN:-find}"
+STAT_BIN="${TINYBUDDY_STAT_BIN:-stat}"
+CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-repository-cache}"
+CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
+CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
+CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
 
 total_count=0
 latest_activity_timestamp=""
@@ -147,6 +153,238 @@ resolve_git_dir() {
   )
 }
 
+reset_activity_snapshot() {
+  total_count=0
+  latest_activity_timestamp=""
+  recent_project_name=""
+  readable_reflog_repo_count=0
+  successful_reflog_repo_count=0
+  failed_reflog_repo_count=0
+  : > "$focus_block_list_file"
+}
+
+build_scan_root_signature() {
+  local signature_file="$1"
+  local scan_root
+
+  : > "$signature_file"
+
+  while IFS= read -r scan_root; do
+    if [ ! -d "$scan_root" ]; then
+      printf 'ROOT\t%s\tmissing\n' "$scan_root" >> "$signature_file"
+      continue
+    fi
+
+    "$STAT_BIN" -f 'ROOT\t%N\t%z\t%m\t%i' "$scan_root" >> "$signature_file"
+    "$FIND_BIN" "$scan_root" -mindepth 1 -maxdepth 1 -exec "$STAT_BIN" -f 'ENTRY\t%N\t%z\t%m\t%i' {} \; \
+      2>> "$find_stderr_file" | LC_ALL=C sort >> "$signature_file"
+  done < "$scan_roots_file"
+}
+
+refresh_repository_list_from_scan() {
+  local find_exit_code=0
+  local scan_root
+
+  : > "$repo_git_paths_file"
+  : > "$repo_scan_file"
+
+  while IFS= read -r scan_root; do
+    if [ ! -d "$scan_root" ]; then
+      log_error "authorized git scan root is not a readable directory; skipping one root"
+      continue
+    fi
+
+    "$FIND_BIN" "$scan_root" \
+      \( \
+        -path "$USER_HOME/Library" -o \
+        -path "$USER_HOME/.Trash" -o \
+        -path "$USER_HOME/.cache" -o \
+        -path "$USER_HOME/Movies" -o \
+        -path "$USER_HOME/Music" -o \
+        -path "$USER_HOME/Pictures" -o \
+        -path '*/node_modules' -o \
+        -path '*/.build' -o \
+        -path '*/DerivedData' \
+      \) -prune -o \
+      -type d -name .git -print0 -prune -o \
+      -type f -name .git -print0 >> "$repo_git_paths_file" 2>> "$find_stderr_file" || find_exit_code="$?"
+  done < "$scan_roots_file"
+
+  while IFS= read -r -d '' git_path; do
+    printf '%s\n' "${git_path%/.git}"
+  done < "$repo_git_paths_file" > "$repo_scan_file"
+
+  if [ "$find_exit_code" -ne 0 ]; then
+    emit_runtime_diagnostics_once
+    log_error "repository scan encountered inaccessible paths under authorized roots (find exit: $find_exit_code); continuing with readable results"
+    emit_find_stderr_sample
+  fi
+
+  sort -u "$repo_scan_file" > "$repo_list_file"
+}
+
+write_repository_cache() {
+  local cache_signature_file
+  cache_signature_file="$(mktemp)"
+
+  /bin/mkdir -p "$CACHE_DIR"
+  build_scan_root_signature "$cache_signature_file"
+  cp "$repo_list_file" "$CACHE_REPO_LIST_FILE"
+  cp "$scan_roots_file" "$CACHE_SCAN_ROOTS_FILE"
+  cp "$cache_signature_file" "$CACHE_SCAN_ROOTS_SIGNATURE_FILE"
+  rm -f "$cache_signature_file"
+}
+
+cache_matches_current_roots() {
+  local current_signature_file
+  current_signature_file="$(mktemp)"
+
+  if [ ! -f "$CACHE_REPO_LIST_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_SIGNATURE_FILE" ]; then
+    rm -f "$current_signature_file"
+    return 1
+  fi
+
+  if ! cmp -s "$scan_roots_file" "$CACHE_SCAN_ROOTS_FILE"; then
+    rm -f "$current_signature_file"
+    return 1
+  fi
+
+  build_scan_root_signature "$current_signature_file"
+  if ! cmp -s "$current_signature_file" "$CACHE_SCAN_ROOTS_SIGNATURE_FILE"; then
+    rm -f "$current_signature_file"
+    return 1
+  fi
+
+  rm -f "$current_signature_file"
+}
+
+load_cached_repository_list() {
+  cp "$CACHE_REPO_LIST_FILE" "$repo_list_file"
+}
+
+process_repository_list() {
+  local using_cached_repo_list="$1"
+  local repo_root
+  local git_dir
+  local reflog_path
+  local repo_count
+  local repo_latest_timestamp
+
+  reset_activity_snapshot
+
+  while IFS= read -r repo_root; do
+    if [ ! -e "$repo_root" ]; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository path is no longer available; rebuilding repository cache"
+        return 2
+      fi
+      continue
+    fi
+
+    git_dir="$(resolve_git_dir "$repo_root")" || {
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository metadata is no longer available; rebuilding repository cache"
+        return 2
+      fi
+      continue
+    }
+
+    if ! path_is_within_authorized_roots "$git_dir"; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository metadata escaped authorized roots; rebuilding repository cache"
+        return 2
+      fi
+      log_error "resolved git metadata path escaped authorized roots; skipping one repository"
+      continue
+    fi
+
+    reflog_path="$git_dir/logs/HEAD"
+    if [ ! -e "$reflog_path" ]; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository reflog is no longer available; rebuilding repository cache"
+        return 2
+      fi
+      continue
+    fi
+    if [ ! -r "$reflog_path" ]; then
+      continue
+    fi
+    if [ ! -f "$reflog_path" ]; then
+      readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
+      failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+      log_error "git reflog path is not a regular file for one repository; preserving previous shared data"
+      continue
+    fi
+
+    readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
+    repo_count=0
+    repo_latest_timestamp=""
+    : > "$repo_reflog_file"
+    if ! perl -MPOSIX=strftime -e '
+        use strict;
+        use warnings;
+
+        my $today = shift @ARGV;
+        my $count = 0;
+        my $latest_epoch = 0;
+
+        while (my $line = <>) {
+            chomp $line;
+            my ($metadata, $message) = split /\t/, $line, 2;
+            next unless defined $message;
+            next unless $message =~ /^commit( \(.+\))?:|^merge(\s+[^:]*)?:/;
+
+            my @parts = split / /, $metadata;
+            next if @parts < 2;
+
+            my $epoch = $parts[-2];
+            next unless defined $epoch && $epoch =~ /^\d+$/;
+
+            my @local = localtime($epoch);
+            my $day_identifier = sprintf("%04d-%02d-%02d", $local[5] + 1900, $local[4] + 1, $local[3]);
+            next unless $day_identifier eq $today;
+
+            $count++;
+            $latest_epoch = $epoch if $epoch > $latest_epoch;
+
+            my $block_minute = $local[1] >= 30 ? 30 : 0;
+            printf "BLOCK\t%sT%02d:%02d\n", $day_identifier, $local[2], $block_minute;
+        }
+
+        printf "COUNT\t%d\n", $count;
+        if ($latest_epoch > 0) {
+            printf "LATEST\t%s\n", strftime("%Y-%m-%dT%H:%M:%S%z", localtime($latest_epoch));
+        }
+      ' "$TODAY" "$reflog_path" > "$repo_reflog_file"; then
+      failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+      log_error "failed to parse git reflog for one repository; preserving previous shared data"
+      continue
+    fi
+    successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
+
+    while IFS=$'\t' read -r record_kind record_value; do
+      case "$record_kind" in
+        COUNT)
+          repo_count="$record_value"
+          ;;
+        BLOCK)
+          printf '%s\n' "$record_value" >> "$focus_block_list_file"
+          ;;
+        LATEST)
+          repo_latest_timestamp="$record_value"
+          ;;
+      esac
+    done < "$repo_reflog_file"
+
+    total_count=$((total_count + repo_count))
+
+    if [ -n "$repo_latest_timestamp" ] && { [ -z "$latest_activity_timestamp" ] || [[ "$repo_latest_timestamp" > "$latest_activity_timestamp" ]]; }; then
+      latest_activity_timestamp="$repo_latest_timestamp"
+      recent_project_name="$(basename "$repo_root")"
+    fi
+  done < "$repo_list_file"
+}
+
 write_plist_string() {
   local key="$1"
   local value="$2"
@@ -262,126 +500,25 @@ if [ ! -s "$scan_roots_file" ]; then
   exit 0
 fi
 
-find_exit_code=0
-while IFS= read -r scan_root; do
-  if [ ! -d "$scan_root" ]; then
-    log_error "authorized git scan root is not a readable directory; skipping one root"
-    continue
-  fi
-
-  find "$scan_root" \
-    \( \
-      -path "$USER_HOME/Library" -o \
-      -path "$USER_HOME/.Trash" -o \
-      -path "$USER_HOME/.cache" -o \
-      -path "$USER_HOME/Movies" -o \
-      -path "$USER_HOME/Music" -o \
-      -path "$USER_HOME/Pictures" -o \
-      -path '*/node_modules' -o \
-      -path '*/.build' -o \
-      -path '*/DerivedData' \
-    \) -prune -o \
-    -type d -name .git -print0 -prune -o \
-    -type f -name .git -print0 >> "$repo_git_paths_file" 2>> "$find_stderr_file" || find_exit_code="$?"
-done < "$scan_roots_file"
-
-while IFS= read -r -d '' git_path; do
-  printf '%s\n' "${git_path%/.git}"
-done < "$repo_git_paths_file" > "$repo_scan_file"
-
-if [ "$find_exit_code" -ne 0 ]; then
-  emit_runtime_diagnostics_once
-  log_error "repository scan encountered inaccessible paths under authorized roots (find exit: $find_exit_code); continuing with readable results"
-  emit_find_stderr_sample
+using_cached_repo_list=0
+if cache_matches_current_roots; then
+  load_cached_repository_list
+  using_cached_repo_list=1
+else
+  refresh_repository_list_from_scan
+  write_repository_cache
 fi
 
-sort -u "$repo_scan_file" > "$repo_list_file"
-
-while IFS= read -r repo_root; do
-  git_dir="$(resolve_git_dir "$repo_root")" || continue
-  if ! path_is_within_authorized_roots "$git_dir"; then
-    log_error "resolved git metadata path escaped authorized roots; skipping one repository"
-    continue
+process_repository_list "$using_cached_repo_list" || process_result="$?"
+if [ "${process_result:-0}" -ne 0 ]; then
+  if [ "$process_result" -ne 2 ]; then
+    exit 1
   fi
 
-  reflog_path="$git_dir/logs/HEAD"
-  if [ ! -r "$reflog_path" ]; then
-    continue
-  fi
-  if [ ! -f "$reflog_path" ]; then
-    readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
-    failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
-    log_error "git reflog path is not a regular file for one repository; preserving previous shared data"
-    continue
-  fi
-
-  readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
-  repo_count=0
-  repo_latest_timestamp=""
-  : > "$repo_reflog_file"
-  if ! perl -MPOSIX=strftime -e '
-      use strict;
-      use warnings;
-
-      my $today = shift @ARGV;
-      my $count = 0;
-      my $latest_epoch = 0;
-
-      while (my $line = <>) {
-          chomp $line;
-          my ($metadata, $message) = split /\t/, $line, 2;
-          next unless defined $message;
-          next unless $message =~ /^commit( \(.+\))?:|^merge(\s+[^:]*)?:/;
-
-          my @parts = split / /, $metadata;
-          next if @parts < 2;
-
-          my $epoch = $parts[-2];
-          next unless defined $epoch && $epoch =~ /^\d+$/;
-
-          my @local = localtime($epoch);
-          my $day_identifier = sprintf("%04d-%02d-%02d", $local[5] + 1900, $local[4] + 1, $local[3]);
-          next unless $day_identifier eq $today;
-
-          $count++;
-          $latest_epoch = $epoch if $epoch > $latest_epoch;
-
-          my $block_minute = $local[1] >= 30 ? 30 : 0;
-          printf "BLOCK\t%sT%02d:%02d\n", $day_identifier, $local[2], $block_minute;
-      }
-
-      printf "COUNT\t%d\n", $count;
-      if ($latest_epoch > 0) {
-          printf "LATEST\t%s\n", strftime("%Y-%m-%dT%H:%M:%S%z", localtime($latest_epoch));
-      }
-    ' "$TODAY" "$reflog_path" > "$repo_reflog_file"; then
-    failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
-    log_error "failed to parse git reflog for one repository; preserving previous shared data"
-    continue
-  fi
-  successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
-
-  while IFS=$'\t' read -r record_kind record_value; do
-    case "$record_kind" in
-      COUNT)
-        repo_count="$record_value"
-        ;;
-      BLOCK)
-        printf '%s\n' "$record_value" >> "$focus_block_list_file"
-        ;;
-      LATEST)
-        repo_latest_timestamp="$record_value"
-        ;;
-    esac
-  done < "$repo_reflog_file"
-
-  total_count=$((total_count + repo_count))
-
-  if [ -n "$repo_latest_timestamp" ] && { [ -z "$latest_activity_timestamp" ] || [ "$repo_latest_timestamp" > "$latest_activity_timestamp" ]; }; then
-    latest_activity_timestamp="$repo_latest_timestamp"
-    recent_project_name="$(basename "$repo_root")"
-  fi
-done < "$repo_list_file"
+  refresh_repository_list_from_scan
+  write_repository_cache
+  process_repository_list 0
+fi
 
 focus_block_count="$(sort -u "$focus_block_list_file" | awk 'END { print NR + 0 }')"
 
