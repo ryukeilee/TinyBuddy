@@ -4,36 +4,40 @@
 
 TinyBuddy is a Swift 5.9 macOS 14 project with both Swift Package Manager and Xcode project entry points.
 
-- `Sources/TinyBuddyCore/` contains shared domain logic, persistence, stats, status, and widget presentation data.
-- `Sources/TinyBuddy/` contains the macOS SwiftUI app and view model.
-- `Widget/TinyBuddyWidget/` contains the WidgetKit extension.
-- `Tests/TinyBuddyCoreTests/` contains XCTest coverage for the core module.
-- `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` hold Info.plist and entitlement files.
-- `project.yml` is the XcodeGen source of truth for the `.xcodeproj`; regenerate the project after target or signing changes.
+- `Sources/TinyBuddyCore/` contains shared domain logic, daily stats persistence, Git activity stores, and widget presentation models.
+- `Sources/TinyBuddy/` contains the macOS SwiftUI HUD app, authorization flow, refresh coordination, and app lifecycle wiring.
+- `Widget/TinyBuddyWidget/` contains the WidgetKit extension implementation.
+- `Tests/TinyBuddyCoreTests/` contains deterministic XCTest coverage for the shared core module.
+- `Tests/TinyBuddyAppTests/` contains app-target tests for refresh coordination, authorization, scripts, and view model behavior.
+- `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` contain Info.plist, entitlements, and app/widget resources.
+- `script/build_and_run.sh` is the main local build, launch, install, and verification entry point.
+- `project.yml` is the XcodeGen source of truth for `TinyBuddy.xcodeproj`; regenerate the project after target, bundle, entitlement, or signing changes.
 
 ## Build, Test, and Development Commands
 
 - `swift build` builds the Swift package targets.
-- `swift test` runs the core XCTest suite.
+- `swift test` runs both `TinyBuddyCoreTests` and `TinyBuddyAppTests`.
 - `xcodegen generate` regenerates `TinyBuddy.xcodeproj` from `project.yml` when XcodeGen is installed.
-- `./script/build_and_run.sh` builds the macOS app with unsigned local signing and launches it.
-- `./script/build_and_run.sh --verify` builds, launches, and verifies the app process starts.
+- `./script/build_and_run.sh` builds the Debug app with unsigned local signing, refreshes Git-derived counters when possible, and launches the app.
+- `./script/build_and_run.sh --verify` builds and launches the app, then verifies the process starts and the widget runtime matches the current build.
+- `./script/build_and_run.sh --logs` launches the app and streams process logs.
+- `./script/build_and_run.sh --telemetry` launches the app and streams subsystem telemetry logs.
+- `TINYBUDDY_SIGNING_MODE=signed ./script/build_and_run.sh` builds with automatic provisioning updates when signed builds are required.
 - `./script/build_and_run.sh release-install` builds a signed Release app, installs it to `/Applications`, and registers the widget extension.
-- `./script/build_and_run.sh release-verify` verifies the installed app, code signature, and WidgetKit extension registration.
-- `TINYBUDDY_SIGNING_MODE=signed ./script/build_and_run.sh` builds with automatic provisioning updates when signing is required.
+- `./script/build_and_run.sh release-verify` verifies the installed signed app, code signature, and WidgetKit extension registration.
 
 ## Coding Style & Naming Conventions
 
-Use the existing Swift style: 4-space indentation, concise types, explicit access control for public APIs, and small focused files. Name types in `UpperCamelCase` (`PetSession`, `DailyStatsStore`) and functions/properties in `lowerCamelCase` (`recordCompletion`, `focusCount`). Keep shared business logic in `TinyBuddyCore`; avoid duplicating state logic in the app or widget targets.
+Use the existing Swift style: 4-space indentation, concise types, explicit access control for public APIs, and small focused files. Name types in `UpperCamelCase` and functions, methods, and stored properties in `lowerCamelCase`. Keep shared state, persistence, and business rules in `TinyBuddyCore`; keep app and widget targets thin and presentation-oriented. Prefer extending existing stores and presentation models instead of duplicating state logic across targets.
 
 ## Testing Guidelines
 
-Tests use XCTest and currently focus on `TinyBuddyCore`. Add tests under `Tests/TinyBuddyCoreTests/` with file names ending in `Tests.swift` and test methods starting with `test`. Prefer deterministic dependencies, as existing tests do with isolated `UserDefaults`, fixed calendars, and fixed dates. Run `swift test` before submitting changes that touch core behavior.
+Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-facing coverage under `Tests/TinyBuddyAppTests/`. Name files with the `Tests.swift` suffix and test methods with the `test` prefix. Prefer deterministic dependencies such as isolated `UserDefaults`, fixed calendars, fixed dates, and stubbed process/script inputs. Run `swift test` before submitting changes that affect shared logic, app behavior, Git refresh flow, or widget presentation. If you change build, signing, widget, or launch behavior, also run the smallest relevant `./script/build_and_run.sh` verification mode.
 
 ## Commit & Pull Request Guidelines
 
-Use short imperative commit subjects, matching the current history style, such as `Verify release signing and widget registration`, `Add daily stats widget state`, or `Fix session persistence reset`. Pull requests should describe the user-visible change, list validation performed, link related issues when available, and include screenshots or screen recordings for app or widget UI changes.
+Use short imperative commit subjects, matching the existing history style, such as `Verify release signing and widget registration`, `Add daily stats widget state`, or `Fix session persistence reset`. Pull requests should describe the user-visible behavior change, list the exact validation performed, note any signing or widget-specific verification, link related issues when available, and include screenshots only when the change is meaningfully visual.
 
 ## Security & Configuration Tips
 
-Do not commit local secrets, certificates, provisioning assets, or `.env` files. Keep app group and bundle identifier changes synchronized across `project.yml`, entitlements, and Info.plist resources.
+Do not commit local secrets, certificates, provisioning assets, or `.env` files. Keep bundle identifiers, app groups, entitlements, and Info.plist settings synchronized across `project.yml`, `Resources/`, and release verification logic. Signed release flows depend on local Apple signing configuration; do not change signing identifiers, app group names, or installation paths unless the task explicitly requires it.
