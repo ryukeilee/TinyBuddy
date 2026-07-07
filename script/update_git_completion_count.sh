@@ -126,6 +126,14 @@ is_broad_scan_root() {
   [ "$path" = "/" ] || [ "$path" = "/Users" ] || [ "$path" = "$USER_HOME" ]
 }
 
+resolve_existing_directory_path() {
+  local directory_path="$1"
+  (
+    trap - ERR
+    cd "$directory_path" 2>/dev/null && pwd -P
+  )
+}
+
 resolve_git_dir() {
   local repo_root="$1"
   local dot_git_path="$repo_root/.git"
@@ -133,9 +141,7 @@ resolve_git_dir() {
   local git_dir
 
   if [ -d "$dot_git_path" ]; then
-    (
-      cd "$dot_git_path" 2>/dev/null && pwd -P
-    )
+    resolve_existing_directory_path "$dot_git_path"
     return
   fi
 
@@ -157,9 +163,7 @@ resolve_git_dir() {
     git_dir="$repo_root/$git_dir"
   fi
 
-  (
-    cd "$git_dir" 2>/dev/null && pwd -P
-  )
+  resolve_existing_directory_path "$git_dir"
 }
 
 reset_activity_snapshot() {
@@ -304,7 +308,10 @@ write_repository_stats_cache() {
 
 read_reflog_mtime() {
   local reflog_path="$1"
-  "$STAT_BIN" -f '%m' "$reflog_path"
+  (
+    trap - ERR
+    "$STAT_BIN" -f '%m' "$reflog_path"
+  )
 }
 
 append_cached_focus_blocks() {
@@ -383,13 +390,20 @@ process_repository_list() {
       continue
     fi
 
-    git_dir="$(resolve_git_dir "$repo_root")" || {
+    trap - ERR
+    if git_dir="$(resolve_git_dir "$repo_root")"; then
+      resolve_git_dir_exit_code=0
+    else
+      resolve_git_dir_exit_code="$?"
+    fi
+    enable_error_trap
+    if [ "$resolve_git_dir_exit_code" -ne 0 ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
         log_error "cached repository metadata is no longer available; rebuilding repository cache"
         return 2
       fi
       continue
-    }
+    fi
 
     if ! path_is_within_authorized_roots "$git_dir"; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
@@ -422,11 +436,18 @@ process_repository_list() {
     repo_count=0
     repo_latest_timestamp=""
     repo_focus_blocks=""
-    reflog_mtime="$(read_reflog_mtime "$reflog_path")" || {
+    trap - ERR
+    if reflog_mtime="$(read_reflog_mtime "$reflog_path")"; then
+      read_reflog_mtime_exit_code=0
+    else
+      read_reflog_mtime_exit_code="$?"
+    fi
+    enable_error_trap
+    if [ "$read_reflog_mtime_exit_code" -ne 0 ]; then
       failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
       log_error "failed to read git reflog metadata for one repository; preserving previous shared data"
       continue
-    }
+    fi
 
     cached_repo_stats="$(awk -F '\t' -v repo_root="$repo_root" '$1 == repo_root { print; exit }' "$repo_stats_cache_file")"
     if [ -n "$cached_repo_stats" ]; then
@@ -602,8 +623,12 @@ handle_error() {
   exit "$exit_code"
 }
 
+enable_error_trap() {
+  trap 'handle_error $? $LINENO' ERR
+}
+
 trap cleanup EXIT
-trap 'handle_error $? $LINENO' ERR
+enable_error_trap
 
 if ! command -v git >/dev/null 2>&1; then
   log_error "git executable not found in PATH=$PATH"

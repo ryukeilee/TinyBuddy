@@ -351,6 +351,46 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
     }
 
+    func testScriptRebuildsRepositoryCacheWhenCachedGitDirResolutionFailsWithoutErrTrapNoise() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepositoryWithExternalGitDir(named: "ProjectBeta")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 14, minute: 5, message: "commit: worktree")
+            ]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+
+        try harness.repointExternalGitDir(
+            for: repoURL,
+            toMissingDirectoryNamed: "MissingProjectBetaGitDir"
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(
+            result.standardError.contains("cached repository metadata is no longer available; rebuilding repository cache"),
+            "stderr did not include cache rebuild reason: \(result.standardError)"
+        )
+        XCTAssertFalse(
+            result.standardError.contains("failed with exit code 1 at line"),
+            "stderr unexpectedly contained ERR trap noise: \(result.standardError)"
+        )
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+    }
+
     func testScriptDoesNotReuseCachedStatsWhenGitDirEscapesAuthorizedRoots() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepositoryWithExternalGitDir(named: "ProjectBeta")
@@ -450,6 +490,15 @@ private struct ScriptHarness {
         )
 
         return repoURL
+    }
+
+    func repointExternalGitDir(for repoURL: URL, toMissingDirectoryNamed name: String) throws {
+        let gitDirectoryURL = rootURL.appendingPathComponent(name, isDirectory: true)
+        try "gitdir: \(gitDirectoryURL.path)\n".write(
+            to: repoURL.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
     }
 
     func writeHeadReflog(for repoURL: URL, lines: [String]) throws {
