@@ -86,6 +86,7 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "系统唤醒触发 刷新失败")
         XCTAssertEqual(viewModel.refreshDiagnostics.detail, formattedDetail(for: refreshedAt))
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "刷新组件缺失，暂时无法读取 Git 活动。")
+        XCTAssertNil(viewModel.refreshDiagnostics.actionTitle)
     }
 
     func testInitDoesNotShowRefreshDiagnosticsFromPreviousDay() {
@@ -120,6 +121,7 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.refreshDiagnostics.badgeTitle, "未刷新")
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "等待首次 Git 刷新")
         XCTAssertNil(viewModel.refreshDiagnostics.reason)
+        XCTAssertNil(viewModel.refreshDiagnostics.actionTitle)
     }
 
     func testRefreshDiagnosticsUpdateWhenRefreshStatusNotificationArrives() async {
@@ -183,6 +185,7 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.refreshDiagnostics.badgeTitle, "跳过")
         XCTAssertEqual(viewModel.refreshDiagnostics.detail, formattedDetail(for: refreshedAt))
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "刚刚刷新过，稍后会自动再次尝试。")
+        XCTAssertNil(viewModel.refreshDiagnostics.actionTitle)
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 3)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 1)
         XCTAssertEqual(viewModel.hudPresentation.statusTitle, "活跃")
@@ -214,7 +217,65 @@ final class PetViewModelTests: XCTestCase {
             notificationCenter: NotificationCenter()
         )
 
-        XCTAssertEqual(viewModel.refreshDiagnostics.reason, "还没有可用的 Git 目录授权，暂时无法刷新。")
+        XCTAssertEqual(viewModel.refreshDiagnostics.summary, "等待 Git 目录授权")
+        XCTAssertEqual(viewModel.refreshDiagnostics.reason, "还没有可用的 Git 目录授权，授权后即可恢复 Git 刷新。")
+        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "重新授权 Git 目录")
+    }
+
+    func testRefreshDiagnosticsMapsInvalidSavedAuthorizationToRecoveryMessage() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 12, minute: 15, second: 16)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
+        refreshStatusStore.save(
+            GitActivityRefreshStatus(
+                refreshedAt: refreshedAt,
+                trigger: .launch,
+                outcome: .skipped,
+                reason: "saved Git scan root authorizations are no longer valid"
+            )
+        )
+
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults),
+            refreshStatusStore: refreshStatusStore,
+            notificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(viewModel.refreshDiagnostics.summary, "Git 目录授权已失效")
+        XCTAssertEqual(
+            viewModel.refreshDiagnostics.reason,
+            "之前授权的 Git 扫描目录已失效，可能已被移动、删除或系统权限失效，请重新授权。"
+        )
+        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "重新授权 Git 目录")
+    }
+
+    func testRequestGitScanAuthorizationPostsRecoveryNotification() {
+        let notificationCenter = NotificationCenter()
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: makeDefaults()),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: makeDefaults()),
+            notificationCenter: notificationCenter
+        )
+        let expectation = expectation(description: "authorization request posted")
+        let observer = notificationCenter.addObserver(
+            forName: .gitScanRootAuthorizationRequested,
+            object: nil,
+            queue: nil
+        ) { _ in
+            expectation.fulfill()
+        }
+        defer {
+            notificationCenter.removeObserver(observer)
+        }
+
+        viewModel.requestGitScanAuthorization()
+
+        wait(for: [expectation], timeout: 1.0)
     }
 
     func testHUDPresentationAndDisplayStateMatchSharedWidgetSemanticsForAllGitActivityStates() {

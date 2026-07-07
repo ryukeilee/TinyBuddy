@@ -8,7 +8,10 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
     func testRequestAuthorizationIfNeededDoesNotPresentPanelWhenAuthorizedRootResolves() throws {
         let defaults = makeDefaults()
         var stopAccessCount = 0
-        let rootURL = URL(fileURLWithPath: "/Authorized/TinyBuddyProject")
+        let rootURL = try makeTemporaryDirectory(named: "TinyBuddyProject")
+        defer {
+            try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent())
+        }
         let store = makeStore(
             userDefaults: defaults,
             resolvedPaths: [rootURL.standardizedFileURL.path],
@@ -75,6 +78,14 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+
+    private func makeTemporaryDirectory(named name: String) throws -> URL {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = parent.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
     }
 }
 

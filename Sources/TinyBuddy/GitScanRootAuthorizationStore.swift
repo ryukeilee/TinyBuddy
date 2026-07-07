@@ -16,6 +16,16 @@ struct ScopedGitScanRoot {
     }
 }
 
+enum GitScanRootAccessIssue: Equatable {
+    case authorizationRequired
+    case authorizationInvalid
+}
+
+struct GitScanRootAccessResult {
+    let roots: [ScopedGitScanRoot]
+    let issue: GitScanRootAccessIssue?
+}
+
 final class GitScanRootAuthorizationStore {
     enum Constants {
         static let bookmarkDataKey = "tinybuddy.gitScanRoots.bookmarkData"
@@ -48,16 +58,23 @@ final class GitScanRootAuthorizationStore {
     }
 
     func accessAuthorizedRoots() -> [ScopedGitScanRoot] {
+        accessAuthorizedRootResult().roots
+    }
+
+    func accessAuthorizedRootResult() -> GitScanRootAccessResult {
         let bookmarkData = bookmarkDataList()
         var resolvedBookmarkData: [Data] = []
         var roots: [ScopedGitScanRoot] = []
+        var droppedBookmark = false
 
         for bookmarkDatum in bookmarkData {
             guard let root = try? scopedRootResolver(bookmarkDatum) else {
+                droppedBookmark = true
                 continue
             }
-            guard Self.isAllowedScanRoot(root.url) else {
+            guard Self.isUsableScanRoot(root.url) else {
                 root.stopAccessing()
+                droppedBookmark = true
                 continue
             }
 
@@ -70,7 +87,14 @@ final class GitScanRootAuthorizationStore {
             NSLog("TinyBuddy: one or more Git scan root bookmarks could not be resolved")
         }
 
-        return roots
+        if roots.isEmpty {
+            let issue: GitScanRootAccessIssue = bookmarkData.isEmpty || droppedBookmark == false
+                ? .authorizationRequired
+                : .authorizationInvalid
+            return GitScanRootAccessResult(roots: [], issue: issue)
+        }
+
+        return GitScanRootAccessResult(roots: roots, issue: nil)
     }
 
     private func bookmarkDataList() -> [Data] {
@@ -103,6 +127,20 @@ final class GitScanRootAuthorizationStore {
             && path != "/"
             && path != "/Users"
             && path != homePath
+    }
+
+    private static func isUsableScanRoot(_ url: URL) -> Bool {
+        guard isAllowedScanRoot(url) else {
+            return false
+        }
+
+        let path = normalizedScanRootURL(url).path
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return false
+        }
+
+        return FileManager.default.isReadableFile(atPath: path)
     }
 
     private static func normalizedScanRootURL(_ url: URL) -> URL {
@@ -163,10 +201,11 @@ final class GitScanRootAuthorizationController {
     }
 
     func requestAuthorizationIfNeeded() {
-        let roots = store.accessAuthorizedRoots()
+        let accessResult = store.accessAuthorizedRootResult()
+        let roots = accessResult.roots
         roots.forEach { $0.stopAccessing() }
 
-        guard roots.isEmpty else {
+        guard roots.isEmpty, accessResult.issue != nil else {
             return
         }
 

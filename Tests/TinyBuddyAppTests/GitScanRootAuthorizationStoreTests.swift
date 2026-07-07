@@ -116,6 +116,12 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
     func testAccessAuthorizedRootsResolvesSavedBookmarksAndStopsAccess() throws {
         let defaults = makeDefaults()
         var stoppedPaths: [String] = []
+        let rootA = try makeTemporaryDirectory(named: "ProjectA")
+        let rootB = try makeTemporaryDirectory(named: "ProjectB")
+        defer {
+            try? FileManager.default.removeItem(at: rootA.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: rootB.deletingLastPathComponent())
+        }
         let store = GitScanRootAuthorizationStore(
             userDefaults: defaults,
             bookmarkDataCreator: { url in
@@ -133,19 +139,25 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         )
 
         try store.replaceAuthorizedRoots([
-            URL(fileURLWithPath: "/Authorized/ProjectA"),
-            URL(fileURLWithPath: "/Authorized/ProjectB")
+            rootA,
+            rootB
         ])
 
         let roots = store.accessAuthorizedRoots()
         roots.forEach { $0.stopAccessing() }
 
-        XCTAssertEqual(roots.map { $0.url.path }, ["/Authorized/ProjectA", "/Authorized/ProjectB"])
-        XCTAssertEqual(stoppedPaths, ["/Authorized/ProjectA", "/Authorized/ProjectB"])
+        XCTAssertEqual(roots.map(\.url), [rootA, rootB])
+        XCTAssertEqual(stoppedPaths, [rootA.path, rootB.path])
     }
 
     func testAccessAuthorizedRootsSkipsUnresolvedBookmarks() throws {
         let defaults = makeDefaults()
+        let staleRoot = try makeTemporaryDirectory(named: "StaleProject")
+        let liveRoot = try makeTemporaryDirectory(named: "LiveProject")
+        defer {
+            try? FileManager.default.removeItem(at: staleRoot.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: liveRoot.deletingLastPathComponent())
+        }
         let store = GitScanRootAuthorizationStore(
             userDefaults: defaults,
             bookmarkDataCreator: { url in
@@ -153,7 +165,7 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
             },
             scopedRootResolver: { bookmarkData in
                 guard let path = String(data: bookmarkData, encoding: .utf8),
-                      path != "/Authorized/StaleProject" else {
+                      path != staleRoot.path else {
                     return nil
                 }
 
@@ -162,13 +174,13 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         )
 
         try store.replaceAuthorizedRoots([
-            URL(fileURLWithPath: "/Authorized/StaleProject"),
-            URL(fileURLWithPath: "/Authorized/LiveProject")
+            staleRoot,
+            liveRoot
         ])
 
         let roots = store.accessAuthorizedRoots()
 
-        XCTAssertEqual(roots.map { $0.url.path }, ["/Authorized/LiveProject"])
+        XCTAssertEqual(roots.map(\.url), [liveRoot])
     }
 
     func testAccessAuthorizedRootsRemovesUnresolvedBookmarksFromPersistence() throws {
@@ -191,10 +203,60 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         XCTAssertFalse(store.hasAuthorizedRoots)
     }
 
+    func testAccessAuthorizedRootResultMarksMissingSavedDirectoryAsInvalidAuthorization() throws {
+        let defaults = makeDefaults()
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: defaults,
+            bookmarkDataCreator: { url in
+                Data(url.standardizedFileURL.path.utf8)
+            },
+            scopedRootResolver: { bookmarkData in
+                guard let path = String(data: bookmarkData, encoding: .utf8) else {
+                    return nil
+                }
+
+                return ScopedGitScanRoot(url: URL(fileURLWithPath: path))
+            }
+        )
+        let deletedDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: deletedDirectory, withIntermediateDirectories: true)
+        try store.replaceAuthorizedRoots([deletedDirectory])
+        try FileManager.default.removeItem(at: deletedDirectory)
+
+        let accessResult = store.accessAuthorizedRootResult()
+
+        XCTAssertTrue(accessResult.roots.isEmpty)
+        XCTAssertEqual(accessResult.issue, .authorizationInvalid)
+        XCTAssertFalse(store.hasAuthorizedRoots)
+    }
+
+    func testAccessAuthorizedRootResultMarksMissingAuthorizationWhenNothingSaved() {
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: makeDefaults(),
+            bookmarkDataCreator: { url in
+                Data(url.standardizedFileURL.path.utf8)
+            },
+            scopedRootResolver: { _ in nil }
+        )
+
+        let accessResult = store.accessAuthorizedRootResult()
+
+        XCTAssertTrue(accessResult.roots.isEmpty)
+        XCTAssertEqual(accessResult.issue, .authorizationRequired)
+    }
+
     func testAccessAuthorizedRootsRemovesBroadResolvedBookmarksFromPersistence() {
         let defaults = makeDefaults()
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let projectURL = temporaryRoot.appendingPathComponent("Project", isDirectory: true)
+        try? FileManager.default.createDirectory(at: projectURL, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: temporaryRoot)
+        }
         defaults.set(
-            [Data("/Users".utf8), Data("/Authorized/Project".utf8)],
+            [Data("/Users".utf8), Data(projectURL.path.utf8)],
             forKey: GitScanRootAuthorizationStore.Constants.bookmarkDataKey
         )
         var stoppedPaths: [String] = []
@@ -220,9 +282,17 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         ) as? [Data]
         let persistedPaths = persistedBookmarkData?.compactMap { String(data: $0, encoding: .utf8) }
 
-        XCTAssertEqual(roots.map { $0.url.path }, ["/Authorized/Project"])
-        XCTAssertEqual(persistedPaths, ["/Authorized/Project"])
+        XCTAssertEqual(roots.map(\.url), [projectURL])
+        XCTAssertEqual(persistedPaths, [projectURL.path])
         XCTAssertEqual(stoppedPaths, ["/Users"])
+    }
+
+    private func makeTemporaryDirectory(named name: String) throws -> URL {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = parent.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
     }
 
     private func makeDefaults() -> UserDefaults {

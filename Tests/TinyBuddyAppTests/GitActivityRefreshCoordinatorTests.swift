@@ -29,6 +29,31 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
+    func testRefreshReportsInvalidSavedGitAuthorizationWhenBookmarksNoLongerResolve() {
+        let harness = makeHarness(authorizedRoots: [], authorizationIssue: .authorizationInvalid)
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(
+            harness.lastRefreshStatus,
+            GitActivityRefreshStatus(
+                refreshedAt: harness.currentDate,
+                trigger: .becameActive,
+                outcome: .skipped,
+                reason: "saved Git scan root authorizations are no longer valid",
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: 0,
+                    widgetReloaded: false,
+                    reason: "saved Git scan root authorizations are no longer valid"
+                )
+            )
+        )
+    }
+
     func testRefreshPassesAuthorizedGitScanRootsToScript() {
         let roots = [
             URL(fileURLWithPath: "/Authorized/TinyBuddy Projects/ProjectA"),
@@ -550,9 +575,14 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
     }
 
     private func makeHarness(
-        authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
+        authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")],
+        authorizationIssue: GitScanRootAccessIssue? = nil
     ) -> RefreshHarness {
-        RefreshHarness(testCase: self, authorizedRoots: authorizedRoots)
+        RefreshHarness(
+            testCase: self,
+            authorizedRoots: authorizedRoots,
+            authorizationIssue: authorizationIssue
+        )
     }
 
     private var mirroredGitActivityKeys: [String] {
@@ -605,10 +635,11 @@ private final class RefreshHarness {
 
     let coordinator: GitActivityRefreshCoordinator
 
-    init(testCase: XCTestCase, authorizedRoots: [URL]) {
+    init(testCase: XCTestCase, authorizedRoots: [URL], authorizationIssue: GitScanRootAccessIssue? = nil) {
         self.testCase = testCase
         self.state = State(currentDate: Self.makeDate(second: 0))
         self.state.authorizedRoots = authorizedRoots
+        self.state.authorizationIssue = authorizationIssue
 
         let defaults = UserDefaults(suiteName: "TinyBuddyAppTests.\(UUID().uuidString)")!
         self.activityDefaults = defaults
@@ -666,11 +697,15 @@ private final class RefreshHarness {
                 )
             },
             authorizedRootsProvider: { [state] in
-                state.authorizedRoots.map { url in
+                let roots = state.authorizedRoots.map { url in
                     ScopedGitScanRoot(url: url) {
                         state.stopAccessCount += 1
                     }
                 }
+                return GitScanRootAccessResult(
+                    roots: roots,
+                    issue: roots.isEmpty ? state.authorizationIssue : nil
+                )
             },
             dateProvider: { [state] in
                 state.currentDate
@@ -855,6 +890,7 @@ private final class RefreshHarness {
     private final class State {
         var currentDate: Date
         var authorizedRoots: [URL] = []
+        var authorizationIssue: GitScanRootAccessIssue?
         var capturedRootPaths: [String] = []
         var scriptRunCount = 0
         var widgetReloadCount = 0

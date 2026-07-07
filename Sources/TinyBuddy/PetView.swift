@@ -68,7 +68,8 @@ struct PetView: View {
             RefreshDiagnosticsView(
                 diagnostics: viewModel.refreshDiagnostics,
                 hudGold: hudGold,
-                panelFill: hudPanelFill
+                panelFill: hudPanelFill,
+                authorizationAction: viewModel.requestGitScanAuthorization
             )
 
             HStack(spacing: 8) {
@@ -296,11 +297,18 @@ private struct RefreshDiagnosticsView: View {
     let diagnostics: PetViewModel.RefreshDiagnostics
     let hudGold: Color
     let panelFill: AnyShapeStyle
+    let authorizationAction: () -> Void
 
-    init(diagnostics: PetViewModel.RefreshDiagnostics, hudGold: Color, panelFill: some ShapeStyle) {
+    init(
+        diagnostics: PetViewModel.RefreshDiagnostics,
+        hudGold: Color,
+        panelFill: some ShapeStyle,
+        authorizationAction: @escaping () -> Void
+    ) {
         self.diagnostics = diagnostics
         self.hudGold = hudGold
         self.panelFill = AnyShapeStyle(panelFill)
+        self.authorizationAction = authorizationAction
     }
 
     private var badgeColor: Color {
@@ -364,6 +372,23 @@ private struct RefreshDiagnosticsView: View {
                     .foregroundStyle(badgeColor.opacity(0.92))
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let actionTitle = diagnostics.actionTitle {
+                Button(actionTitle, action: authorizationAction)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.black.opacity(0.3))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(badgeColor.opacity(0.7), lineWidth: 1)
+                    )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

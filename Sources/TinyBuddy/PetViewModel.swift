@@ -30,6 +30,7 @@ final class PetViewModel: ObservableObject {
         let detail: String
         let reason: String?
         let outcome: GitActivityRefreshOutcome?
+        let actionTitle: String?
     }
 
     @Published private(set) var status: PetStatus
@@ -93,6 +94,10 @@ final class PetViewModel: ObservableObject {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
+    func requestGitScanAuthorization() {
+        notificationCenter.post(name: .gitScanRootAuthorizationRequested, object: nil)
+    }
+
     deinit {
         if let refreshStatusObserver {
             notificationCenter.removeObserver(refreshStatusObserver)
@@ -106,16 +111,20 @@ final class PetViewModel: ObservableObject {
                 summary: "等待首次 Git 刷新",
                 detail: "启动后会自动尝试刷新",
                 reason: nil,
-                outcome: nil
+                outcome: nil,
+                actionTitle: nil
             )
         }
 
+        let actionTitle = authorizationActionTitle(for: status.reason)
+
         return RefreshDiagnostics(
             badgeTitle: badgeTitle(for: status.outcome),
-            summary: "\(triggerTitle(for: status.trigger))触发 \(outcomeTitle(for: status.outcome))",
+            summary: summaryTitle(for: status),
             detail: Self.refreshDateFormatter.string(from: status.refreshedAt),
             reason: localizedReason(for: status.reason),
-            outcome: status.outcome
+            outcome: status.outcome,
+            actionTitle: actionTitle
         )
     }
 
@@ -168,10 +177,41 @@ final class PetViewModel: ObservableObject {
         }
 
         if normalizedReason.contains("no authorized git scan roots") {
-            return "还没有可用的 Git 目录授权，暂时无法刷新。"
+            return "还没有可用的 Git 目录授权，授权后即可恢复 Git 刷新。"
+        }
+
+        if normalizedReason.contains("saved git scan root authorizations are no longer valid") {
+            return "之前授权的 Git 扫描目录已失效，可能已被移动、删除或系统权限失效，请重新授权。"
         }
 
         return "刷新暂时不可用，请稍后再试。"
+    }
+
+    private static func authorizationActionTitle(for reason: String?) -> String? {
+        guard let normalizedReason = reason?.lowercased() else {
+            return nil
+        }
+
+        if normalizedReason.contains("no authorized git scan roots")
+            || normalizedReason.contains("saved git scan root authorizations are no longer valid") {
+            return "重新授权 Git 目录"
+        }
+
+        return nil
+    }
+
+    private static func summaryTitle(for status: GitActivityRefreshStatus) -> String {
+        let normalizedReason = status.reason?.lowercased() ?? ""
+
+        if normalizedReason.contains("saved git scan root authorizations are no longer valid") {
+            return "Git 目录授权已失效"
+        }
+
+        if normalizedReason.contains("no authorized git scan roots") {
+            return "等待 Git 目录授权"
+        }
+
+        return "\(triggerTitle(for: status.trigger))触发 \(outcomeTitle(for: status.outcome))"
     }
 
     private static func badgeTitle(for outcome: GitActivityRefreshOutcome) -> String {

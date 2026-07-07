@@ -6,6 +6,7 @@ import Darwin
 
 extension Notification.Name {
     static let gitActivityRefreshStatusDidChange = Notification.Name("TinyBuddy.gitActivityRefreshStatusDidChange")
+    static let gitScanRootAuthorizationRequested = Notification.Name("TinyBuddy.gitScanRootAuthorizationRequested")
 }
 
 struct GitRefreshScriptMetrics: Equatable {
@@ -94,7 +95,7 @@ private struct GitRefreshScriptExecutionError: LocalizedError {
 final class GitActivityRefreshCoordinator {
     typealias ScriptRunner = (URL, [URL]) throws -> GitRefreshScriptResult
     typealias ScriptURLProvider = () -> URL?
-    typealias AuthorizedRootsProvider = () -> [ScopedGitScanRoot]
+    typealias AuthorizedRootsProvider = () -> GitScanRootAccessResult
 
     private let activityStore: GitTodayActivityStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
@@ -140,7 +141,7 @@ final class GitActivityRefreshCoordinator {
         self.widgetReloader = widgetReloader
         self.scriptURLProvider = scriptURLProvider
         self.scriptRunner = scriptRunner
-        self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRoots
+        self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
         self.dateProvider = dateProvider
         self.workspaceNotificationCenter = workspaceNotificationCenter
         self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
@@ -332,22 +333,24 @@ final class GitActivityRefreshCoordinator {
             return false
         }
 
-        let scopedRoots = authorizedRootsProvider()
+        let accessResult = authorizedRootsProvider()
+        let scopedRoots = accessResult.roots
         let authorizedRootURLs = scopedRoots.map(\.url)
         guard !authorizedRootURLs.isEmpty else {
+            let reason = refreshReason(for: accessResult.issue)
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: "no authorized Git scan roots",
+                reason: reason,
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 0,
                     widgetReloaded: false,
-                    reason: "no authorized Git scan roots"
+                    reason: reason
                 )
             )
-            NSLog("TinyBuddy: skipping git refresh for trigger %@ because no Git scan roots are authorized", String(describing: trigger))
+            NSLog("TinyBuddy: skipping git refresh for trigger %@ because %@", String(describing: trigger), reason)
             scopedRoots.forEach { $0.stopAccessing() }
             return false
         }
@@ -484,6 +487,15 @@ final class GitActivityRefreshCoordinator {
 
     private func summarizedReason(from error: Error) -> String? {
         summarizedReason(error.localizedDescription)
+    }
+
+    private func refreshReason(for issue: GitScanRootAccessIssue?) -> String {
+        switch issue {
+        case .authorizationInvalid:
+            return "saved Git scan root authorizations are no longer valid"
+        case .authorizationRequired, .none:
+            return "no authorized Git scan roots"
+        }
     }
 
     private func summarizedReason(_ reason: String?) -> String? {
