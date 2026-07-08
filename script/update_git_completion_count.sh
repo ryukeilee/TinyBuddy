@@ -97,6 +97,36 @@ normalized_scan_root_path() {
   printf '%s\n' "$resolved_path"
 }
 
+path_contains_noise_component() {
+  local candidate_path
+  candidate_path="$(normalized_scan_root_path "$1" | tr '[:upper:]' '[:lower:]')"
+
+  case "$candidate_path" in
+    */.build|*/.build/*|\
+    */.cache|*/.cache/*|\
+    */.pnpm-store|*/.pnpm-store/*|\
+    */.swiftpm|*/.swiftpm/*|\
+    */.tmp|*/.tmp/*|\
+    */__fixtures__|*/__fixtures__/*|\
+    */caches|*/caches/*|\
+    */carthage|*/carthage/*|\
+    */deriveddata|*/deriveddata/*|\
+    */deps|*/deps/*|\
+    */fixtures|*/fixtures/*|\
+    */node_modules|*/node_modules/*|\
+    */pods|*/pods/*|\
+    */temp|*/temp/*|\
+    */testdata|*/testdata/*|\
+    */third_party|*/third_party/*|\
+    */tmp|*/tmp/*|\
+    */vendor|*/vendor/*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 path_is_within_root() {
   local candidate_path
   local root_path
@@ -164,6 +194,65 @@ resolve_git_dir() {
   fi
 
   resolve_existing_directory_path "$git_dir"
+}
+
+resolve_git_metadata_dir() {
+  local base_path="$1"
+  local target_path="$2"
+
+  if [[ "$target_path" != /* ]]; then
+    target_path="$base_path/$target_path"
+  fi
+
+  resolve_existing_directory_path "$target_path"
+}
+
+repository_candidate_is_allowed() {
+  local repo_root="$1"
+
+  if path_contains_noise_component "$repo_root"; then
+    return 1
+  fi
+
+  return 0
+}
+
+validate_git_metadata_layout() {
+  local git_dir="$1"
+  local common_dir_path_file="$git_dir/commondir"
+  local git_head_path="$git_dir/HEAD"
+  local common_dir_path
+  local common_dir
+
+  if [ ! -f "$git_head_path" ] || [ ! -r "$git_head_path" ]; then
+    return 1
+  fi
+
+  if [ ! -f "$common_dir_path_file" ]; then
+    return 0
+  fi
+
+  common_dir_path="$(sed -n '1p' "$common_dir_path_file")"
+  if [ -z "$common_dir_path" ]; then
+    return 1
+  fi
+
+  trap - ERR
+  if common_dir="$(resolve_git_metadata_dir "$git_dir" "$common_dir_path")"; then
+    resolve_common_dir_exit_code=0
+  else
+    resolve_common_dir_exit_code="$?"
+  fi
+  enable_error_trap
+  if [ "$resolve_common_dir_exit_code" -ne 0 ]; then
+    return 1
+  fi
+
+  if ! path_is_within_authorized_roots "$common_dir"; then
+    return 1
+  fi
+
+  [ -d "$common_dir" ]
 }
 
 reset_activity_snapshot() {
@@ -380,13 +469,15 @@ process_repository_list() {
   reset_activity_snapshot
 
   while IFS= read -r repo_root; do
-    repository_count=$((repository_count + 1))
-
     if [ ! -e "$repo_root" ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
         log_error "cached repository path is no longer available; rebuilding repository cache"
         return 2
       fi
+      continue
+    fi
+
+    if ! repository_candidate_is_allowed "$repo_root"; then
       continue
     fi
 
@@ -414,6 +505,16 @@ process_repository_list() {
       continue
     fi
 
+    if ! validate_git_metadata_layout "$git_dir"; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository metadata is no longer valid; rebuilding repository cache"
+        return 2
+      fi
+      log_error "resolved git metadata is incomplete for one repository; skipping one repository"
+      continue
+    fi
+
+    repository_count=$((repository_count + 1))
     reflog_path="$git_dir/logs/HEAD"
     if [ ! -e "$reflog_path" ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then

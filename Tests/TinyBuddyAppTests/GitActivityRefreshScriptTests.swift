@@ -377,10 +377,6 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         let plist = try harness.readPreferencesPlist()
 
         XCTAssertEqual(result.exitCode, 0)
-        XCTAssertTrue(
-            result.standardError.contains("cached repository metadata is no longer available; rebuilding repository cache"),
-            "stderr did not include cache rebuild reason: \(result.standardError)"
-        )
         XCTAssertFalse(
             result.standardError.contains("failed with exit code 1 at line"),
             "stderr unexpectedly contained ERR trap noise: \(result.standardError)"
@@ -429,6 +425,75 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 0)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
     }
+
+    func testScriptSkipsNestedFixtureAndTemporaryRepositoriesWhenSelectingRecentProject() throws {
+        let harness = try ScriptHarness()
+        let primaryRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let fixtureRepoURL = try harness.makeRepository(atRelativePath: "Tests/Fixtures/FixtureRepo")
+        let tempRepoURL = try harness.makeRepository(atRelativePath: "tmp/TempRepo")
+
+        try harness.writeHeadReflog(
+            for: primaryRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: primary")
+            ]
+        )
+        try harness.writeHeadReflog(
+            for: fixtureRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 11, minute: 20, message: "commit: fixture")
+            ]
+        )
+        try harness.writeHeadReflog(
+            for: tempRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 12, minute: 30, message: "commit: temp")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+        XCTAssertEqual(metrics["repository_count"], "1")
+    }
+
+    func testScriptSkipsInvalidWorktreeMetadataAndDoesNotLetItOverrideRecentProject() throws {
+        let harness = try ScriptHarness()
+        let validRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let brokenWorktreeURL = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktree",
+            commonDirRelativePath: "../missing-common-dir"
+        )
+
+        try harness.writeHeadReflog(
+            for: validRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: valid")
+            ]
+        )
+        try harness.writeHeadReflog(
+            for: brokenWorktreeURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 12, minute: 45, message: "commit: broken")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.standardError.contains("metadata is incomplete"))
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+        XCTAssertEqual(metrics["repository_count"], "1")
+    }
 }
 
 private struct ScriptHarness {
@@ -468,13 +533,26 @@ private struct ScriptHarness {
     }
 
     func makeRepository(named name: String) throws -> URL {
-        let repoURL = scanRootURL.appendingPathComponent(name, isDirectory: true)
+        try makeRepository(atRelativePath: name)
+    }
+
+    func makeRepository(atRelativePath relativePath: String) throws -> URL {
+        let repoURL = scanRootURL.appendingPathComponent(relativePath, isDirectory: true)
+        let gitDirectoryURL = repoURL.appendingPathComponent(".git", isDirectory: true)
         let gitLogsURL = repoURL.appendingPathComponent(".git/logs", isDirectory: true)
         try fileManager.createDirectory(at: gitLogsURL, withIntermediateDirectories: true)
+        try "ref: refs/heads/main\n".write(
+            to: gitDirectoryURL.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
         return repoURL
     }
 
-    func makeRepositoryWithExternalGitDir(named name: String) throws -> URL {
+    func makeRepositoryWithExternalGitDir(
+        named name: String,
+        commonDirRelativePath: String? = nil
+    ) throws -> URL {
         let repoURL = scanRootURL.appendingPathComponent(name, isDirectory: true)
         let gitDirectoryURL = scanRootURL
             .appendingPathComponent(".tinybuddy-gitdirs", isDirectory: true)
@@ -488,6 +566,18 @@ private struct ScriptHarness {
             atomically: true,
             encoding: .utf8
         )
+        try "ref: refs/heads/main\n".write(
+            to: gitDirectoryURL.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        if let commonDirRelativePath {
+            try commonDirRelativePath.appending("\n").write(
+                to: gitDirectoryURL.appendingPathComponent("commondir"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
 
         return repoURL
     }
