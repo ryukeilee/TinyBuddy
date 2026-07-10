@@ -2,6 +2,162 @@ import XCTest
 @testable import TinyBuddyCore
 
 final class GitTodayActivityStoreTests: XCTestCase {
+    func testAppAndWidgetReadersUseSameAtomicTrustedSnapshot() {
+        let defaults = makeDefaults()
+        let trustedStore = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            fallbackDefaults: nil
+        )
+        let expected = GitTodayActivityTrustedSnapshot(
+            revision: 200,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(
+                focusBlockCount: 7,
+                commitCount: 11,
+                recentProjectName: "TinyBuddy"
+            )
+        )
+        XCTAssertTrue(trustedStore.save(expected))
+
+        let appStore = makeActivityStore(defaults: defaults)
+        let widgetStore = makeActivityStore(defaults: defaults)
+
+        XCTAssertEqual(appStore.loadTodaySnapshot(), expected.activity)
+        XCTAssertEqual(widgetStore.loadTodaySnapshot(), expected.activity)
+    }
+
+    func testOlderTrustedSnapshotCannotOverwriteNewerSnapshot() {
+        let defaults = makeDefaults()
+        let store = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            fallbackDefaults: nil
+        )
+        let newer = GitTodayActivityTrustedSnapshot(
+            revision: 300,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 8, commitCount: 13, recentProjectName: "New")
+        )
+        let older = GitTodayActivityTrustedSnapshot(
+            revision: 200,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 1, commitCount: 2, recentProjectName: "Old")
+        )
+
+        XCTAssertTrue(store.save(newer))
+        XCTAssertFalse(store.save(older))
+        XCTAssertEqual(store.load(), newer)
+    }
+
+    func testConflictingSnapshotWithSameRevisionCannotOverwriteCurrentSnapshot() {
+        let defaults = makeDefaults()
+        let store = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            fallbackDefaults: nil
+        )
+        let current = GitTodayActivityTrustedSnapshot(
+            revision: 300,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 8, commitCount: 13, recentProjectName: "Current")
+        )
+        let conflicting = GitTodayActivityTrustedSnapshot(
+            revision: 300,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 1, commitCount: 2, recentProjectName: "Conflicting")
+        )
+
+        XCTAssertTrue(store.save(current))
+        XCTAssertFalse(store.save(conflicting))
+        XCTAssertEqual(store.load(), current)
+    }
+
+    func testProductionReadersIgnoreDifferentPrivateFallbackSnapshots() {
+        let sharedDefaults = makeDefaults()
+        let appPrivateDefaults = makeDefaults()
+        let widgetPrivateDefaults = makeDefaults()
+        let shared = GitTodayActivityTrustedSnapshot(
+            revision: 100,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 5, commitCount: 8, recentProjectName: "Shared")
+        )
+        let appPrivate = GitTodayActivityTrustedSnapshot(
+            revision: 900,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 90, commitCount: 90, recentProjectName: "App Private")
+        )
+        let widgetPrivate = GitTodayActivityTrustedSnapshot(
+            revision: 800,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 80, commitCount: 80, recentProjectName: "Widget Private")
+        )
+        sharedDefaults.set(
+            GitTodayActivityTrustedSnapshotStore.encode(shared),
+            forKey: GitTodayActivityTrustedSnapshotStore.Key.snapshot
+        )
+        appPrivateDefaults.set(
+            GitTodayActivityTrustedSnapshotStore.encode(appPrivate),
+            forKey: GitTodayActivityTrustedSnapshotStore.Key.snapshot
+        )
+        widgetPrivateDefaults.set(
+            GitTodayActivityTrustedSnapshotStore.encode(widgetPrivate),
+            forKey: GitTodayActivityTrustedSnapshotStore.Key.snapshot
+        )
+
+        let appReader = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: sharedDefaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let widgetReader = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: sharedDefaults,
+            sharedPreferencesProvider: { nil }
+        )
+
+        XCTAssertEqual(appReader.load(), shared)
+        XCTAssertEqual(widgetReader.load(), shared)
+        XCTAssertEqual(
+            GitTodayActivityTrustedSnapshotStore(
+                userDefaults: sharedDefaults,
+                sharedPreferencesProvider: { nil },
+                fallbackDefaults: appPrivateDefaults
+            ).load(),
+            appPrivate
+        )
+        XCTAssertEqual(
+            GitTodayActivityTrustedSnapshotStore(
+                userDefaults: sharedDefaults,
+                sharedPreferencesProvider: { nil },
+                fallbackDefaults: widgetPrivateDefaults
+            ).load(),
+            widgetPrivate
+        )
+    }
+
+    func testReaderChoosesNewestTrustedSnapshotAcrossCachedAndDirectSources() {
+        let defaults = makeDefaults()
+        let cached = GitTodayActivityTrustedSnapshot(
+            revision: 100,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 1, commitCount: 1, recentProjectName: "Cached")
+        )
+        let direct = GitTodayActivityTrustedSnapshot(
+            revision: 200,
+            dayIdentifier: todayIdentifier(),
+            activity: GitTodayActivitySnapshot(focusBlockCount: 2, commitCount: 3, recentProjectName: "Direct")
+        )
+        defaults.set(GitTodayActivityTrustedSnapshotStore.encode(cached), forKey: GitTodayActivityTrustedSnapshotStore.Key.snapshot)
+        let store = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: {
+                [GitTodayActivityTrustedSnapshotStore.Key.snapshot: GitTodayActivityTrustedSnapshotStore.encode(direct)]
+            },
+            fallbackDefaults: nil
+        )
+
+        XCTAssertEqual(store.load(), direct)
+    }
+
     func testSharedPreferencesDictionaryMatchesStoreReadSemantics() throws {
         guard let preferences = TinyBuddySharedData.loadAppGroupPreferencesDictionary() else {
             throw XCTSkip("App Group shared preferences plist is unavailable in this environment")
@@ -207,6 +363,24 @@ final class GitTodayActivityStoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+
+    private func makeActivityStore(defaults: UserDefaults) -> GitTodayActivityStore {
+        GitTodayActivityStore(
+            trustedSnapshotStore: GitTodayActivityTrustedSnapshotStore(
+                userDefaults: defaults,
+                sharedPreferencesProvider: { nil },
+                fallbackDefaults: nil
+            ),
+            focusBlockCountStore: GitTodayFocusBlockCountStore(userDefaults: defaults, sharedFallbacksEnabled: false),
+            commitCountStore: GitTodayCommitCountStore(userDefaults: defaults, sharedFallbacksEnabled: false),
+            recentProjectStore: GitTodayRecentProjectStore(userDefaults: defaults, sharedFallbacksEnabled: false)
+        )
+    }
+
+    private func todayIdentifier() -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 
     private func makeCalendar() -> Calendar {

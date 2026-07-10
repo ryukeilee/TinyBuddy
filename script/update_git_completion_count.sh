@@ -12,6 +12,7 @@ FOCUS_BLOCK_DAY_KEY="tinybuddy.gitTodayFocusBlockCount.dayIdentifier"
 FOCUS_BLOCK_COUNT_KEY="tinybuddy.gitTodayFocusBlockCount.count"
 RECENT_PROJECT_DAY_KEY="tinybuddy.gitTodayRecentProject.dayIdentifier"
 RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
+TRUSTED_SNAPSHOT_KEY="tinybuddy.gitTodayActivity.trustedSnapshot"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
 TODAY="${TINYBUDDY_TODAY:-$(date +%F)}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
@@ -24,6 +25,8 @@ CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
 EMPTY_CACHE_VALUE="__TINYBUDDY_EMPTY__"
+REFRESH_REVISION="${TINYBUDDY_REFRESH_REVISION:-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000000')}"
+SNAPSHOT_WRITE_LOCK="$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-snapshot-write.lock"
 
 total_count=0
 latest_activity_timestamp=""
@@ -50,12 +53,17 @@ reflog_unchanged_skip_count=0
 recomputed_repository_count=0
 repository_scan_failed=0
 invalid_repository_count=0
+snapshot_write_lock_acquired=0
+trusted_snapshot_stale=0
 
 log_error() {
   echo "TinyBuddy refresh script: $*" >&2
 }
 
 cleanup() {
+  if [ "$snapshot_write_lock_acquired" -eq 1 ]; then
+    rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
+  fi
   rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
@@ -729,6 +737,53 @@ write_plist_integer_if_changed() {
   write_plist_integer "$key" "$value"
 }
 
+acquire_snapshot_write_lock() {
+  local attempt=0
+
+  while ! mkdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 200 ]; then
+      log_error "timed out waiting for shared snapshot write lock"
+      return 1
+    fi
+    sleep 0.01
+  done
+
+  snapshot_write_lock_acquired=1
+}
+
+write_trusted_snapshot_if_newer() {
+  local encoded_project_name
+  local current_snapshot=""
+  local current_revision=""
+  local current_payload=""
+  local proposed_payload
+
+  encoded_project_name="$(printf '%s' "$recent_project_name" | /usr/bin/base64 | tr -d '\n')"
+  proposed_payload="$TODAY"$'\t'"$focus_block_count"$'\t'"$total_count"$'\t'"$encoded_project_name"
+
+  if current_snapshot="$(read_plist_value "$TRUSTED_SNAPSHOT_KEY")"; then
+    current_revision="${current_snapshot%%$'\t'*}"
+    if [[ "$current_snapshot" == *$'\t'* ]]; then
+      current_payload="${current_snapshot#*$'\t'}"
+    fi
+
+    if [ "$current_payload" = "$proposed_payload" ]; then
+      return
+    fi
+
+    if [[ "$current_revision" =~ ^[0-9]+$ ]] &&
+       [ "$current_revision" -ge "$REFRESH_REVISION" ]; then
+      trusted_snapshot_stale=1
+      echo "TinyBuddy git shared snapshot is newer; skipped stale write"
+      return
+    fi
+  fi
+
+  shared_data_rewritten=1
+  write_plist_string "$TRUSTED_SNAPSHOT_KEY" "$REFRESH_REVISION"$'\t'"$proposed_payload"
+}
+
 handle_error() {
   local exit_code="$1"
   local line_number="$2"
@@ -862,12 +917,16 @@ if [ ! -f "$APP_GROUP_PREFERENCES_PLIST" ]; then
   /usr/bin/plutil -create xml1 "$APP_GROUP_PREFERENCES_PLIST"
 fi
 
-write_plist_string_if_changed "$DAY_KEY" "$TODAY"
-write_plist_integer_if_changed "$COUNT_KEY" "$total_count"
-write_plist_string_if_changed "$FOCUS_BLOCK_DAY_KEY" "$TODAY"
-write_plist_integer_if_changed "$FOCUS_BLOCK_COUNT_KEY" "$focus_block_count"
-write_plist_string_if_changed "$RECENT_PROJECT_DAY_KEY" "$TODAY"
-write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
+acquire_snapshot_write_lock
+write_trusted_snapshot_if_newer
+if [ "$trusted_snapshot_stale" -eq 0 ]; then
+  write_plist_string_if_changed "$DAY_KEY" "$TODAY"
+  write_plist_integer_if_changed "$COUNT_KEY" "$total_count"
+  write_plist_string_if_changed "$FOCUS_BLOCK_DAY_KEY" "$TODAY"
+  write_plist_integer_if_changed "$FOCUS_BLOCK_COUNT_KEY" "$focus_block_count"
+  write_plist_string_if_changed "$RECENT_PROJECT_DAY_KEY" "$TODAY"
+  write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
+fi
 write_repository_stats_cache
 
 if [ "$shared_data_rewritten" -eq 0 ]; then

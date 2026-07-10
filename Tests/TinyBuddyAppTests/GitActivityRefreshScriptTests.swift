@@ -1,7 +1,69 @@
 import Foundation
+@testable import TinyBuddyCore
 import XCTest
 
 final class GitActivityRefreshScriptTests: XCTestCase {
+    func testScriptPublishesOneAtomicSnapshotAndRejectsNonNewerRefreshResults() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "commit: second")
+            ]
+        )
+
+        let newerResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "300"]
+        )
+        let newerPlist = try harness.readPreferencesPlist()
+        let newerEncoded = try XCTUnwrap(
+            newerPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let newerSnapshot = try XCTUnwrap(GitTodayActivityTrustedSnapshotStore.decode(newerEncoded))
+
+        XCTAssertEqual(newerResult.exitCode, 0)
+        XCTAssertEqual(newerSnapshot.revision, 300)
+        XCTAssertEqual(newerSnapshot.activity.commitCount, 2)
+        XCTAssertEqual(newerSnapshot.activity.focusBlockCount, 2)
+        XCTAssertEqual(newerSnapshot.activity.recentProjectName, "ProjectAlpha")
+
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 10, message: "commit: stale")]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: Date().addingTimeInterval(2))
+        let sameRevisionResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "300"]
+        )
+        let sameRevisionPlist = try harness.readPreferencesPlist()
+        let sameRevisionEncoded = try XCTUnwrap(
+            sameRevisionPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+
+        XCTAssertEqual(sameRevisionResult.exitCode, 0)
+        XCTAssertTrue(sameRevisionResult.standardOutput.contains("skipped stale write"))
+        XCTAssertEqual(sameRevisionEncoded, newerEncoded)
+        XCTAssertEqual(sameRevisionPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(sameRevisionPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+
+        let olderResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "200"]
+        )
+        let finalPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(olderResult.exitCode, 0)
+        XCTAssertTrue(olderResult.standardOutput.contains("skipped stale write"))
+        XCTAssertEqual(
+            finalPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
+            newerEncoded
+        )
+    }
+
     func testScriptParsesTodayActivityFromRawHeadReflog() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
