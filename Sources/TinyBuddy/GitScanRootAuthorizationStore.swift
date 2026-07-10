@@ -63,7 +63,6 @@ final class GitScanRootAuthorizationStore {
 
     func accessAuthorizedRootResult() -> GitScanRootAccessResult {
         let bookmarkData = bookmarkDataList()
-        var resolvedBookmarkData: [Data] = []
         var roots: [ScopedGitScanRoot] = []
         var droppedBookmark = false
 
@@ -78,13 +77,11 @@ final class GitScanRootAuthorizationStore {
                 continue
             }
 
-            resolvedBookmarkData.append(bookmarkDatum)
             roots.append(root)
         }
 
-        if resolvedBookmarkData.count != bookmarkData.count {
-            userDefaults.set(resolvedBookmarkData, forKey: Constants.bookmarkDataKey)
-            NSLog("TinyBuddy: one or more Git scan root bookmarks could not be resolved")
+        if droppedBookmark {
+            NSLog("TinyBuddy: one or more saved Git scan roots are temporarily unavailable")
         }
 
         if roots.isEmpty {
@@ -94,7 +91,10 @@ final class GitScanRootAuthorizationStore {
             return GitScanRootAccessResult(roots: [], issue: issue)
         }
 
-        return GitScanRootAccessResult(roots: roots, issue: nil)
+        return GitScanRootAccessResult(
+            roots: roots,
+            issue: droppedBookmark ? .authorizationInvalid : nil
+        )
     }
 
     private func bookmarkDataList() -> [Data] {

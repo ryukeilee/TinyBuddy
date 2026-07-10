@@ -183,7 +183,35 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         XCTAssertEqual(roots.map(\.url), [liveRoot])
     }
 
-    func testAccessAuthorizedRootsRemovesUnresolvedBookmarksFromPersistence() throws {
+    func testAccessAuthorizedRootResultMarksPartialBookmarkFailureAsInvalid() throws {
+        let defaults = makeDefaults()
+        let staleRoot = try makeTemporaryDirectory(named: "StaleProject")
+        let liveRoot = try makeTemporaryDirectory(named: "LiveProject")
+        defer {
+            try? FileManager.default.removeItem(at: staleRoot.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: liveRoot.deletingLastPathComponent())
+        }
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: defaults,
+            bookmarkDataCreator: { Data($0.standardizedFileURL.path.utf8) },
+            scopedRootResolver: { bookmarkData in
+                guard let path = String(data: bookmarkData, encoding: .utf8),
+                      path != staleRoot.path else {
+                    return nil
+                }
+                return ScopedGitScanRoot(url: URL(fileURLWithPath: path))
+            }
+        )
+        try store.replaceAuthorizedRoots([staleRoot, liveRoot])
+
+        let result = store.accessAuthorizedRootResult()
+
+        XCTAssertEqual(result.roots.map(\.url), [liveRoot])
+        XCTAssertEqual(result.issue, .authorizationInvalid)
+        XCTAssertTrue(store.hasAuthorizedRoots)
+    }
+
+    func testAccessAuthorizedRootsPreservesUnresolvedBookmarksForAutomaticRecovery() throws {
         let defaults = makeDefaults()
         let store = GitScanRootAuthorizationStore(
             userDefaults: defaults,
@@ -200,7 +228,7 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         let roots = store.accessAuthorizedRoots()
 
         XCTAssertTrue(roots.isEmpty)
-        XCTAssertFalse(store.hasAuthorizedRoots)
+        XCTAssertTrue(store.hasAuthorizedRoots)
     }
 
     func testAccessAuthorizedRootResultMarksMissingSavedDirectoryAsInvalidAuthorization() throws {
@@ -228,7 +256,7 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
 
         XCTAssertTrue(accessResult.roots.isEmpty)
         XCTAssertEqual(accessResult.issue, .authorizationInvalid)
-        XCTAssertFalse(store.hasAuthorizedRoots)
+        XCTAssertTrue(store.hasAuthorizedRoots)
     }
 
     func testAccessAuthorizedRootResultMarksMissingAuthorizationWhenNothingSaved() {
@@ -246,7 +274,7 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         XCTAssertEqual(accessResult.issue, .authorizationRequired)
     }
 
-    func testAccessAuthorizedRootsRemovesBroadResolvedBookmarksFromPersistence() {
+    func testAccessAuthorizedRootsSkipsBroadResolvedBookmarksWithoutOverwritingPersistence() {
         let defaults = makeDefaults()
         let temporaryRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -283,7 +311,7 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         let persistedPaths = persistedBookmarkData?.compactMap { String(data: $0, encoding: .utf8) }
 
         XCTAssertEqual(roots.map(\.url), [projectURL])
-        XCTAssertEqual(persistedPaths, [projectURL.path])
+        XCTAssertEqual(persistedPaths, ["/Users", projectURL.path])
         XCTAssertEqual(stoppedPaths, ["/Users"])
     }
 

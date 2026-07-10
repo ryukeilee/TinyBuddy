@@ -109,8 +109,9 @@ final class PetViewModel: ObservableObject {
 
     func select(_ nextStatus: PetStatus) {
         session.select(nextStatus)
-        reloadHUDState()
-        widgetReloader()
+        if reloadHUDState() {
+            widgetReloader()
+        }
     }
 
     func requestGitScanAuthorization() {
@@ -125,8 +126,9 @@ final class PetViewModel: ObservableObject {
 
     private func restorePersistedState() {
         refreshDiagnostics = Self.makeRefreshDiagnostics(from: refreshStatusStore.load())
-        reloadHUDState()
-        widgetReloader()
+        if reloadHUDState() {
+            widgetReloader()
+        }
     }
 
     private static func makeRefreshDiagnostics(from status: GitActivityRefreshStatus?) -> RefreshDiagnostics {
@@ -153,17 +155,20 @@ final class PetViewModel: ObservableObject {
         )
     }
 
-    private func reloadHUDState() {
+    @discardableResult
+    private func reloadHUDState() -> Bool {
         let snapshot = store.loadSnapshot()
         let activitySnapshot = activityStore.loadTodaySnapshot()
         let hudPresentation = Self.makeHUDPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot
         )
+        let didChange = self.hudPresentation != hudPresentation
         status = snapshot.status
         stats = snapshot.stats
         self.hudPresentation = hudPresentation
         displayState = Self.makeDisplayState(from: hudPresentation)
+        return didChange
     }
 
     private static func makeHUDPresentation(

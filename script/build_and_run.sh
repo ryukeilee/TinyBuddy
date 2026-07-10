@@ -64,6 +64,18 @@ update_git_completion_count() {
   TINYBUDDY_GIT_SCAN_ROOTS="$git_scan_roots" /bin/bash "$ROOT_DIR/script/update_git_completion_count.sh"
 }
 
+run_optional_git_pre_refresh() {
+  local exit_code
+
+  if update_git_completion_count; then
+    return 0
+  else
+    exit_code="$?"
+  fi
+
+  echo "warning: git pre-refresh failed with exit code $exit_code; continuing with the last valid Git data" >&2
+}
+
 resolve_saved_git_scan_roots() {
   if [ ! -f "$APP_PREFERENCES_PLIST" ]; then
     return 0
@@ -306,41 +318,41 @@ verify_release_app() {
 
 case "$MODE" in
   run)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     open_app
     ;;
   --debug|debug)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     lldb -- "$APP_BINARY"
     ;;
   --logs|logs)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     open_app
     /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
     ;;
   --telemetry|telemetry)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     open_app
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     open_app
     sleep 1
     pgrep -x "$APP_NAME" >/dev/null
     check_widget_runtime_source_match fail
     ;;
   release-install|--release-install)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     install_release_app
     verify_release_app
     ;;
   release-verify|--release-verify)
-    update_git_completion_count
+    run_optional_git_pre_refresh
     verify_release_app
     ;;
   *)

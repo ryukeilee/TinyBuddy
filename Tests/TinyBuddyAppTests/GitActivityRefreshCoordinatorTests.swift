@@ -135,7 +135,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
-    func testRefreshMirrorsGitActivitySnapshotToStandardDefaults() {
+    func testRefreshMirrorsValidGitActivityWithoutClearingItWhenRefreshedSnapshotIsUnavailable() {
         withRestoredStandardDefaults(keys: mirroredGitActivityKeys) {
             let harness = makeHarness()
             harness.setScriptRunnerHook { runCount in
@@ -143,7 +143,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 case 1:
                     harness.setActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "  TinyBuddy  ")
                 case 2:
-                    harness.setActivitySnapshot(focusBlockCount: nil, commitCount: nil, recentProjectName: nil)
+                    harness.clearActivitySnapshot()
                 default:
                     return
                 }
@@ -178,9 +178,11 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 "TinyBuddy"
             )
 
-            harness.performAndWaitForWidgetReloadCount(2) {
+            harness.advanceCurrentDate(by: 60)
+            harness.performAndWaitForScriptRunCount(2) {
                 harness.coordinator.handleReopen()
             }
+            harness.waitForNoRefresh()
 
             XCTAssertEqual(
                 UserDefaults.standard.string(forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier),
@@ -188,7 +190,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             )
             XCTAssertEqual(
                 UserDefaults.standard.integer(forKey: GitTodayFocusBlockCountStore.Key.count),
-                0
+                4
             )
             XCTAssertEqual(
                 UserDefaults.standard.string(forKey: GitTodayCommitCountStore.Key.dayIdentifier),
@@ -196,15 +198,18 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             )
             XCTAssertEqual(
                 UserDefaults.standard.integer(forKey: GitTodayCommitCountStore.Key.count),
-                0
+                7
             )
             XCTAssertEqual(
                 UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.dayIdentifier),
                 harness.currentDayIdentifier
             )
-            XCTAssertNil(
-                UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.projectName)
+            XCTAssertEqual(
+                UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.projectName),
+                "TinyBuddy"
             )
+            XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+            XCTAssertEqual(harness.widgetReloadCount, 1)
         }
     }
 
@@ -242,6 +247,43 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
+    func testFailedRefreshBacksOffWakeRetriesAndAutomaticallyRecoversLater() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                struct ScriptFailure: LocalizedError {
+                    var errorDescription: String? { "git temporarily unavailable" }
+                }
+                throw ScriptFailure()
+            }
+
+            harness.setActivitySnapshot(
+                focusBlockCount: 3,
+                commitCount: 2,
+                recentProjectName: "TinyBuddy"
+            )
+        }
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+
+        harness.advanceCurrentDate(by: 6)
+        harness.coordinator.handleDidWake()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+
+        harness.advanceCurrentDate(by: 294)
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.coordinator.handleDidWake()
+        }
+        harness.waitForWidgetReloadCount(1)
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
     func testStartTriggersLaunchRefreshAndWidgetReload() {
         let harness = makeHarness()
         harness.setScriptRunnerHook { runCount in
@@ -258,6 +300,31 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.scriptRunCount, 1)
         XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
+    func testResigningActiveSuspendsPeriodicAndWakeRefreshUntilNextActivation() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.start()
+        }
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+
+        harness.coordinator.handleDidResignActive()
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+
+        harness.advanceCurrentDate(by: 120)
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        harness.postWorkspaceNotification(named: NSWorkspace.screensDidWakeNotification)
+        harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.scriptRunCount, 2)
     }
 
     func testDidBecomeActiveSkipsWhenMinimumRefreshSpacingNotReached() {
@@ -280,19 +347,117 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.scriptRunCount, 1)
         XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(
-            harness.lastRefreshStatus,
-            GitActivityRefreshStatus(
-                refreshedAt: harness.currentDate,
-                trigger: .becameActive,
-                outcome: .skipped,
-                reason: "minimum refresh spacing not reached",
-                metrics: GitActivityRefreshMetrics(
-                    durationMilliseconds: 0,
-                    widgetReloaded: false,
-                    reason: "minimum refresh spacing not reached"
-                )
-            )
+            harness.lastRefreshStatus?.trigger,
+            .launch
         )
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+    }
+
+    func testUnavailableAuthorizationSuspendsPeriodicRefreshUntilAuthorizationChanges() {
+        let harness = makeHarness(authorizedRoots: [])
+
+        harness.coordinator.start()
+        harness.waitForNoRefresh()
+
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.scriptRunCount, 0)
+
+        harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleAuthorizationChanged()
+        }
+
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.scriptRunCount, 1)
+    }
+
+    func testInvalidSavedAuthorizationKeepsLowFrequencyRecoveryAndRecoversAutomatically() {
+        let harness = makeHarness(authorizedRoots: [], authorizationIssue: .authorizationInvalid)
+
+        harness.coordinator.start()
+        harness.waitForNoRefresh()
+
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.scriptRunCount, 0)
+
+        harness.advanceCurrentDate(by: 6)
+        harness.coordinator.handleDidWake()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 0)
+
+        harness.authorizationIssue = nil
+        harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/RecoveredProject")]
+        harness.advanceCurrentDate(by: 294)
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidWake()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+    }
+
+    func testPartialAuthorizationFailureDoesNotPublishPartialResultsAndRecoversAutomatically() {
+        let liveRoot = URL(fileURLWithPath: "/Authorized/LiveProject")
+        let recoveredRoot = URL(fileURLWithPath: "/Authorized/RecoveredProject")
+        let harness = makeHarness(
+            authorizedRoots: [liveRoot],
+            authorizationIssue: .authorizationInvalid
+        )
+
+        harness.coordinator.start()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .skipped)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+
+        harness.advanceCurrentDate(by: 6)
+        harness.coordinator.handleDidWake()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 0)
+
+        harness.authorizationIssue = nil
+        harness.authorizedRoots = [liveRoot, recoveredRoot]
+        harness.advanceCurrentDate(by: 294)
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidWake()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.capturedRootPaths, [liveRoot.path, recoveredRoot.path])
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+    }
+
+    func testReopenRestoresPeriodicRefreshAfterAuthorizationBecomesAvailable() {
+        let harness = makeHarness(authorizedRoots: [])
+
+        harness.coordinator.start()
+        harness.waitForNoRefresh()
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+
+        harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleReopen()
+        }
+
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.scriptRunCount, 1)
+    }
+
+    func testReopenDoesNotDuplicateRecentForegroundRefresh() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.start()
+        }
+        harness.coordinator.handleDidBecomeActive()
+        harness.coordinator.handleReopen()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .launch)
     }
 
     func testReopenTriggersRefreshAndWidgetReload() {
@@ -486,6 +651,86 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 3)
     }
 
+    func testResigningActiveDropsQueuedWakeRefreshAfterSuccessfulRefresh() {
+        let harness = makeHarness()
+        let allowWakeRefreshToFinish = DispatchSemaphore(value: 0)
+        let applicationResigned = expectation(description: "application resigned with wake refresh queued")
+
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+            case 2:
+                harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 0, recentProjectName: "TinyBuddy")
+                harness.advanceCurrentDate(by: 6)
+                DispatchQueue.main.async {
+                    harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+                    harness.coordinator.handleDidResignActive()
+                    applicationResigned.fulfill()
+                }
+                allowWakeRefreshToFinish.wait()
+            default:
+                XCTFail("background transition must not start a queued wake refresh")
+            }
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        wait(for: [applicationResigned], timeout: 1.0)
+        allowWakeRefreshToFinish.signal()
+        harness.waitForWidgetReloadCount(2)
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+    }
+
+    func testResigningActiveDropsQueuedWakeRefreshAfterFailedRefresh() {
+        let harness = makeHarness()
+        let allowWakeRefreshToFinish = DispatchSemaphore(value: 0)
+        let applicationResigned = expectation(description: "application resigned with wake refresh queued")
+
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+                return
+            }
+
+            guard runCount == 2 else {
+                XCTFail("background transition must not start a queued wake refresh")
+                return
+            }
+
+            harness.advanceCurrentDate(by: 6)
+            DispatchQueue.main.async {
+                harness.postWorkspaceNotification(named: NSWorkspace.sessionDidBecomeActiveNotification)
+                harness.coordinator.handleDidResignActive()
+                applicationResigned.fulfill()
+            }
+            allowWakeRefreshToFinish.wait()
+
+            struct ScriptFailure: LocalizedError {
+                var errorDescription: String? { "refresh script exited with status 1" }
+            }
+            throw ScriptFailure()
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        wait(for: [applicationResigned], timeout: 1.0)
+        allowWakeRefreshToFinish.signal()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .didWake)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+    }
+
     func testWakeNotificationRetriesWhenFirstWakeRefreshCannotStart() {
         let harness = makeHarness()
         harness.setScriptRunnerHook { runCount in
@@ -518,7 +763,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
-    func testFailedRefreshDoesNotOverwriteQueuedWakeRefreshStatus() {
+    func testFailedRefreshBackoffPreservesFailureStatusAndDropsQueuedWakeRetry() {
         let harness = makeHarness()
         let queuedWakeNotificationPosted = expectation(description: "queued wake notification posted")
 
@@ -561,14 +806,14 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
                 refreshedAt: harness.currentDate,
-                trigger: .sessionDidBecomeActive,
-                outcome: .skipped,
-                reason: "no authorized Git scan roots",
+                trigger: .didWake,
+                outcome: .failed,
+                reason: "refresh script exited with status 1",
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
-                    authorizedRootCount: 0,
+                    authorizedRootCount: 1,
                     widgetReloaded: false,
-                    reason: "no authorized Git scan roots"
+                    reason: "refresh script exited with status 1"
                 )
             )
         )
@@ -650,19 +895,23 @@ private final class RefreshHarness {
             calendar: calendar,
             dateProvider: { [state] in state.currentDate }
         )
+        let focusBlockCountStore = GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { [state] in state.currentDate },
+            sharedFallbacksEnabled: false
+        )
+        let commitCountStore = GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { [state] in state.currentDate },
+            sharedFallbacksEnabled: false
+        )
+        focusBlockCountStore.saveTodayCount(0)
+        commitCountStore.saveTodayCount(0)
         let activityStore = GitTodayActivityStore(
-            focusBlockCountStore: GitTodayFocusBlockCountStore(
-                userDefaults: defaults,
-                calendar: calendar,
-                dateProvider: { [state] in state.currentDate },
-                sharedFallbacksEnabled: false
-            ),
-            commitCountStore: GitTodayCommitCountStore(
-                userDefaults: defaults,
-                calendar: calendar,
-                dateProvider: { [state] in state.currentDate },
-                sharedFallbacksEnabled: false
-            ),
+            focusBlockCountStore: focusBlockCountStore,
+            commitCountStore: commitCountStore,
             recentProjectStore: GitTodayRecentProjectStore(
                 userDefaults: defaults,
                 calendar: calendar,
@@ -704,7 +953,7 @@ private final class RefreshHarness {
                 }
                 return GitScanRootAccessResult(
                     roots: roots,
-                    issue: roots.isEmpty ? state.authorizationIssue : nil
+                    issue: state.authorizationIssue
                 )
             },
             dateProvider: { [state] in
@@ -730,6 +979,10 @@ private final class RefreshHarness {
     var authorizedRoots: [URL] {
         get { state.authorizedRoots }
         set { state.authorizedRoots = newValue }
+    }
+    var authorizationIssue: GitScanRootAccessIssue? {
+        get { state.authorizationIssue }
+        set { state.authorizationIssue = newValue }
     }
 
     func advanceCurrentDate(by seconds: TimeInterval) {
@@ -775,6 +1028,15 @@ private final class RefreshHarness {
         focusStore.saveTodayCount(focusBlockCount ?? 0)
         commitStore.saveTodayCount(commitCount ?? 0)
         recentProjectStore.saveTodayProjectName(recentProjectName)
+    }
+
+    func clearActivitySnapshot() {
+        activityDefaults.removeObject(forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier)
+        activityDefaults.removeObject(forKey: GitTodayFocusBlockCountStore.Key.count)
+        activityDefaults.removeObject(forKey: GitTodayCommitCountStore.Key.dayIdentifier)
+        activityDefaults.removeObject(forKey: GitTodayCommitCountStore.Key.count)
+        activityDefaults.removeObject(forKey: GitTodayRecentProjectStore.Key.dayIdentifier)
+        activityDefaults.removeObject(forKey: GitTodayRecentProjectStore.Key.projectName)
     }
 
     func performAndWaitForRefresh(_ action: () -> Void) {

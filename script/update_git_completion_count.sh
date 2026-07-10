@@ -39,6 +39,7 @@ repo_reflog_file="$(mktemp)"
 repo_git_paths_file="$(mktemp)"
 repo_stats_cache_file="$(mktemp)"
 new_repo_stats_file="$(mktemp)"
+validated_repo_list_file="$(mktemp)"
 find_stderr_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
 diagnostics_emitted=0
@@ -47,13 +48,15 @@ repository_count=0
 cache_hit_count=0
 reflog_unchanged_skip_count=0
 recomputed_repository_count=0
+repository_scan_failed=0
+invalid_repository_count=0
 
 log_error() {
   echo "TinyBuddy refresh script: $*" >&2
 }
 
 cleanup() {
-  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$find_stderr_file" "$focus_block_list_file"
+  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
 emit_runtime_diagnostics_once() {
@@ -266,8 +269,10 @@ reset_activity_snapshot() {
   cache_hit_count=0
   reflog_unchanged_skip_count=0
   recomputed_repository_count=0
+  invalid_repository_count=0
   : > "$focus_block_list_file"
   : > "$new_repo_stats_file"
+  : > "$validated_repo_list_file"
 }
 
 emit_refresh_metrics() {
@@ -335,6 +340,7 @@ refresh_repository_list_from_scan() {
   done < "$repo_git_paths_file" > "$repo_scan_file"
 
   if [ "$find_exit_code" -ne 0 ]; then
+    repository_scan_failed=1
     emit_runtime_diagnostics_once
     log_error "repository scan encountered inaccessible paths under authorized roots (find exit: $find_exit_code); continuing with readable results"
     emit_find_stderr_sample
@@ -474,6 +480,7 @@ process_repository_list() {
         log_error "cached repository path is no longer available; rebuilding repository cache"
         return 2
       fi
+      invalid_repository_count=$((invalid_repository_count + 1))
       continue
     fi
 
@@ -493,6 +500,7 @@ process_repository_list() {
         log_error "cached repository metadata is no longer available; rebuilding repository cache"
         return 2
       fi
+      invalid_repository_count=$((invalid_repository_count + 1))
       continue
     fi
 
@@ -501,6 +509,7 @@ process_repository_list() {
         log_error "cached repository metadata escaped authorized roots; rebuilding repository cache"
         return 2
       fi
+      invalid_repository_count=$((invalid_repository_count + 1))
       log_error "resolved git metadata path escaped authorized roots; skipping one repository"
       continue
     fi
@@ -510,6 +519,7 @@ process_repository_list() {
         log_error "cached repository metadata is no longer valid; rebuilding repository cache"
         return 2
       fi
+      invalid_repository_count=$((invalid_repository_count + 1))
       log_error "resolved git metadata is incomplete for one repository; skipping one repository"
       continue
     fi
@@ -568,6 +578,7 @@ process_repository_list() {
         fi
         append_cached_focus_blocks "$cached_repo_focus_blocks"
         write_repository_stats_entry "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" "$repo_count" "$repo_latest_timestamp" "$cached_repo_focus_blocks"
+        printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
         total_count=$((total_count + repo_count))
 
         if [ -n "$repo_latest_timestamp" ] && { [ -z "$latest_activity_timestamp" ] || [[ "$repo_latest_timestamp" > "$latest_activity_timestamp" ]]; }; then
@@ -638,6 +649,7 @@ process_repository_list() {
 
     repo_focus_blocks="$(awk -F '\t' '$1 == "BLOCK" { print $2 }' "$repo_reflog_file" | sort -u | paste -sd, -)"
     write_repository_stats_entry "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" "$repo_count" "$repo_latest_timestamp" "$repo_focus_blocks"
+    printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
 
     total_count=$((total_count + repo_count))
 
@@ -768,6 +780,11 @@ if [ ! -s "$scan_roots_file" ]; then
   exit 0
 fi
 
+had_cached_repository_list=0
+if [ -s "$CACHE_REPO_LIST_FILE" ]; then
+  had_cached_repository_list=1
+fi
+
 using_cached_repo_list=0
 if cache_matches_current_roots; then
   load_cached_repository_list
@@ -775,6 +792,16 @@ if cache_matches_current_roots; then
   using_cached_repo_list=1
 else
   refresh_repository_list_from_scan
+  if [ "$repository_scan_failed" -eq 1 ]; then
+    log_error "repository scan failed; preserving previous shared data"
+    emit_refresh_metrics
+    exit 1
+  fi
+  if [ "$had_cached_repository_list" -eq 1 ] && [ ! -s "$repo_list_file" ]; then
+    log_error "repository rescan found no repositories; preserving previous shared data"
+    emit_refresh_metrics
+    exit 1
+  fi
   write_repository_cache
   load_cached_repository_stats
 fi
@@ -786,8 +813,26 @@ if [ "${process_result:-0}" -ne 0 ]; then
   fi
 
   refresh_repository_list_from_scan
-  write_repository_cache
-  process_repository_list 0
+  if [ "$repository_scan_failed" -eq 0 ] && [ -s "$repo_list_file" ]; then
+    process_repository_list 0
+    if [ "$failed_reflog_repo_count" -eq 0 ] && [ -s "$validated_repo_list_file" ]; then
+      cp "$validated_repo_list_file" "$repo_list_file"
+      write_repository_cache
+      write_repository_stats_cache
+    fi
+  fi
+  emit_runtime_diagnostics_once
+  log_error "cached repository paths are temporarily unavailable; preserving previous shared data"
+  emit_find_stderr_sample
+  emit_refresh_metrics
+  exit 1
+fi
+
+if [ "$had_cached_repository_list" -eq 1 ] && [ "$invalid_repository_count" -gt 0 ]; then
+  emit_runtime_diagnostics_once
+  log_error "one or more previously known repositories are invalid; preserving previous shared data"
+  emit_refresh_metrics
+  exit 1
 fi
 
 focus_block_count="$(sort -u "$focus_block_list_file" | awk 'END { print NR + 0 }')"

@@ -58,6 +58,43 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "PreviousProject")
     }
 
+    func testScriptPreservesPreviousSharedDataWhenRepositoryScanFailsAndRecoversLater() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let failingFindURL = try harness.makeFailingRecursiveFindProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        try harness.seedPreferencesPlist([
+            "tinybuddy.gitTodayCommitCount.dayIdentifier": harness.todayIdentifier,
+            "tinybuddy.gitTodayCommitCount.count": 99,
+            "tinybuddy.gitTodayFocusBlockCount.dayIdentifier": harness.todayIdentifier,
+            "tinybuddy.gitTodayFocusBlockCount.count": 77,
+            "tinybuddy.gitTodayRecentProject.dayIdentifier": harness.todayIdentifier,
+            "tinybuddy.gitTodayRecentProject.projectName": "PreviousProject"
+        ])
+
+        let failedResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": failingFindURL.path
+        ])
+        let preservedPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(failedResult.exitCode, 1)
+        XCTAssertTrue(failedResult.standardError.contains("preserving previous shared data"))
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 99)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 77)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "PreviousProject")
+
+        let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let recoveredPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(recoveredResult.exitCode, 0)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+    }
+
     func testScriptSkipsSharedDataRewriteWhenSnapshotDidNotChange() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -322,7 +359,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
     }
 
-    func testScriptRebuildsRepositoryCacheWhenCachedRepositoryBecomesUnavailable() throws {
+    func testScriptPreservesPreviousSharedDataWhenCachedRepositoryBecomesUnavailable() throws {
         let harness = try ScriptHarness()
         let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
         let findProbe = try harness.makeFindProbe()
@@ -344,14 +381,84 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         ])
         let plist = try harness.readPreferencesPlist()
 
-        XCTAssertEqual(result.exitCode, 0)
-        XCTAssertTrue(result.standardError.contains("rebuilding repository cache"))
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("preserving previous shared data"))
         XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
-        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
-        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+
     }
 
-    func testScriptRebuildsRepositoryCacheWhenCachedGitDirResolutionFailsWithoutErrTrapNoise() throws {
+    func testScriptRebuildsBadCachedRepositoryListThenRecoversOnNextInvocation() throws {
+        let harness = try ScriptHarness()
+        let alphaURL = try harness.makeRepository(named: "ProjectAlpha")
+        let betaURL = try harness.makeRepository(named: "ProjectBeta")
+        try harness.writeHeadReflog(
+            for: alphaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha")]
+        )
+        try harness.writeHeadReflog(
+            for: betaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: beta")]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+        try FileManager.default.removeItem(at: alphaURL.appendingPathComponent(".git/logs/HEAD"))
+
+        let failedResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let preservedPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(failedResult.exitCode, 1)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+
+        let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let recoveredPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(recoveredResult.exitCode, 0)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+    }
+
+    func testScriptPreservesPreviousSharedDataWhenSuccessfulRescanFindsNoRepositories() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha")]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+        try FileManager.default.removeItem(at: repoURL)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("preserving previous shared data"))
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+
+        let restoredRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: restoredRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 11, minute: 20, message: "commit: restored")]
+        )
+
+        let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let recoveredPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(recoveredResult.exitCode, 0)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+    }
+
+    func testScriptPreservesPreviousSharedDataWhenCachedGitDirResolutionFailsWithoutErrTrapNoise() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepositoryWithExternalGitDir(named: "ProjectBeta")
         let findProbe = try harness.makeFindProbe()
@@ -376,15 +483,15 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         ])
         let plist = try harness.readPreferencesPlist()
 
-        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.exitCode, 1)
         XCTAssertFalse(
             result.standardError.contains("failed with exit code 1 at line"),
             "stderr unexpectedly contained ERR trap noise: \(result.standardError)"
         )
         XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
-        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
-        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 0)
-        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
     }
 
     func testScriptDoesNotReuseCachedStatsWhenGitDirEscapesAuthorizedRoots() throws {
@@ -419,11 +526,11 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         let result = try harness.run(scanRoots: [harness.scanRootURL])
         let plist = try harness.readPreferencesPlist()
 
-        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.exitCode, 1)
         XCTAssertTrue(result.standardError.contains("escaped authorized roots"))
-        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
-        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 0)
-        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
     }
 
     func testScriptSkipsNestedFixtureAndTemporaryRepositoriesWhenSelectingRecentProject() throws {
@@ -635,6 +742,20 @@ private struct ScriptHarness {
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         return FindProbe(scriptURL: scriptURL, logURL: logURL)
+    }
+
+    func makeFailingRecursiveFindProbe() throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("failing-find-probe.sh")
+        let script = """
+        #!/bin/bash
+        /usr/bin/find "$@"
+        case " $* " in
+          *" -name .git "*) exit 1 ;;
+        esac
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
     }
 
     func makePerlProbe() throws -> PerlProbe {

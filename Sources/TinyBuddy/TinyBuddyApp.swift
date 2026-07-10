@@ -36,11 +36,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
-        gitActivityRefreshCoordinator.start()
+        gitActivityRefreshCoordinator.start(isApplicationActive: NSApp.isActive)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         gitActivityRefreshCoordinator.handleDidBecomeActive()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        gitActivityRefreshCoordinator.handleDidResignActive()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -59,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc
     private func handleGitScanRootAuthorizationRequest() {
         gitScanRootAuthorizationController.requestAuthorization()
-        gitActivityRefreshCoordinator.handleReopen()
+        gitActivityRefreshCoordinator.handleAuthorizationChanged()
         restoreHUDWindow(from: NSApp)
     }
 

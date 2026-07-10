@@ -381,7 +381,7 @@ final class PetViewModelTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 1.0)
     }
 
-    func testSelectingStatusRequestsImmediateWidgetReload() {
+    func testSelectingStatusSkipsWidgetReloadWhenWidgetPresentationIsUnchanged() {
         let defaults = makeDefaults()
         var widgetReloadCount = 0
         let viewModel = PetViewModel(
@@ -393,10 +393,11 @@ final class PetViewModelTests: XCTestCase {
 
         viewModel.select(.focusing)
 
-        XCTAssertEqual(widgetReloadCount, 1)
+        XCTAssertEqual(widgetReloadCount, 0)
+        XCTAssertEqual(viewModel.selectedStatus, .focusing)
     }
 
-    func testBecameActiveRequestsWidgetReloadAfterRestoringPersistedState() async {
+    func testBecameActiveSkipsWidgetReloadWhenPersistedStateIsUnchanged() async {
         let defaults = makeDefaults()
         let notificationCenter = NotificationCenter()
         var widgetReloadCount = 0
@@ -408,16 +409,50 @@ final class PetViewModelTests: XCTestCase {
         )
 
         notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await Task.yield()
 
-        let expectation = expectation(description: "widget timeline reloaded after foreground restoration")
+        XCTAssertEqual(widgetReloadCount, 0)
+        XCTAssertEqual(viewModel.status, .idle)
+    }
+
+    func testBecameActiveReloadsWidgetWhenPersistedPresentationChanged() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 14, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        var widgetReloadCount = 0
+        let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: activityStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter,
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(1)
+        notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+
+        let expectation = expectation(description: "changed persisted presentation restored")
         Task { @MainActor in
-            while widgetReloadCount != 1 {
+            while viewModel.hudPresentation.focusCount != 1 {
                 try? await Task.sleep(nanoseconds: 10_000_000)
             }
             expectation.fulfill()
         }
         await fulfillment(of: [expectation], timeout: 1.0)
-        XCTAssertEqual(viewModel.status, .idle)
+
+        XCTAssertEqual(widgetReloadCount, 1)
     }
 
     func testNewDefaultsInstanceRestoresStateAfterApplicationRestart() {

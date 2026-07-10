@@ -112,8 +112,10 @@ final class GitActivityRefreshCoordinator {
 
     private var timer: Timer?
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
+    private var isApplicationActive = false
     private var isRefreshing = false
     private var lastRefreshAttemptAt: Date?
+    private var lastRefreshFailureAt: Date?
     private var lastWakeRefreshAt: Date?
     private var pendingWakeRefreshTrigger: GitTodayActivityRefreshTrigger?
     private var pendingWakeRefreshRequestedAt: Date?
@@ -147,18 +149,41 @@ final class GitActivityRefreshCoordinator {
         self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
     }
 
-    func start() {
+    func start(isApplicationActive: Bool = true) {
         registerWorkspaceNotificationsIfNeeded()
-        scheduleTimerIfNeeded()
+        self.isApplicationActive = isApplicationActive
+        if isApplicationActive {
+            scheduleTimerIfNeeded()
+        }
         refresh(trigger: .launch, force: true)
     }
 
     func handleDidBecomeActive() {
+        isApplicationActive = true
+        scheduleTimerIfNeeded()
         refresh(trigger: .becameActive)
     }
 
+    func handleDidResignActive() {
+        isApplicationActive = false
+        timer?.invalidate()
+        timer = nil
+        pendingWakeRefreshTrigger = nil
+        pendingWakeRefreshRequestedAt = nil
+    }
+
     func handleReopen() {
-        refresh(trigger: .reopen, force: true)
+        if isApplicationActive {
+            scheduleTimerIfNeeded()
+        }
+        refresh(trigger: .reopen)
+    }
+
+    func handleAuthorizationChanged() {
+        if isApplicationActive {
+            scheduleTimerIfNeeded()
+        }
+        refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
     }
 
     func handleDidWake() {
@@ -174,7 +199,12 @@ final class GitActivityRefreshCoordinator {
     }
 
     deinit {
+        timer?.invalidate()
         workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
+    }
+
+    var isPeriodicRefreshScheduled: Bool {
+        timer != nil
     }
 
     private func scheduleTimerIfNeeded() {
@@ -184,7 +214,11 @@ final class GitActivityRefreshCoordinator {
 
         timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refresh(trigger: .timer)
+                guard let self, self.isApplicationActive else {
+                    return
+                }
+
+                self.refresh(trigger: .timer)
             }
         }
     }
@@ -220,38 +254,20 @@ final class GitActivityRefreshCoordinator {
     }
 
     private func requestWakeRefresh(trigger: GitTodayActivityRefreshTrigger) {
+        guard isApplicationActive else {
+            return
+        }
+
         let now = dateProvider()
 
         if isRefreshing {
             pendingWakeRefreshTrigger = trigger
             pendingWakeRefreshRequestedAt = now
-            recordRefreshStatus(
-                refreshedAt: now,
-                trigger: trigger,
-                outcome: .skipped,
-                reason: "refresh already in progress",
-                metrics: GitActivityRefreshMetrics(
-                    durationMilliseconds: 0,
-                    widgetReloaded: false,
-                    reason: "refresh already in progress"
-                )
-            )
             return
         }
 
         if let lastWakeRefreshAt,
            now.timeIntervalSince(lastWakeRefreshAt) < wakeRefreshCoalescingInterval {
-            recordRefreshStatus(
-                refreshedAt: now,
-                trigger: trigger,
-                outcome: .skipped,
-                reason: "wake refresh coalesced",
-                metrics: GitActivityRefreshMetrics(
-                    durationMilliseconds: 0,
-                    widgetReloaded: false,
-                    reason: "wake refresh coalesced"
-                )
-            )
             return
         }
 
@@ -262,6 +278,12 @@ final class GitActivityRefreshCoordinator {
 
     private func finishRefresh(succeeded: Bool) {
         isRefreshing = false
+
+        guard isApplicationActive else {
+            pendingWakeRefreshTrigger = nil
+            pendingWakeRefreshRequestedAt = nil
+            return
+        }
 
         guard let pendingWakeRefreshTrigger else {
             return
@@ -284,40 +306,28 @@ final class GitActivityRefreshCoordinator {
     }
 
     @discardableResult
-    private func refresh(trigger: GitTodayActivityRefreshTrigger, force: Bool = false) -> Bool {
+    private func refresh(
+        trigger: GitTodayActivityRefreshTrigger,
+        force: Bool = false,
+        bypassFailureBackoff: Bool = false
+    ) -> Bool {
         let now = dateProvider()
 
+        guard bypassFailureBackoff || shouldRetryAfterFailure(at: now) else {
+            return false
+        }
+
         guard force || shouldRefresh(at: now) else {
-            recordRefreshStatus(
-                refreshedAt: now,
-                trigger: trigger,
-                outcome: .skipped,
-                reason: "minimum refresh spacing not reached",
-                metrics: GitActivityRefreshMetrics(
-                    durationMilliseconds: 0,
-                    widgetReloaded: false,
-                    reason: "minimum refresh spacing not reached"
-                )
-            )
             return false
         }
 
         guard !isRefreshing else {
-            recordRefreshStatus(
-                refreshedAt: now,
-                trigger: trigger,
-                outcome: .skipped,
-                reason: "refresh already in progress",
-                metrics: GitActivityRefreshMetrics(
-                    durationMilliseconds: 0,
-                    widgetReloaded: false,
-                    reason: "refresh already in progress"
-                )
-            )
             return false
         }
 
         guard let scriptURL = scriptURLProvider() else {
+            lastRefreshAttemptAt = now
+            lastRefreshFailureAt = now
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
@@ -336,7 +346,30 @@ final class GitActivityRefreshCoordinator {
         let accessResult = authorizedRootsProvider()
         let scopedRoots = accessResult.roots
         let authorizedRootURLs = scopedRoots.map(\.url)
+        if accessResult.issue == .authorizationInvalid {
+            lastRefreshAttemptAt = now
+            lastRefreshFailureAt = now
+            let reason = refreshReason(for: accessResult.issue)
+            recordRefreshStatus(
+                refreshedAt: now,
+                trigger: trigger,
+                outcome: .skipped,
+                reason: reason,
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    authorizedRootCount: authorizedRootURLs.count,
+                    widgetReloaded: false,
+                    reason: reason
+                )
+            )
+            NSLog("TinyBuddy: skipping git refresh for trigger %@ because %@", String(describing: trigger), reason)
+            scopedRoots.forEach { $0.stopAccessing() }
+            return false
+        }
+
         guard !authorizedRootURLs.isEmpty else {
+            timer?.invalidate()
+            timer = nil
             let reason = refreshReason(for: accessResult.issue)
             recordRefreshStatus(
                 refreshedAt: now,
@@ -372,11 +405,34 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
+                    let currentSnapshot = self.activityStore.loadTodaySnapshot()
+                    guard currentSnapshot.focusBlockCount != nil,
+                          currentSnapshot.commitCount != nil else {
+                        let reason = "refreshed Git activity data is unavailable"
+                        self.lastRefreshFailureAt = now
+                        self.recordRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: .failed,
+                            reason: reason,
+                            metrics: self.makeMetrics(
+                                startedAt: now,
+                                finishedAt: self.dateProvider(),
+                                authorizedRootCount: authorizedRootURLs.count,
+                                scriptMetrics: scriptResult.metrics,
+                                widgetReloaded: false,
+                                reason: reason
+                            )
+                        )
+                        self.finishRefresh(succeeded: false)
+                        NSLog("TinyBuddy: git refresh produced no readable activity snapshot for trigger %@", String(describing: trigger))
+                        return
+                    }
+
                     defer {
                         self.finishRefresh(succeeded: true)
                     }
 
-                    let currentSnapshot = self.activityStore.loadTodaySnapshot()
                     let refreshResult = self.activityStore.makeRefreshResult(
                         previousSnapshot: previousSnapshot,
                         currentSnapshot: currentSnapshot
@@ -407,6 +463,7 @@ final class GitActivityRefreshCoordinator {
                             reason: nil
                         )
                     )
+                    self.lastRefreshFailureAt = nil
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -415,6 +472,7 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     let scriptMetrics = (error as? GitRefreshScriptExecutionError)?.metrics
+                    self.lastRefreshFailureAt = now
                     self.recordRefreshStatus(
                         refreshedAt: now,
                         trigger: trigger,
@@ -444,6 +502,14 @@ final class GitActivityRefreshCoordinator {
         }
 
         return now.timeIntervalSince(lastRefreshAttemptAt) >= minimumRefreshSpacing
+    }
+
+    private func shouldRetryAfterFailure(at now: Date) -> Bool {
+        guard let lastRefreshFailureAt else {
+            return true
+        }
+
+        return now.timeIntervalSince(lastRefreshFailureAt) >= refreshInterval
     }
 
     private func recordRefreshStatus(
