@@ -431,6 +431,29 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.status, .idle)
     }
 
+    func testRepeatedForegroundNotificationsKeepStateSubscriptionAndWidgetReloadStable() async {
+        let defaults = makeDefaults()
+        let notificationCenter = NotificationCenter()
+        var widgetReloadCount = 0
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter,
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        XCTAssertEqual(viewModel.notificationObserverCount, 2)
+
+        for _ in 0..<25 {
+            notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        }
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.notificationObserverCount, 2)
+        XCTAssertEqual(widgetReloadCount, 0)
+    }
+
     func testBecameActiveReloadsWidgetWhenPersistedPresentationChanged() async {
         let defaults = makeDefaults()
         let calendar = makeCalendar()

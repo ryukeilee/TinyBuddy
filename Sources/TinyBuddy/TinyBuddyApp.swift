@@ -20,6 +20,7 @@ struct TinyBuddyApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let gitScanRootAuthorizationStore = GitScanRootAuthorizationStore()
     private let notificationCenter = NotificationCenter.default
+    private var authorizationRequestObserver: NSObjectProtocol?
     private lazy var gitActivityRefreshCoordinator = GitActivityRefreshCoordinator(
         gitScanRootStore: gitScanRootAuthorizationStore
     )
@@ -29,14 +30,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        notificationCenter.addObserver(
-            self,
-            selector: #selector(handleGitScanRootAuthorizationRequest),
-            name: .gitScanRootAuthorizationRequested,
-            object: nil
-        )
+        if authorizationRequestObserver == nil {
+            authorizationRequestObserver = notificationCenter.addObserver(
+                forName: .gitScanRootAuthorizationRequested,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleGitScanRootAuthorizationRequest()
+                }
+            }
+        }
         gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
         gitActivityRefreshCoordinator.start(isApplicationActive: NSApp.isActive)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let authorizationRequestObserver {
+            notificationCenter.removeObserver(authorizationRequestObserver)
+            self.authorizationRequestObserver = nil
+        }
+        gitActivityRefreshCoordinator.stop()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -60,7 +74,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    @objc
     private func handleGitScanRootAuthorizationRequest() {
         gitScanRootAuthorizationController.requestAuthorization()
         gitActivityRefreshCoordinator.handleAuthorizationChanged()

@@ -44,6 +44,10 @@ final class PetViewModel: ObservableObject {
         status
     }
 
+    var notificationObserverCount: Int {
+        observers.count
+    }
+
     private let store: DailyStatsStore
     private let session: PetSession
     private let activityStore: GitTodayActivityStore

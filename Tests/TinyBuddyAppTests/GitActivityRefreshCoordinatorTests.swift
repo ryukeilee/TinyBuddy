@@ -368,6 +368,91 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
+    func testRepeatedStartDoesNotCreateAdditionalRefreshWork() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        harness.coordinator.start()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
+    func testBackgroundForegroundCyclesKeepResourceCountsAndWidgetReloadStable() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+
+            harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        XCTAssertEqual(harness.coordinator.workspaceNotificationObserverCount, 3)
+
+        for _ in 0..<25 {
+            harness.coordinator.handleDidResignActive()
+            XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+
+            harness.coordinator.handleDidBecomeActive()
+            XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+            XCTAssertEqual(harness.coordinator.workspaceNotificationObserverCount, 3)
+        }
+
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+
+        harness.coordinator.stop()
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.coordinator.workspaceNotificationObserverCount, 0)
+
+        harness.advanceCurrentDate(by: 120)
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+    }
+
+    func testStopDropsInFlightRefreshCompletionAndAllowsCleanRestart() {
+        let harness = makeHarness()
+        let allowFirstRefreshToFinish = DispatchSemaphore(value: 0)
+        let firstRefreshStarted = expectation(description: "first refresh started")
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 0, recentProjectName: "TinyBuddy")
+                firstRefreshStarted.fulfill()
+                allowFirstRefreshToFinish.wait()
+            }
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRefreshStarted], timeout: 1.0)
+        harness.coordinator.stop()
+        allowFirstRefreshToFinish.signal()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.coordinator.start()
+        }
+        XCTAssertEqual(harness.scriptRunCount, 2)
+    }
+
     func testResigningActiveSuspendsPeriodicAndWakeRefreshUntilNextActivation() {
         let harness = makeHarness()
 

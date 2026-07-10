@@ -108,6 +108,8 @@ final class GitActivityRefreshCoordinator {
 
     private var timer: Timer?
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
+    private var isStarted = false
+    private var lifecycleGeneration = 0
     private var isApplicationActive = false
     private var isRefreshing = false
     private var lastRefreshAttemptAt: Date?
@@ -150,6 +152,11 @@ final class GitActivityRefreshCoordinator {
     }
 
     func start(isApplicationActive: Bool = true) {
+        guard !isStarted else {
+            return
+        }
+
+        isStarted = true
         registerWorkspaceNotificationsIfNeeded()
         self.isApplicationActive = isApplicationActive
         if isApplicationActive {
@@ -198,13 +205,29 @@ final class GitActivityRefreshCoordinator {
         requestWakeRefresh(trigger: .sessionDidBecomeActive)
     }
 
-    deinit {
+    func stop() {
+        isStarted = false
+        lifecycleGeneration &+= 1
+        isApplicationActive = false
+        isRefreshing = false
         timer?.invalidate()
+        timer = nil
         workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
+        workspaceNotificationObservers.removeAll()
+        pendingWakeRefreshTrigger = nil
+        pendingWakeRefreshRequestedAt = nil
+    }
+
+    deinit {
+        stop()
     }
 
     var isPeriodicRefreshScheduled: Bool {
         timer != nil
+    }
+
+    var workspaceNotificationObserverCount: Int {
+        workspaceNotificationObservers.count
     }
 
     private func scheduleTimerIfNeeded() {
@@ -392,6 +415,7 @@ final class GitActivityRefreshCoordinator {
 
         isRefreshing = true
         lastRefreshAttemptAt = now
+        let lifecycleGeneration = self.lifecycleGeneration
         let previousSnapshot = activityStore.loadTodaySnapshot()
         let scriptRunner = self.scriptRunner
 
@@ -403,7 +427,8 @@ final class GitActivityRefreshCoordinator {
             do {
                 let scriptResult = try scriptRunner(scriptURL, authorizedRootURLs)
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else {
+                    guard let self,
+                          self.lifecycleGeneration == lifecycleGeneration else {
                         return
                     }
 
@@ -472,7 +497,8 @@ final class GitActivityRefreshCoordinator {
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else {
+                    guard let self,
+                          self.lifecycleGeneration == lifecycleGeneration else {
                         return
                     }
 
