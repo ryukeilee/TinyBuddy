@@ -92,6 +92,8 @@ final class GitActivityRefreshCoordinator {
     typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
 
     private let activityStore: GitTodayActivityStore
+    private let dailyStatsStore: DailyStatsStore
+    private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let widgetReloader: () -> Void
     private let scriptRunner: ScriptRunner
@@ -120,6 +122,8 @@ final class GitActivityRefreshCoordinator {
 
     init(
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
+        dailyStatsStore: DailyStatsStore = DailyStatsStore(),
+        combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
         gitScanRootStore: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
         refreshInterval: TimeInterval = 5 * 60,
@@ -137,6 +141,8 @@ final class GitActivityRefreshCoordinator {
         wakeRefreshCoalescingInterval: TimeInterval = 5
     ) {
         self.activityStore = activityStore
+        self.dailyStatsStore = dailyStatsStore
+        self.combinedSnapshotStore = combinedSnapshotStore ?? dailyStatsStore.makeCombinedSnapshotStore()
         self.refreshStatusStore = refreshStatusStore
         self.refreshInterval = refreshInterval
         self.minimumRefreshSpacing = minimumRefreshSpacing
@@ -432,7 +438,8 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    let currentSnapshot = self.activityStore.loadTodaySnapshot()
+                    let currentActivityRead = self.activityStore.loadTodaySnapshotRead()
+                    let currentSnapshot = currentActivityRead.snapshot
                     guard currentSnapshot.focusBlockCount != nil,
                           currentSnapshot.commitCount != nil else {
                         let diagnostic = GitActivityRefreshDiagnostic(
@@ -467,13 +474,18 @@ final class GitActivityRefreshCoordinator {
                         previousSnapshot: previousSnapshot,
                         currentSnapshot: currentSnapshot
                     )
+                    let combinedUpdate = self.combinedSnapshotStore.updateActivitySlice(
+                        currentSnapshot,
+                        activityRevision: currentActivityRead.trustedRevision,
+                        fallbackSnapshot: self.dailyStatsStore.loadSnapshot()
+                    )
                     self.mirrorActivitySnapshotToStandardDefaults(
                         currentSnapshot,
                         refreshedAt: now
                     )
                     let didReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
-                        didChange: refreshResult.didChange
+                        didChange: refreshResult.didChange && combinedUpdate.didPersist
                     )
                     if didReloadWidget {
                         self.widgetReloader()

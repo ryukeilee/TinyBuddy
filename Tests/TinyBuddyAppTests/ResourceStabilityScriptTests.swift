@@ -23,6 +23,19 @@ final class ResourceStabilityScriptTests: XCTestCase {
         XCTAssertTrue(result.error.contains("must be at least 25"))
     }
 
+    func testThreadCountProbeReturnsPositiveCountForCurrentProcess() throws {
+        let result = try runScript(arguments: ["--thread-count", String(ProcessInfo.processInfo.processIdentifier)])
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertGreaterThan(Int(result.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0, 0)
+    }
+
+    func testRuntimeSampleHeaderIsPersistedForBudgetEvaluation() throws {
+        let script = try String(contentsOf: scriptURL(), encoding: .utf8)
+
+        XCTAssertTrue(script.contains("printf 'elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state\\n' | /usr/bin/tee \"$SAMPLES_FILE\""))
+    }
+
     func testBudgetEvaluationPassesCompleteSyntheticSamples() throws {
         let result = try evaluateSamples([
             "elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state",
@@ -33,6 +46,18 @@ final class ResourceStabilityScriptTests: XCTestCase {
 
         XCTAssertEqual(result.exitCode, 0, result.error)
         XCTAssertTrue(result.error.contains("PASS: final RSS delta=200 KB, max thread delta=1"), result.error)
+    }
+
+    func testBudgetEvaluationReportsZeroThreadDelta() throws {
+        let result = try evaluateSamples([
+            "elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state",
+            "0,1000,0.0,4,1,warm",
+            "2,1100,0.0,4,1,post_cycles",
+            "3,1200,1.0,4,1,sample"
+        ])
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(result.error.contains("PASS: final RSS delta=200 KB, max thread delta=0"), result.error)
     }
 
     func testBudgetEvaluationRejectsMissingMonitoringSamples() throws {

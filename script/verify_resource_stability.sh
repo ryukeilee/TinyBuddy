@@ -43,7 +43,7 @@ PREEXISTING_PIDS=""
 
 usage() {
   cat <<'USAGE'
-usage: script/verify_resource_stability.sh [--help|--dry-run|--evaluate-samples path]
+usage: script/verify_resource_stability.sh [--help|--dry-run|--thread-count pid|--evaluate-samples path]
 
 Builds and launches the unsigned Debug app, runs lifecycle cycles through
 AppleScript, then writes CSV samples to stdout:
@@ -125,6 +125,21 @@ is_owned_app_process() {
   [ "$(printf '%s\n' "$command" | /usr/bin/xargs)" = "$APP_BINARY" ]
 }
 
+thread_count_for_pid() {
+  local pid="$1" raw count
+
+  if ! raw="$(LC_ALL=C /bin/ps -M -p "$pid" -o pid= 2>&1)"; then
+    echo "ps thread count failed for PID $pid: $raw" >&2
+    return 1
+  fi
+  count="$(printf '%s\n' "$raw" | /usr/bin/awk 'NR > 1 && NF { count++ } END { print count + 0 }')"
+  if ! is_positive_integer "$count"; then
+    echo "unable to determine thread count for PID $pid: $raw" >&2
+    return 1
+  fi
+  printf '%s\n' "$count"
+}
+
 cleanup() {
   local attempt
   if is_owned_app_process; then
@@ -199,11 +214,12 @@ record_sample() {
     return 1
   fi
 
-  if ! raw="$(LC_ALL=C /bin/ps -p "$APP_PID" -o rss= -o %cpu= -o thcount= 2>&1)"; then
+  if ! raw="$(LC_ALL=C /bin/ps -p "$APP_PID" -o rss= -o %cpu= 2>&1)"; then
     echo "ps sample failed for PID $APP_PID: $raw" >&2
     return 1
   fi
-  read -r rss cpu threads <<< "$(printf '%s\n' "$raw" | /usr/bin/awk '{ print $1, $2, $3 }')"
+  read -r rss cpu <<< "$(printf '%s\n' "$raw" | /usr/bin/awk '{ print $1, $2 }')"
+  threads="$(thread_count_for_pid "$APP_PID")" || return 1
   if ! is_positive_integer "$rss" || ! is_positive_integer "$threads" || \
     ! /usr/bin/awk -v value="$cpu" 'BEGIN { exit !(value + 0 >= 0) }'; then
     echo "unable to parse ps sample for PID $APP_PID: $raw" >&2
@@ -241,6 +257,7 @@ evaluate_budgets() {
     -v monotonicSamples="$MONOTONIC_SAMPLES" \
     -v monotonicGrowth="$MONOTONIC_GROWTH_KB" \
     -v requiredSamples="$required_samples" '
+      BEGIN { maxThreadDelta = 0 }
       function isPositiveInteger(value) { return value ~ /^[0-9]+$/ && value + 0 > 0 }
       function isNonnegativeNumber(value) { return value ~ /^[0-9]+([.][0-9]+)?$/ }
       NR == 1 {
@@ -360,6 +377,12 @@ case "${1:-}" in
     print_configuration
     exit 0
     ;;
+  --thread-count)
+    [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+    is_positive_integer "$2" || { echo "PID must be a positive integer" >&2; exit 2; }
+    thread_count_for_pid "$2"
+    exit "$?"
+    ;;
   --evaluate-samples)
     [ "$#" -eq 2 ] || { usage >&2; exit 2; }
     validate_configuration
@@ -393,7 +416,7 @@ wait_for_app_pid
 START_SECONDS="$SECONDS"
 echo "warming PID $APP_PID for ${WARMUP_SECONDS}s" >&2
 /bin/sleep "$WARMUP_SECONDS"
-printf 'elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state\n'
+printf 'elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state\n' | /usr/bin/tee "$SAMPLES_FILE"
 record_sample warm
 run_lifecycle_cycles
 record_sample post_cycles

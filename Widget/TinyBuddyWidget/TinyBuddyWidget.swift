@@ -11,9 +11,10 @@ struct TinyBuddyEntry: TimelineEntry {
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
     private let activityStore = GitTodayActivityStore()
+    private let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore()
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
-        TinyBuddyEntry(
+        return TinyBuddyEntry(
             date: Date(),
             snapshot: TinyBuddySnapshot(
                 status: .idle,
@@ -38,10 +39,29 @@ struct TinyBuddyProvider: TimelineProvider {
     }
 
     private func makeEntry(for date: Date) -> TinyBuddyEntry {
-        TinyBuddyEntry(
+        if let combinedSnapshot = combinedSnapshotStore.load(),
+           combinedSnapshot.dayIdentifier == Self.dayIdentifier(for: date) {
+            return TinyBuddyEntry(
+                date: date,
+                snapshot: combinedSnapshot.snapshot,
+                activitySnapshot: combinedSnapshot.activitySnapshot
+            )
+        }
+
+        return TinyBuddyEntry(
             date: date,
             snapshot: store.loadSnapshot(),
             activitySnapshot: activityStore.loadTodaySnapshot()
+        )
+    }
+
+    private static func dayIdentifier(for date: Date) -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
         )
     }
 }

@@ -168,6 +168,11 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.scriptRunCount, 1)
         XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(
+            harness.combinedSnapshot?.activitySnapshot,
+            GitTodayActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "TinyBuddy")
+        )
+        XCTAssertEqual(harness.combinedSnapshot?.revision, 1)
+        XCTAssertEqual(
             harness.lastRefreshStatus?.metrics,
             GitActivityRefreshMetrics(
                 durationMilliseconds: 0,
@@ -199,6 +204,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.performAndWaitForRefresh {
                 harness.coordinator.handleDidBecomeActive()
             }
+            let trustedCombinedSnapshot = harness.combinedSnapshot
 
             XCTAssertEqual(
                 UserDefaults.standard.string(forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier),
@@ -223,6 +229,16 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             XCTAssertEqual(
                 UserDefaults.standard.string(forKey: GitTodayRecentProjectStore.Key.projectName),
                 "TinyBuddy"
+            )
+
+            let newerTrustedActivity = GitTodayActivitySnapshot(
+                focusBlockCount: 8,
+                commitCount: 13,
+                recentProjectName: "Project B"
+            )
+            let newerTrustedSnapshot = harness.seedCombinedSnapshot(
+                activity: newerTrustedActivity,
+                revision: 200
             )
 
             harness.advanceCurrentDate(by: 60)
@@ -265,6 +281,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 )
             )
             XCTAssertEqual(harness.widgetReloadCount, 1)
+            XCTAssertNotEqual(trustedCombinedSnapshot, newerTrustedSnapshot)
+            XCTAssertEqual(harness.combinedSnapshot, newerTrustedSnapshot)
         }
     }
 
@@ -429,6 +447,9 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     func testStopDropsInFlightRefreshCompletionAndAllowsCleanRestart() {
         let harness = makeHarness()
+        let trustedSnapshot = harness.seedCombinedSnapshot(
+            activity: GitTodayActivitySnapshot(focusBlockCount: 9, commitCount: 12, recentProjectName: "Trusted")
+        )
         let allowFirstRefreshToFinish = DispatchSemaphore(value: 0)
         let firstRefreshStarted = expectation(description: "first refresh started")
         harness.setScriptRunnerHook { runCount in
@@ -446,6 +467,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.combinedSnapshot, trustedSnapshot)
 
         harness.performAndWaitForScriptRunCount(2) {
             harness.coordinator.start()
@@ -1069,6 +1091,8 @@ private final class RefreshHarness {
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let activityDefaults: UserDefaults
     private let calendar: Calendar
+    private let dailyStatsStore: DailyStatsStore
+    private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private var statusObserver: NSObjectProtocol?
 
     let coordinator: GitActivityRefreshCoordinator
@@ -1088,6 +1112,15 @@ private final class RefreshHarness {
         self.activityDefaults = defaults
         let calendar = Self.makeCalendar()
         self.calendar = calendar
+        self.dailyStatsStore = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { [state] in state.currentDate }
+        )
+        self.combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
         self.refreshStatusStore = GitActivityRefreshStatusStore(
             userDefaults: defaults,
             calendar: calendar,
@@ -1120,6 +1153,8 @@ private final class RefreshHarness {
 
         self.coordinator = GitActivityRefreshCoordinator(
             activityStore: activityStore,
+            dailyStatsStore: dailyStatsStore,
+            combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: refreshStatusStore,
             refreshInterval: 300,
             minimumRefreshSpacing: 60,
@@ -1197,6 +1232,7 @@ private final class RefreshHarness {
     var lastRefreshStatus: GitActivityRefreshStatus? { refreshStatusStore.load() }
     var statusHistory: [GitActivityRefreshStatus] { state.statusHistory }
     var diagnosticEventIdentifiers: [String] { state.diagnosticEventIdentifiers }
+    var combinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.load() }
     var authorizedRoots: [URL] {
         get { state.authorizedRoots }
         set { state.authorizedRoots = newValue }
@@ -1220,6 +1256,17 @@ private final class RefreshHarness {
 
     func setScriptMetrics(_ metrics: GitRefreshScriptMetrics?) {
         state.scriptMetrics = metrics
+    }
+
+    func seedCombinedSnapshot(
+        activity: GitTodayActivitySnapshot,
+        revision: Int64? = nil
+    ) -> TinyBuddyCombinedSnapshot {
+        combinedSnapshotStore.updateActivitySlice(
+            activity,
+            activityRevision: revision,
+            fallbackSnapshot: dailyStatsStore.loadSnapshot()
+        ).snapshot!
     }
 
     func setActivitySnapshot(

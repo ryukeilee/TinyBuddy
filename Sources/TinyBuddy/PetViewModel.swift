@@ -5,6 +5,12 @@ import TinyBuddyCore
 
 @MainActor
 final class PetViewModel: ObservableObject {
+    private struct CombinedHUDState {
+        let snapshot: TinyBuddySnapshot
+        let activitySnapshot: GitTodayActivitySnapshot
+        let didPersist: Bool
+    }
+
     enum DisplayState: Equatable {
         case idle
         case focusing
@@ -51,6 +57,7 @@ final class PetViewModel: ObservableObject {
     private let store: DailyStatsStore
     private let session: PetSession
     private let activityStore: GitTodayActivityStore
+    private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let notificationCenter: NotificationCenter
     private let widgetReloader: () -> Void
@@ -59,6 +66,7 @@ final class PetViewModel: ObservableObject {
     init(
         store: DailyStatsStore = DailyStatsStore(),
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
+        combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
         notificationCenter: NotificationCenter = .default,
         widgetReloader: @escaping () -> Void = {
@@ -67,14 +75,21 @@ final class PetViewModel: ObservableObject {
     ) {
         self.store = store
         let session = PetSession(store: store)
-        let snapshot = store.loadSnapshot()
-        let activitySnapshot = activityStore.loadTodaySnapshot()
+        let combinedSnapshotStore = combinedSnapshotStore ?? store.makeCombinedSnapshotStore()
+        let combinedHUDState = Self.publishAndLoadCombinedSnapshot(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore
+        )
+        let snapshot = combinedHUDState.snapshot
+        let activitySnapshot = combinedHUDState.activitySnapshot
         let hudPresentation = Self.makeHUDPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot
         )
         self.session = session
         self.activityStore = activityStore
+        self.combinedSnapshotStore = combinedSnapshotStore
         self.refreshStatusStore = refreshStatusStore
         self.notificationCenter = notificationCenter
         self.widgetReloader = widgetReloader
@@ -162,8 +177,13 @@ final class PetViewModel: ObservableObject {
 
     @discardableResult
     private func reloadHUDState() -> Bool {
-        let snapshot = store.loadSnapshot()
-        let activitySnapshot = activityStore.loadTodaySnapshot()
+        let combinedHUDState = Self.publishAndLoadCombinedSnapshot(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore
+        )
+        let snapshot = combinedHUDState.snapshot
+        let activitySnapshot = combinedHUDState.activitySnapshot
         let hudPresentation = Self.makeHUDPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot
@@ -173,7 +193,7 @@ final class PetViewModel: ObservableObject {
         stats = snapshot.stats
         self.hudPresentation = hudPresentation
         displayState = Self.makeDisplayState(from: hudPresentation)
-        return didChange
+        return didChange && combinedHUDState.didPersist
     }
 
     private static func makeHUDPresentation(
@@ -181,6 +201,36 @@ final class PetViewModel: ObservableObject {
         activitySnapshot: GitTodayActivitySnapshot
     ) -> TinyBuddyWidgetPresentation {
         TinyBuddyWidgetPresentation(snapshot: snapshot, activitySnapshot: activitySnapshot)
+    }
+
+    private static func publishAndLoadCombinedSnapshot(
+        store: DailyStatsStore,
+        activityStore: GitTodayActivityStore,
+        combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
+    ) -> CombinedHUDState {
+        let snapshot = store.loadSnapshot()
+        let activityRead = activityStore.loadTodaySnapshotRead()
+        let combinedUpdate = combinedSnapshotStore.updatePetSlice(
+            snapshot,
+            fallbackActivitySnapshot: activityRead.snapshot,
+            fallbackActivityRevision: activityRead.trustedRevision
+        )
+
+        guard combinedUpdate.didPersist,
+              let combinedSnapshot = combinedUpdate.snapshot,
+              combinedSnapshot.dayIdentifier == snapshot.stats.dayIdentifier else {
+            return CombinedHUDState(
+                snapshot: snapshot,
+                activitySnapshot: activityRead.snapshot,
+                didPersist: false
+            )
+        }
+
+        return CombinedHUDState(
+            snapshot: combinedSnapshot.snapshot,
+            activitySnapshot: combinedSnapshot.activitySnapshot,
+            didPersist: true
+        )
     }
 
     private static func makeDisplayState(from presentation: TinyBuddyWidgetPresentation) -> DisplayState {

@@ -64,6 +64,30 @@ final class DailyStatsStoreTests: XCTestCase {
         XCTAssertEqual(store.loadStatus(), .idle)
     }
 
+    func testCombinedSnapshotStoreUsesTheSameDefaultsAsDailyStats() {
+        let defaults = makeDefaults()
+        let store = DailyStatsStore(userDefaults: defaults)
+        let combinedStore = store.makeCombinedSnapshotStore()
+        let petSnapshot = TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 0)
+            )
+        let activitySnapshot = GitTodayActivitySnapshot(
+                focusBlockCount: nil,
+                commitCount: nil
+            )
+
+        let combinedUpdate = combinedStore.updatePetSlice(
+            petSnapshot,
+            fallbackActivitySnapshot: activitySnapshot
+        )
+        let combinedSnapshot = try! XCTUnwrap(combinedUpdate.snapshot)
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot),
+            TinyBuddyCombinedSnapshotStore.encode(combinedSnapshot)
+        )
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "TinyBuddyTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

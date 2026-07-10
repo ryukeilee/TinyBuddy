@@ -145,30 +145,18 @@ final class PetViewModelTests: XCTestCase {
             dateProvider: { today }
         )
         let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+        let combinedSnapshotStore = store.makeCombinedSnapshotStore()
         let viewModel = PetViewModel(
             store: store,
             activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: refreshStatusStore,
             notificationCenter: notificationCenter
         )
-        GitTodayFocusBlockCountStore(
-            userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { today },
-            sharedFallbacksEnabled: false
-        ).saveTodayCount(3)
-        GitTodayCommitCountStore(
-            userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { today },
-            sharedFallbacksEnabled: false
-        ).saveTodayCount(1)
-        GitTodayRecentProjectStore(
-            userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { today },
-            sharedFallbacksEnabled: false
-        ).saveTodayProjectName("Project B")
+        _ = combinedSnapshotStore.updateActivitySlice(
+            GitTodayActivitySnapshot(focusBlockCount: 3, commitCount: 1, recentProjectName: "Project B"),
+            fallbackSnapshot: store.loadSnapshot()
+        )
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 11, second: 12)
         let updatedStatus = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
@@ -466,20 +454,20 @@ final class PetViewModelTests: XCTestCase {
         )
         var widgetReloadCount = 0
         let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+        let combinedSnapshotStore = store.makeCombinedSnapshotStore()
         let viewModel = PetViewModel(
             store: store,
             activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: notificationCenter,
             widgetReloader: { widgetReloadCount += 1 }
         )
 
-        GitTodayFocusBlockCountStore(
-            userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { today },
-            sharedFallbacksEnabled: false
-        ).saveTodayCount(1)
+        _ = combinedSnapshotStore.updateActivitySlice(
+            GitTodayActivitySnapshot(focusBlockCount: 1, commitCount: 0),
+            fallbackSnapshot: store.loadSnapshot()
+        )
         notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
 
         let expectation = expectation(description: "changed persisted presentation restored")

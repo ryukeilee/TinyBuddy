@@ -12,6 +12,16 @@ public struct GitTodayActivitySnapshot: Equatable, Sendable {
     }
 }
 
+public struct GitTodayActivitySnapshotRead: Equatable, Sendable {
+    public let snapshot: GitTodayActivitySnapshot
+    public let trustedRevision: Int64?
+
+    public init(snapshot: GitTodayActivitySnapshot, trustedRevision: Int64?) {
+        self.snapshot = snapshot
+        self.trustedRevision = trustedRevision
+    }
+}
+
 public struct GitTodayActivityRefreshResult: Equatable, Sendable {
     public let previousSnapshot: GitTodayActivitySnapshot
     public let currentSnapshot: GitTodayActivitySnapshot
@@ -54,15 +64,25 @@ public final class GitTodayActivityStore {
     }
 
     public func loadTodaySnapshot() -> GitTodayActivitySnapshot {
+        loadTodaySnapshotRead().snapshot
+    }
+
+    public func loadTodaySnapshotRead() -> GitTodayActivitySnapshotRead {
         if let trustedSnapshot = trustedSnapshotStore?.load(),
            trustedSnapshot.dayIdentifier == todayIdentifier() {
-            return trustedSnapshot.activity
+            return GitTodayActivitySnapshotRead(
+                snapshot: trustedSnapshot.activity,
+                trustedRevision: trustedSnapshot.revision
+            )
         }
 
-        return GitTodayActivitySnapshot(
-            focusBlockCount: focusBlockCountStore.loadTodayCount(),
-            commitCount: commitCountStore.loadTodayCount(),
-            recentProjectName: recentProjectStore.loadTodayProjectName()
+        return GitTodayActivitySnapshotRead(
+            snapshot: GitTodayActivitySnapshot(
+                focusBlockCount: focusBlockCountStore.loadTodayCount(),
+                commitCount: commitCountStore.loadTodayCount(),
+                recentProjectName: recentProjectStore.loadTodayProjectName()
+            ),
+            trustedRevision: nil
         )
     }
 

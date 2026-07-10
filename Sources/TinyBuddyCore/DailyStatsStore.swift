@@ -75,6 +75,13 @@ public final class DailyStatsStore {
         TinyBuddySnapshot(status: loadStatus(), stats: loadToday())
     }
 
+    public func makeCombinedSnapshotStore() -> TinyBuddyCombinedSnapshotStore {
+        TinyBuddyCombinedSnapshotStore(
+            userDefaults: userDefaults,
+            sharedPreferencesProvider: { nil }
+        )
+    }
+
     private func save(_ stats: DailyStats) -> DailyStats {
         userDefaults.set(stats.dayIdentifier, forKey: Key.dayIdentifier)
         userDefaults.set(stats.focusCount, forKey: Key.focusCount)
