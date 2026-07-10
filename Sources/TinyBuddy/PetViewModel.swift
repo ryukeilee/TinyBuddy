@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import WidgetKit
 import TinyBuddyCore
@@ -39,18 +40,26 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var displayState: DisplayState
     @Published private(set) var refreshDiagnostics: RefreshDiagnostics
 
+    var selectedStatus: PetStatus {
+        status
+    }
+
     private let store: DailyStatsStore
     private let session: PetSession
     private let activityStore: GitTodayActivityStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let notificationCenter: NotificationCenter
-    private var refreshStatusObserver: NSObjectProtocol?
+    private let widgetReloader: () -> Void
+    private var observers: [NSObjectProtocol] = []
 
     init(
         store: DailyStatsStore = DailyStatsStore(),
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        widgetReloader: @escaping () -> Void = {
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     ) {
         self.store = store
         let session = PetSession(store: store)
@@ -64,12 +73,13 @@ final class PetViewModel: ObservableObject {
         self.activityStore = activityStore
         self.refreshStatusStore = refreshStatusStore
         self.notificationCenter = notificationCenter
+        self.widgetReloader = widgetReloader
         self.status = snapshot.status
         self.stats = snapshot.stats
         self.hudPresentation = hudPresentation
         self.displayState = Self.makeDisplayState(from: hudPresentation)
         self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: refreshStatusStore.load())
-        self.refreshStatusObserver = notificationCenter.addObserver(
+        observers.append(notificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
             object: nil,
             queue: nil
@@ -85,13 +95,22 @@ final class PetViewModel: ObservableObject {
                 )
                 self.reloadHUDState()
             }
-        }
+        })
+        observers.append(notificationCenter.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.restorePersistedState()
+            }
+        })
     }
 
     func select(_ nextStatus: PetStatus) {
         session.select(nextStatus)
         reloadHUDState()
-        WidgetCenter.shared.reloadAllTimelines()
+        widgetReloader()
     }
 
     func requestGitScanAuthorization() {
@@ -99,9 +118,15 @@ final class PetViewModel: ObservableObject {
     }
 
     deinit {
-        if let refreshStatusObserver {
-            notificationCenter.removeObserver(refreshStatusObserver)
+        for observer in observers {
+            notificationCenter.removeObserver(observer)
         }
+    }
+
+    private func restorePersistedState() {
+        refreshDiagnostics = Self.makeRefreshDiagnostics(from: refreshStatusStore.load())
+        reloadHUDState()
+        widgetReloader()
     }
 
     private static func makeRefreshDiagnostics(from status: GitActivityRefreshStatus?) -> RefreshDiagnostics {

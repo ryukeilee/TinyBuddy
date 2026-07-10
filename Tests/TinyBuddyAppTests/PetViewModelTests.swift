@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import TinyBuddy
@@ -276,6 +277,184 @@ final class PetViewModelTests: XCTestCase {
         viewModel.requestGitScanAuthorization()
 
         wait(for: [expectation], timeout: 1.0)
+    }
+
+    func testRecreatedViewModelRestoresUserSelectionAndDailyCounts() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 13, minute: 0, second: 0)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let firstViewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter()
+        )
+
+        firstViewModel.select(.focusing)
+        firstViewModel.select(.completedOnce)
+
+        let recreatedViewModel = PetViewModel(
+            store: DailyStatsStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { today }
+            ),
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(recreatedViewModel.status, .completedOnce)
+        XCTAssertEqual(recreatedViewModel.stats.focusCount, 1)
+        XCTAssertEqual(recreatedViewModel.stats.completionCount, 1)
+    }
+
+    func testSelectedStatusDoesNotRegressToGitDerivedDisplayState() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 13, minute: 30, second: 0)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(2)
+        GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(3)
+
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter()
+        )
+
+        viewModel.select(.focusing)
+
+        XCTAssertEqual(viewModel.displayState, .active)
+        XCTAssertEqual(viewModel.selectedStatus, .focusing)
+    }
+
+    func testBecameActiveRestoresPersistedStateWithoutWaitingForGitRefresh() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 14, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter
+        )
+        XCTAssertEqual(viewModel.status, .idle)
+
+        store.saveStatus(.focusing)
+        store.recordFocusStarted()
+        notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+
+        let expectation = expectation(description: "persisted state restored on foreground transition")
+        Task { @MainActor in
+            while viewModel.status != .focusing || viewModel.stats.focusCount != 1 {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 1.0)
+    }
+
+    func testSelectingStatusRequestsImmediateWidgetReload() {
+        let defaults = makeDefaults()
+        var widgetReloadCount = 0
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        viewModel.select(.focusing)
+
+        XCTAssertEqual(widgetReloadCount, 1)
+    }
+
+    func testBecameActiveRequestsWidgetReloadAfterRestoringPersistedState() async {
+        let defaults = makeDefaults()
+        let notificationCenter = NotificationCenter()
+        var widgetReloadCount = 0
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter,
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+
+        let expectation = expectation(description: "widget timeline reloaded after foreground restoration")
+        Task { @MainActor in
+            while widgetReloadCount != 1 {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 1.0)
+        XCTAssertEqual(viewModel.status, .idle)
+    }
+
+    func testNewDefaultsInstanceRestoresStateAfterApplicationRestart() {
+        let suiteName = "TinyBuddyPetViewModelRestartTests.\(UUID().uuidString)"
+        let firstDefaults = UserDefaults(suiteName: suiteName)!
+        firstDefaults.removePersistentDomain(forName: suiteName)
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 15, minute: 0, second: 0)
+        let firstStore = DailyStatsStore(
+            userDefaults: firstDefaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        firstStore.recordFocusStarted()
+        firstStore.recordCompletion()
+        firstStore.saveStatus(.completedOnce)
+        firstDefaults.synchronize()
+
+        let restartedDefaults = UserDefaults(suiteName: suiteName)!
+        let restartedViewModel = PetViewModel(
+            store: DailyStatsStore(
+                userDefaults: restartedDefaults,
+                calendar: calendar,
+                dateProvider: { today }
+            ),
+            activityStore: makeActivityStore(
+                defaults: restartedDefaults,
+                calendar: calendar,
+                today: today
+            ),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: restartedDefaults),
+            notificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(restartedViewModel.status, .completedOnce)
+        XCTAssertEqual(restartedViewModel.stats.focusCount, 1)
+        XCTAssertEqual(restartedViewModel.stats.completionCount, 1)
     }
 
     func testHUDPresentationAndDisplayStateMatchSharedWidgetSemanticsForAllGitActivityStates() {

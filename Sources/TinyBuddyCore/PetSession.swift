@@ -16,7 +16,6 @@ public final class PetSession {
     @discardableResult
     public func select(_ nextStatus: PetStatus) -> DailyStats {
         status = nextStatus
-        store.saveStatus(nextStatus)
 
         switch nextStatus {
         case .idle:
@@ -26,6 +25,8 @@ public final class PetSession {
         case .completedOnce:
             stats = store.recordCompletion()
         }
+
+        store.saveStatus(nextStatus)
 
         return stats
     }

@@ -85,7 +85,7 @@ struct PetView: View {
                     }
                     .buttonStyle(
                         StatusButtonStyle(
-                            isSelected: viewModel.displayState.selectedStatus == status,
+                            isSelected: viewModel.selectedStatus == status,
                             accent: accentColor(for: status),
                             hudGold: hudGold
                         )
