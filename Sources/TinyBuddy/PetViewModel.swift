@@ -143,13 +143,14 @@ final class PetViewModel: ObservableObject {
             )
         }
 
-        let actionTitle = authorizationActionTitle(for: status.reason)
+        let diagnosticReason = status.diagnostic?.reason
+        let actionTitle = authorizationActionTitle(for: diagnosticReason)
 
         return RefreshDiagnostics(
             badgeTitle: badgeTitle(for: status.outcome),
-            summary: summaryTitle(for: status),
+            summary: summaryTitle(for: status, diagnosticReason: diagnosticReason),
             detail: Self.refreshDateFormatter.string(from: status.refreshedAt),
-            reason: localizedReason(for: status.reason),
+            reason: localizedReason(for: diagnosticReason, fallbackReason: status.reason),
             outcome: status.outcome,
             actionTitle: actionTitle
         )
@@ -191,53 +192,60 @@ final class PetViewModel: ObservableObject {
         }
     }
 
-    private static func localizedReason(for reason: String?) -> String? {
-        guard let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), reason.isEmpty == false else {
+    private static func localizedReason(
+        for diagnosticReason: GitActivityRefreshDiagnosticReason?,
+        fallbackReason: String?
+    ) -> String? {
+        if let diagnosticReason {
+            switch diagnosticReason {
+            case .scriptMissing:
+                return "刷新组件缺失，暂时无法读取 Git 活动。"
+            case .authorizationRequired:
+                return "还没有可用的 Git 目录授权，授权后即可恢复 Git 刷新。"
+            case .authorizationInvalid:
+                return "之前授权的 Git 扫描目录已失效，可能已被移动、删除或系统权限失效，请重新授权。"
+            case .scriptExecutionFailed:
+                return "Git 刷新执行失败，请稍后再试。"
+            case .refreshedActivityUnavailable:
+                return "Git 刷新完成，但暂时无法恢复活动快照。"
+            }
+        }
+
+        guard let fallbackReason = fallbackReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              fallbackReason.isEmpty == false else {
             return nil
         }
 
-        let normalizedReason = reason.lowercased()
-
-        if normalizedReason.contains("missing git refresh script") {
-            return "刷新组件缺失，暂时无法读取 Git 活动。"
-        }
-
-        if normalizedReason.contains("minimum refresh spacing not reached") {
+        if fallbackReason.lowercased().contains("minimum refresh spacing not reached") {
             return "刚刚刷新过，稍后会自动再次尝试。"
-        }
-
-        if normalizedReason.contains("no authorized git scan roots") {
-            return "还没有可用的 Git 目录授权，授权后即可恢复 Git 刷新。"
-        }
-
-        if normalizedReason.contains("saved git scan root authorizations are no longer valid") {
-            return "之前授权的 Git 扫描目录已失效，可能已被移动、删除或系统权限失效，请重新授权。"
         }
 
         return "刷新暂时不可用，请稍后再试。"
     }
 
-    private static func authorizationActionTitle(for reason: String?) -> String? {
-        guard let normalizedReason = reason?.lowercased() else {
+    private static func authorizationActionTitle(
+        for diagnosticReason: GitActivityRefreshDiagnosticReason?
+    ) -> String? {
+        guard let diagnosticReason else {
             return nil
         }
 
-        if normalizedReason.contains("no authorized git scan roots")
-            || normalizedReason.contains("saved git scan root authorizations are no longer valid") {
+        if diagnosticReason == .authorizationRequired || diagnosticReason == .authorizationInvalid {
             return "重新授权 Git 目录"
         }
 
         return nil
     }
 
-    private static func summaryTitle(for status: GitActivityRefreshStatus) -> String {
-        let normalizedReason = status.reason?.lowercased() ?? ""
-
-        if normalizedReason.contains("saved git scan root authorizations are no longer valid") {
+    private static func summaryTitle(
+        for status: GitActivityRefreshStatus,
+        diagnosticReason: GitActivityRefreshDiagnosticReason?
+    ) -> String {
+        if diagnosticReason == .authorizationInvalid {
             return "Git 目录授权已失效"
         }
 
-        if normalizedReason.contains("no authorized git scan roots") {
+        if diagnosticReason == .authorizationRequired {
             return "等待 Git 目录授权"
         }
 

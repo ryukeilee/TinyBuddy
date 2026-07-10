@@ -6,6 +6,102 @@ public enum GitActivityRefreshOutcome: String, Equatable, Sendable {
     case failed
 }
 
+public enum GitActivityRefreshDiagnosticSource: String, Equatable, Sendable {
+    case gitActivityRefresh
+}
+
+public enum GitActivityRefreshDiagnosticStage: String, Equatable, Sendable {
+    case scriptLookup
+    case authorizationResolution
+    case scriptExecution
+    case activitySnapshotLoad
+}
+
+public enum GitActivityRefreshDiagnosticReason: String, Equatable, Sendable {
+    case scriptMissing
+    case authorizationRequired
+    case authorizationInvalid
+    case scriptExecutionFailed
+    case refreshedActivityUnavailable
+}
+
+public struct GitActivityRefreshDiagnostic: Equatable, Sendable {
+    public let source: GitActivityRefreshDiagnosticSource
+    public let stage: GitActivityRefreshDiagnosticStage
+    public let reason: GitActivityRefreshDiagnosticReason
+
+    public init(
+        source: GitActivityRefreshDiagnosticSource,
+        stage: GitActivityRefreshDiagnosticStage,
+        reason: GitActivityRefreshDiagnosticReason
+    ) {
+        self.source = source
+        self.stage = stage
+        self.reason = reason
+    }
+
+    public var stableIdentifier: String {
+        "\(source.rawValue).\(stage.rawValue).\(reason.rawValue)"
+    }
+
+    public static func legacyDiagnostic(for reason: String?) -> GitActivityRefreshDiagnostic? {
+        guard let normalizedReason = reason?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              normalizedReason.isEmpty == false else {
+            return nil
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.scriptlookup.scriptmissing")
+            || normalizedReason.contains("missing git refresh script") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptLookup,
+                reason: .scriptMissing
+            )
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.authorizationresolution.authorizationrequired")
+            || normalizedReason.contains("no authorized git scan roots") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .authorizationResolution,
+                reason: .authorizationRequired
+            )
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.authorizationresolution.authorizationinvalid")
+            || normalizedReason.contains("saved git scan root authorizations are no longer valid") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .authorizationResolution,
+                reason: .authorizationInvalid
+            )
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.activitysnapshotload.refreshedactivityunavailable")
+            || normalizedReason.contains("refreshed git activity data is unavailable") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .activitySnapshotLoad,
+                reason: .refreshedActivityUnavailable
+            )
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.scriptexecution.scriptexecutionfailed")
+            || normalizedReason.contains("refresh script exited with status")
+            || normalizedReason.contains("git temporarily unavailable") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptExecution,
+                reason: .scriptExecutionFailed
+            )
+        }
+
+        return nil
+    }
+}
+
 public struct GitActivityRefreshMetrics: Equatable, Sendable {
     public let durationMilliseconds: Int?
     public let authorizedRootCount: Int?
@@ -47,6 +143,7 @@ public struct GitActivityRefreshStatus: Equatable, Sendable {
     public let trigger: GitTodayActivityRefreshTrigger
     public let outcome: GitActivityRefreshOutcome
     public let reason: String?
+    public let diagnostic: GitActivityRefreshDiagnostic?
     public let metrics: GitActivityRefreshMetrics?
 
     public init(
@@ -54,14 +151,18 @@ public struct GitActivityRefreshStatus: Equatable, Sendable {
         trigger: GitTodayActivityRefreshTrigger,
         outcome: GitActivityRefreshOutcome,
         reason: String? = nil,
+        diagnostic: GitActivityRefreshDiagnostic? = nil,
         metrics: GitActivityRefreshMetrics? = nil
     ) {
+        let normalizedReason = reason?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
+        let resolvedDiagnostic = diagnostic ?? GitActivityRefreshDiagnostic.legacyDiagnostic(for: normalizedReason)
         self.refreshedAt = refreshedAt
         self.trigger = trigger
         self.outcome = outcome
-        self.reason = reason?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nonEmpty
+        self.reason = resolvedDiagnostic?.stableIdentifier ?? normalizedReason
+        self.diagnostic = resolvedDiagnostic
         self.metrics = metrics
     }
 }
@@ -72,6 +173,9 @@ public final class GitActivityRefreshStatusStore {
         public static let trigger = "tinybuddy.gitRefreshStatus.trigger"
         public static let outcome = "tinybuddy.gitRefreshStatus.outcome"
         public static let reason = "tinybuddy.gitRefreshStatus.reason"
+        public static let diagnosticSource = "tinybuddy.gitRefreshStatus.diagnostic.source"
+        public static let diagnosticStage = "tinybuddy.gitRefreshStatus.diagnostic.stage"
+        public static let diagnosticReason = "tinybuddy.gitRefreshStatus.diagnostic.reason"
         public static let durationMilliseconds = "tinybuddy.gitRefreshStatus.metrics.durationMilliseconds"
         public static let authorizedRootCount = "tinybuddy.gitRefreshStatus.metrics.authorizedRootCount"
         public static let repositoryCount = "tinybuddy.gitRefreshStatus.metrics.repositoryCount"
@@ -114,18 +218,26 @@ public final class GitActivityRefreshStatusStore {
             return nil
         }
 
-        let reason = userDefaults.string(forKey: Key.reason)?
+        let legacyReason = userDefaults.string(forKey: Key.reason)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nonEmpty
-        let metrics = loadMetrics()
+        let (reason, diagnostic, didMigrateReason) = loadReasonAndDiagnostic(legacyReason: legacyReason)
+        let (metrics, didMigrateMetrics) = loadMetrics(fallbackDiagnostic: diagnostic)
 
-        return GitActivityRefreshStatus(
+        let status = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
             trigger: trigger,
             outcome: outcome,
             reason: reason,
+            diagnostic: diagnostic,
             metrics: metrics
         )
+
+        if didMigrateReason || didMigrateMetrics {
+            save(status)
+        }
+
+        return status
     }
 
     public func save(_ status: GitActivityRefreshStatus) {
@@ -139,10 +251,13 @@ public final class GitActivityRefreshStatusStore {
             userDefaults.removeObject(forKey: Key.reason)
         }
 
+        saveDiagnostic(status.diagnostic)
         saveMetrics(status.metrics)
     }
 
-    private func loadMetrics() -> GitActivityRefreshMetrics? {
+    private func loadMetrics(
+        fallbackDiagnostic: GitActivityRefreshDiagnostic?
+    ) -> (metrics: GitActivityRefreshMetrics?, didMigrate: Bool) {
         let durationMilliseconds = integer(forKey: Key.durationMilliseconds)
         let authorizedRootCount = integer(forKey: Key.authorizedRootCount)
         let repositoryCount = integer(forKey: Key.repositoryCount)
@@ -151,9 +266,11 @@ public final class GitActivityRefreshStatusStore {
         let recomputedRepositoryCount = integer(forKey: Key.recomputedRepositoryCount)
         let sharedDataWritten = bool(forKey: Key.sharedDataWritten)
         let widgetReloaded = bool(forKey: Key.widgetReloaded)
-        let reason = userDefaults.string(forKey: Key.metricsReason)?
+        let legacyReason = userDefaults.string(forKey: Key.metricsReason)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nonEmpty
+        let reason = GitActivityRefreshDiagnostic.legacyDiagnostic(for: legacyReason)?.stableIdentifier
+            ?? (legacyReason != nil ? fallbackDiagnostic?.stableIdentifier : nil)
 
         guard
             durationMilliseconds != nil ||
@@ -166,20 +283,68 @@ public final class GitActivityRefreshStatusStore {
             widgetReloaded != nil ||
             reason != nil
         else {
-            return nil
+            return (nil, legacyReason != nil)
         }
 
-        return GitActivityRefreshMetrics(
-            durationMilliseconds: durationMilliseconds,
-            authorizedRootCount: authorizedRootCount,
-            repositoryCount: repositoryCount,
-            cacheHitCount: cacheHitCount,
-            reflogUnchangedSkipCount: reflogUnchangedSkipCount,
-            recomputedRepositoryCount: recomputedRepositoryCount,
-            sharedDataWritten: sharedDataWritten,
-            widgetReloaded: widgetReloaded,
-            reason: reason
+        return (
+            GitActivityRefreshMetrics(
+                durationMilliseconds: durationMilliseconds,
+                authorizedRootCount: authorizedRootCount,
+                repositoryCount: repositoryCount,
+                cacheHitCount: cacheHitCount,
+                reflogUnchangedSkipCount: reflogUnchangedSkipCount,
+                recomputedRepositoryCount: recomputedRepositoryCount,
+                sharedDataWritten: sharedDataWritten,
+                widgetReloaded: widgetReloaded,
+                reason: reason
+            ),
+            legacyReason != reason
         )
+    }
+
+    private func loadReasonAndDiagnostic(
+        legacyReason: String?
+    ) -> (reason: String?, diagnostic: GitActivityRefreshDiagnostic?, didMigrate: Bool) {
+        if let diagnostic = loadStoredDiagnostic() {
+            let reason = diagnostic.stableIdentifier
+            return (reason, diagnostic, legacyReason != reason)
+        }
+
+        if let diagnostic = GitActivityRefreshDiagnostic.legacyDiagnostic(for: legacyReason) {
+            return (diagnostic.stableIdentifier, diagnostic, true)
+        }
+
+        return (nil, nil, legacyReason != nil)
+    }
+
+    private func loadStoredDiagnostic() -> GitActivityRefreshDiagnostic? {
+        if let sourceRawValue = userDefaults.string(forKey: Key.diagnosticSource),
+           let stageRawValue = userDefaults.string(forKey: Key.diagnosticStage),
+           let reasonRawValue = userDefaults.string(forKey: Key.diagnosticReason),
+           let source = GitActivityRefreshDiagnosticSource(rawValue: sourceRawValue),
+           let stage = GitActivityRefreshDiagnosticStage(rawValue: stageRawValue),
+           let reason = GitActivityRefreshDiagnosticReason(rawValue: reasonRawValue) {
+            return GitActivityRefreshDiagnostic(
+                source: source,
+                stage: stage,
+                reason: reason
+            )
+        }
+
+        return nil
+    }
+
+    private func saveDiagnostic(_ diagnostic: GitActivityRefreshDiagnostic?) {
+        if let diagnostic {
+            userDefaults.set(diagnostic.source.rawValue, forKey: Key.diagnosticSource)
+            userDefaults.set(diagnostic.stage.rawValue, forKey: Key.diagnosticStage)
+            userDefaults.set(diagnostic.reason.rawValue, forKey: Key.diagnosticReason)
+            return
+        }
+
+        userDefaults.removeObject(forKey: Key.diagnosticSource)
+        userDefaults.removeObject(forKey: Key.diagnosticStage)
+        userDefaults.removeObject(forKey: Key.diagnosticReason)
     }
 
     private func saveMetrics(_ metrics: GitActivityRefreshMetrics?) {

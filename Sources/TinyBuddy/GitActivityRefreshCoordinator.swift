@@ -81,14 +81,7 @@ private struct GitRefreshScriptExecutionError: LocalizedError {
     let metrics: GitRefreshScriptMetrics?
 
     var errorDescription: String? {
-        let scriptDiagnostics = [standardOutput, standardError]
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        if scriptDiagnostics.isEmpty {
-            return "refresh script exited with status \(terminationStatus)"
-        }
-
-        return "refresh script exited with status \(terminationStatus):\n\(scriptDiagnostics)"
+        "refresh script exited with status \(terminationStatus)"
     }
 }
 
@@ -96,6 +89,7 @@ final class GitActivityRefreshCoordinator {
     typealias ScriptRunner = (URL, [URL]) throws -> GitRefreshScriptResult
     typealias ScriptURLProvider = () -> URL?
     typealias AuthorizedRootsProvider = () -> GitScanRootAccessResult
+    typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
 
     private let activityStore: GitTodayActivityStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
@@ -105,6 +99,8 @@ final class GitActivityRefreshCoordinator {
     private let authorizedRootsProvider: AuthorizedRootsProvider
     private let dateProvider: () -> Date
     private let workspaceNotificationCenter: NotificationCenter
+    private let statusNotificationCenter: NotificationCenter
+    private let diagnosticRecorder: DiagnosticRecorder
     private let refreshInterval: TimeInterval
     private let minimumRefreshSpacing: TimeInterval
     private let wakeRefreshCoalescingInterval: TimeInterval
@@ -134,6 +130,8 @@ final class GitActivityRefreshCoordinator {
         authorizedRootsProvider: AuthorizedRootsProvider? = nil,
         dateProvider: @escaping () -> Date = Date.init,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+        statusNotificationCenter: NotificationCenter = .default,
+        diagnosticRecorder: @escaping DiagnosticRecorder = GitActivityRefreshCoordinator.logDiagnostic(_:trigger:),
         wakeRefreshCoalescingInterval: TimeInterval = 5
     ) {
         self.activityStore = activityStore
@@ -146,6 +144,8 @@ final class GitActivityRefreshCoordinator {
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
         self.dateProvider = dateProvider
         self.workspaceNotificationCenter = workspaceNotificationCenter
+        self.statusNotificationCenter = statusNotificationCenter
+        self.diagnosticRecorder = diagnosticRecorder
         self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
     }
 
@@ -328,18 +328,22 @@ final class GitActivityRefreshCoordinator {
         guard let scriptURL = scriptURLProvider() else {
             lastRefreshAttemptAt = now
             lastRefreshFailureAt = now
+            let diagnostic = GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptLookup,
+                reason: .scriptMissing
+            )
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .failed,
-                reason: "missing git refresh script",
+                diagnostic: diagnostic,
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     widgetReloaded: false,
-                    reason: "missing git refresh script"
+                    reason: diagnostic.stableIdentifier
                 )
             )
-            NSLog("TinyBuddy: missing git refresh script for trigger %@", String(describing: trigger))
             return false
         }
 
@@ -349,20 +353,19 @@ final class GitActivityRefreshCoordinator {
         if accessResult.issue == .authorizationInvalid {
             lastRefreshAttemptAt = now
             lastRefreshFailureAt = now
-            let reason = refreshReason(for: accessResult.issue)
+            let diagnostic = diagnostic(for: accessResult.issue)
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: reason,
+                diagnostic: diagnostic,
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: authorizedRootURLs.count,
                     widgetReloaded: false,
-                    reason: reason
+                    reason: diagnostic.stableIdentifier
                 )
             )
-            NSLog("TinyBuddy: skipping git refresh for trigger %@ because %@", String(describing: trigger), reason)
             scopedRoots.forEach { $0.stopAccessing() }
             return false
         }
@@ -370,20 +373,19 @@ final class GitActivityRefreshCoordinator {
         guard !authorizedRootURLs.isEmpty else {
             timer?.invalidate()
             timer = nil
-            let reason = refreshReason(for: accessResult.issue)
+            let diagnostic = diagnostic(for: accessResult.issue)
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
                 outcome: .skipped,
-                reason: reason,
+                diagnostic: diagnostic,
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 0,
                     widgetReloaded: false,
-                    reason: reason
+                    reason: diagnostic.stableIdentifier
                 )
             )
-            NSLog("TinyBuddy: skipping git refresh for trigger %@ because %@", String(describing: trigger), reason)
             scopedRoots.forEach { $0.stopAccessing() }
             return false
         }
@@ -408,24 +410,27 @@ final class GitActivityRefreshCoordinator {
                     let currentSnapshot = self.activityStore.loadTodaySnapshot()
                     guard currentSnapshot.focusBlockCount != nil,
                           currentSnapshot.commitCount != nil else {
-                        let reason = "refreshed Git activity data is unavailable"
+                        let diagnostic = GitActivityRefreshDiagnostic(
+                            source: .gitActivityRefresh,
+                            stage: .activitySnapshotLoad,
+                            reason: .refreshedActivityUnavailable
+                        )
                         self.lastRefreshFailureAt = now
                         self.recordRefreshStatus(
                             refreshedAt: now,
                             trigger: trigger,
                             outcome: .failed,
-                            reason: reason,
+                            diagnostic: diagnostic,
                             metrics: self.makeMetrics(
                                 startedAt: now,
                                 finishedAt: self.dateProvider(),
                                 authorizedRootCount: authorizedRootURLs.count,
                                 scriptMetrics: scriptResult.metrics,
                                 widgetReloaded: false,
-                                reason: reason
+                                diagnostic: diagnostic
                             )
                         )
                         self.finishRefresh(succeeded: false)
-                        NSLog("TinyBuddy: git refresh produced no readable activity snapshot for trigger %@", String(describing: trigger))
                         return
                     }
 
@@ -453,14 +458,14 @@ final class GitActivityRefreshCoordinator {
                         refreshedAt: now,
                         trigger: trigger,
                         outcome: .succeeded,
-                        reason: nil,
+                        diagnostic: nil,
                         metrics: self.makeMetrics(
                             startedAt: now,
                             finishedAt: self.dateProvider(),
                             authorizedRootCount: authorizedRootURLs.count,
                             scriptMetrics: scriptResult.metrics,
                             widgetReloaded: didReloadWidget,
-                            reason: nil
+                            diagnostic: nil
                         )
                     )
                     self.lastRefreshFailureAt = nil
@@ -472,23 +477,27 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     let scriptMetrics = (error as? GitRefreshScriptExecutionError)?.metrics
+                    let diagnostic = GitActivityRefreshDiagnostic(
+                        source: .gitActivityRefresh,
+                        stage: .scriptExecution,
+                        reason: .scriptExecutionFailed
+                    )
                     self.lastRefreshFailureAt = now
                     self.recordRefreshStatus(
                         refreshedAt: now,
                         trigger: trigger,
                         outcome: .failed,
-                        reason: self.summarizedReason(from: error),
+                        diagnostic: diagnostic,
                         metrics: self.makeMetrics(
                             startedAt: now,
                             finishedAt: self.dateProvider(),
                             authorizedRootCount: authorizedRootURLs.count,
                             scriptMetrics: scriptMetrics,
                             widgetReloaded: false,
-                            reason: self.summarizedReason(from: error)
+                            diagnostic: diagnostic
                         )
                     )
                     self.finishRefresh(succeeded: false)
-                    NSLog("TinyBuddy: git refresh failed for trigger %@: %@", String(describing: trigger), error.localizedDescription)
                 }
             }
         }
@@ -516,18 +525,21 @@ final class GitActivityRefreshCoordinator {
         refreshedAt: Date,
         trigger: GitTodayActivityRefreshTrigger,
         outcome: GitActivityRefreshOutcome,
-        reason: String?,
+        diagnostic: GitActivityRefreshDiagnostic?,
         metrics: GitActivityRefreshMetrics? = nil
     ) {
         let status = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
             trigger: trigger,
             outcome: outcome,
-            reason: summarizedReason(reason),
+            diagnostic: diagnostic,
             metrics: metrics
         )
         refreshStatusStore.save(status)
-        NotificationCenter.default.post(name: .gitActivityRefreshStatusDidChange, object: status)
+        statusNotificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: status)
+        if let diagnostic {
+            diagnosticRecorder(diagnostic, trigger)
+        }
     }
 
     private func makeMetrics(
@@ -536,7 +548,7 @@ final class GitActivityRefreshCoordinator {
         authorizedRootCount: Int,
         scriptMetrics: GitRefreshScriptMetrics?,
         widgetReloaded: Bool,
-        reason: String?
+        diagnostic: GitActivityRefreshDiagnostic?
     ) -> GitActivityRefreshMetrics {
         GitActivityRefreshMetrics(
             durationMilliseconds: max(0, Int(finishedAt.timeIntervalSince(startedAt) * 1000)),
@@ -547,45 +559,25 @@ final class GitActivityRefreshCoordinator {
             recomputedRepositoryCount: scriptMetrics?.recomputedRepositoryCount,
             sharedDataWritten: scriptMetrics?.sharedDataWritten,
             widgetReloaded: widgetReloaded,
-            reason: summarizedReason(reason)
+            reason: diagnostic?.stableIdentifier
         )
     }
 
-    private func summarizedReason(from error: Error) -> String? {
-        summarizedReason(error.localizedDescription)
-    }
-
-    private func refreshReason(for issue: GitScanRootAccessIssue?) -> String {
+    private func diagnostic(for issue: GitScanRootAccessIssue?) -> GitActivityRefreshDiagnostic {
         switch issue {
         case .authorizationInvalid:
-            return "saved Git scan root authorizations are no longer valid"
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .authorizationResolution,
+                reason: .authorizationInvalid
+            )
         case .authorizationRequired, .none:
-            return "no authorized Git scan roots"
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .authorizationResolution,
+                reason: .authorizationRequired
+            )
         }
-    }
-
-    private func summarizedReason(_ reason: String?) -> String? {
-        guard let reason else {
-            return nil
-        }
-
-        let singleLineReason = reason
-            .split(whereSeparator: \.isNewline)
-            .first
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let singleLineReason, !singleLineReason.isEmpty else {
-            return nil
-        }
-
-        let maxLength = 160
-        guard singleLineReason.count > maxLength else {
-            return singleLineReason
-        }
-
-        let endIndex = singleLineReason.index(singleLineReason.startIndex, offsetBy: maxLength)
-        return String(singleLineReason[..<endIndex])
     }
 
     private func mirrorActivitySnapshotToStandardDefaults(
@@ -715,7 +707,6 @@ final class GitActivityRefreshCoordinator {
             )
         }
 
-        NSLog("TinyBuddy: git refresh script diagnostics: %@", standardError)
         return GitRefreshScriptResult(
             standardOutput: visibleOutput,
             standardError: standardError,
@@ -730,5 +721,16 @@ final class GitActivityRefreshCoordinator {
         }
 
         return FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    private static func logDiagnostic(
+        _ diagnostic: GitActivityRefreshDiagnostic,
+        trigger: GitTodayActivityRefreshTrigger
+    ) {
+        NSLog(
+            "TinyBuddy: git refresh diagnostic %@ for trigger %@",
+            diagnostic.stableIdentifier,
+            String(describing: trigger)
+        )
     }
 }

@@ -73,7 +73,11 @@ final class PetViewModelTests: XCTestCase {
                 refreshedAt: refreshedAt,
                 trigger: .didWake,
                 outcome: .failed,
-                reason: "missing git refresh script"
+                diagnostic: GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .scriptLookup,
+                    reason: .scriptMissing
+                )
             )
         )
 
@@ -104,7 +108,11 @@ final class PetViewModelTests: XCTestCase {
                 refreshedAt: currentDate,
                 trigger: .didWake,
                 outcome: .failed,
-                reason: "missing git refresh script"
+                diagnostic: GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .scriptLookup,
+                    reason: .scriptMissing
+                )
             )
         )
         currentDate = makeDate(year: 2026, month: 7, day: 5, hour: 8, minute: 0, second: 0)
@@ -208,7 +216,11 @@ final class PetViewModelTests: XCTestCase {
                 refreshedAt: refreshedAt,
                 trigger: .launch,
                 outcome: .skipped,
-                reason: "no authorized Git scan roots"
+                diagnostic: GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .authorizationResolution,
+                    reason: .authorizationRequired
+                )
             )
         )
 
@@ -237,7 +249,11 @@ final class PetViewModelTests: XCTestCase {
                 refreshedAt: refreshedAt,
                 trigger: .launch,
                 outcome: .skipped,
-                reason: "saved Git scan root authorizations are no longer valid"
+                diagnostic: GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .authorizationResolution,
+                    reason: .authorizationInvalid
+                )
             )
         )
 
