@@ -116,6 +116,15 @@ final class PetViewModel: ObservableObject {
             }
         })
         observers.append(notificationCenter.addObserver(
+            forName: .gitActivitySnapshotDidChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reloadHUDState()
+            }
+        })
+        observers.append(notificationCenter.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
             queue: nil

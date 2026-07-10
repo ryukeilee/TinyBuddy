@@ -187,6 +187,33 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
+    func testSuccessfulActivityCommitPostsCommittedSnapshotNotificationAfterPersistence() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { _ in
+            harness.setActivitySnapshot(focusBlockCount: 4, commitCount: 7, recentProjectName: "TinyBuddy")
+        }
+        var observedSnapshot: TinyBuddyCombinedSnapshot?
+        let notificationExpectation = expectation(description: "committed activity notification")
+        let observer = harness.statusNotificationCenterForTesting.addObserver(
+            forName: .gitActivitySnapshotDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            observedSnapshot = harness.combinedSnapshot
+            notificationExpectation.fulfill()
+        }
+        defer { harness.statusNotificationCenterForTesting.removeObserver(observer) }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        wait(for: [notificationExpectation], timeout: 1.0)
+
+        XCTAssertEqual(observedSnapshot?.activitySnapshot.focusBlockCount, 4)
+        XCTAssertEqual(observedSnapshot?.activitySnapshot.commitCount, 7)
+        XCTAssertEqual(observedSnapshot?.activitySnapshot.recentProjectName, "TinyBuddy")
+    }
+
     func testRefreshMirrorsValidGitActivityWithoutClearingItWhenRefreshedSnapshotIsUnavailable() {
         withRestoredStandardDefaults(keys: mirroredGitActivityKeys) {
             let harness = makeHarness()
@@ -1233,6 +1260,7 @@ private final class RefreshHarness {
     var statusHistory: [GitActivityRefreshStatus] { state.statusHistory }
     var diagnosticEventIdentifiers: [String] { state.diagnosticEventIdentifiers }
     var combinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.load() }
+    var statusNotificationCenterForTesting: NotificationCenter { statusNotificationCenter }
     var authorizedRoots: [URL] {
         get { state.authorizedRoots }
         set { state.authorizedRoots = newValue }

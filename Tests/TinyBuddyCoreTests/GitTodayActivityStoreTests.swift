@@ -276,6 +276,66 @@ final class GitTodayActivityStoreTests: XCTestCase {
         )
     }
 
+    func testTrustedSnapshotUsesInjectedDayAndRestoresAfterCrossingMidnight() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 7, day: 2)
+        let trustedStore = GitTodayActivityTrustedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            fallbackDefaults: nil
+        )
+        let activityStore = GitTodayActivityStore(
+            trustedSnapshotStore: trustedStore,
+            focusBlockCountStore: GitTodayFocusBlockCountStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { currentDate },
+                sharedFallbacksEnabled: false
+            ),
+            commitCountStore: GitTodayCommitCountStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { currentDate },
+                sharedFallbacksEnabled: false
+            ),
+            recentProjectStore: GitTodayRecentProjectStore(
+                userDefaults: defaults,
+                calendar: calendar,
+                dateProvider: { currentDate },
+                sharedFallbacksEnabled: false
+            ),
+            calendar: calendar,
+            dateProvider: { currentDate }
+        )
+
+        XCTAssertTrue(trustedStore.save(GitTodayActivityTrustedSnapshot(
+            revision: 1,
+            dayIdentifier: "2026-07-02",
+            activity: GitTodayActivitySnapshot(focusBlockCount: 7, commitCount: 11, recentProjectName: "TinyBuddy")
+        )))
+        XCTAssertEqual(
+            activityStore.loadTodaySnapshot(),
+            GitTodayActivitySnapshot(focusBlockCount: 7, commitCount: 11, recentProjectName: "TinyBuddy")
+        )
+
+        currentDate = makeDate(year: 2026, month: 7, day: 3)
+        XCTAssertEqual(
+            activityStore.loadTodaySnapshot(),
+            GitTodayActivitySnapshot(focusBlockCount: nil, commitCount: nil, recentProjectName: nil)
+        )
+
+        XCTAssertTrue(trustedStore.save(GitTodayActivityTrustedSnapshot(
+            revision: 2,
+            dayIdentifier: "2026-07-03",
+            activity: GitTodayActivitySnapshot(focusBlockCount: 2, commitCount: 3, recentProjectName: "TinyBuddyCore")
+        )))
+        XCTAssertEqual(
+            activityStore.loadTodaySnapshot(),
+            GitTodayActivitySnapshot(focusBlockCount: 2, commitCount: 3, recentProjectName: "TinyBuddyCore")
+        )
+    }
+
     func testRefreshResultOnlyReportsChangeWhenSnapshotDiffers() {
         let store = GitTodayActivityStore(
             focusBlockCountStore: GitTodayFocusBlockCountStore(userDefaults: makeDefaults(), sharedFallbacksEnabled: false),

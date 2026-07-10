@@ -6,6 +6,7 @@ import Darwin
 
 extension Notification.Name {
     static let gitActivityRefreshStatusDidChange = Notification.Name("TinyBuddy.gitActivityRefreshStatusDidChange")
+    static let gitActivitySnapshotDidChange = Notification.Name("TinyBuddy.gitActivitySnapshotDidChange")
     static let gitScanRootAuthorizationRequested = Notification.Name("TinyBuddy.gitScanRootAuthorizationRequested")
 }
 
@@ -479,10 +480,13 @@ final class GitActivityRefreshCoordinator {
                         activityRevision: currentActivityRead.trustedRevision,
                         fallbackSnapshot: self.dailyStatsStore.loadSnapshot()
                     )
-                    self.mirrorActivitySnapshotToStandardDefaults(
-                        currentSnapshot,
-                        refreshedAt: now
-                    )
+                    if combinedUpdate.didPersist {
+                        self.mirrorActivitySnapshotToStandardDefaults(
+                            currentSnapshot,
+                            refreshedAt: now
+                        )
+                        self.statusNotificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
+                    }
                     let didReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
                         didChange: refreshResult.didChange && combinedUpdate.didPersist

@@ -41,13 +41,19 @@ public final class GitTodayActivityStore {
     private let focusBlockCountStore: GitTodayFocusBlockCountStore
     private let commitCountStore: GitTodayCommitCountStore
     private let recentProjectStore: GitTodayRecentProjectStore
+    private let calendar: Calendar
+    private let dateProvider: () -> Date
 
     public convenience init() {
+        let calendar = Calendar.current
+        let dateProvider: () -> Date = { Date() }
         self.init(
             trustedSnapshotStore: GitTodayActivityTrustedSnapshotStore(),
-            focusBlockCountStore: GitTodayFocusBlockCountStore(),
-            commitCountStore: GitTodayCommitCountStore(),
-            recentProjectStore: GitTodayRecentProjectStore()
+            focusBlockCountStore: GitTodayFocusBlockCountStore(calendar: calendar, dateProvider: dateProvider),
+            commitCountStore: GitTodayCommitCountStore(calendar: calendar, dateProvider: dateProvider),
+            recentProjectStore: GitTodayRecentProjectStore(calendar: calendar, dateProvider: dateProvider),
+            calendar: calendar,
+            dateProvider: dateProvider
         )
     }
 
@@ -55,12 +61,16 @@ public final class GitTodayActivityStore {
         trustedSnapshotStore: GitTodayActivityTrustedSnapshotStore? = nil,
         focusBlockCountStore: GitTodayFocusBlockCountStore,
         commitCountStore: GitTodayCommitCountStore,
-        recentProjectStore: GitTodayRecentProjectStore
+        recentProjectStore: GitTodayRecentProjectStore,
+        calendar: Calendar = .current,
+        dateProvider: @escaping () -> Date = Date.init
     ) {
         self.trustedSnapshotStore = trustedSnapshotStore
         self.focusBlockCountStore = focusBlockCountStore
         self.commitCountStore = commitCountStore
         self.recentProjectStore = recentProjectStore
+        self.calendar = calendar
+        self.dateProvider = dateProvider
     }
 
     public func loadTodaySnapshot() -> GitTodayActivitySnapshot {
@@ -87,7 +97,7 @@ public final class GitTodayActivityStore {
     }
 
     private func todayIdentifier() -> String {
-        let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        let components = calendar.dateComponents([.year, .month, .day], from: dateProvider())
         return String(
             format: "%04d-%02d-%02d",
             components.year ?? 0,

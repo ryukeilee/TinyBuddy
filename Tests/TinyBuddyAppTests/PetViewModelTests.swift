@@ -190,6 +190,44 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.displayState, .active)
     }
 
+    func testCommittedActivityNotificationPublishesCompleteHUDImmediately() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today })
+        let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+        let combinedSnapshotStore = store.makeCombinedSnapshotStore()
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter
+        )
+        _ = combinedSnapshotStore.updateActivitySlice(
+            GitTodayActivitySnapshot(focusBlockCount: 5, commitCount: 8, recentProjectName: "TinyBuddy"),
+            fallbackSnapshot: store.loadSnapshot()
+        )
+
+        notificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
+
+        let expectation = expectation(description: "HUD activity updated")
+        Task { @MainActor in
+            while viewModel.hudPresentation.focusCount != 5
+                || viewModel.hudPresentation.completionCount != 8
+                || viewModel.hudPresentation.statusDisplayTitle != "活跃 · TinyBuddy"
+            {
+                await Task.yield()
+            }
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 1.0)
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 5)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 8)
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+    }
+
     func testRefreshDiagnosticsMapsUnauthorizedRootsReasonToChinese() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
@@ -430,7 +468,7 @@ final class PetViewModelTests: XCTestCase {
             widgetReloader: { widgetReloadCount += 1 }
         )
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 2)
+        XCTAssertEqual(viewModel.notificationObserverCount, 3)
 
         for _ in 0..<25 {
             notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
@@ -438,7 +476,7 @@ final class PetViewModelTests: XCTestCase {
         await Task.yield()
         await Task.yield()
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 2)
+        XCTAssertEqual(viewModel.notificationObserverCount, 3)
         XCTAssertEqual(widgetReloadCount, 0)
     }
 
