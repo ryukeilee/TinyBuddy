@@ -3,6 +3,45 @@ import Foundation
 import XCTest
 
 final class GitActivityRefreshScriptTests: XCTestCase {
+    func testScriptDoesNotUseHereStringForCachedRepositoryStats() throws {
+        let harness = try ScriptHarness()
+        let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
+
+        XCTAssertFalse(source.contains("<<<"))
+    }
+
+    func testScriptUsesSandboxCompatibleRevisionSource() throws {
+        let harness = try ScriptHarness()
+        let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("REFRESH_REVISION=\"$(/bin/date +%s)\""))
+        XCTAssertFalse(source.contains("/usr/bin/perl -MTime::HiRes"))
+    }
+
+    func testScriptRecoversFromStaleCachedRepositoryAndReportsSuccess() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: current")]
+        )
+
+        let initialResult = try harness.run(scanRoots: [harness.scanRootURL])
+        XCTAssertEqual(initialResult.exitCode, 0)
+
+        try "\(repoURL.path)\n\(harness.scanRootURL.appendingPathComponent("StaleWorktree").path)\n"
+            .write(to: harness.repositoryCacheFileURL, atomically: true, encoding: .utf8)
+
+        let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: recoveredResult.standardOutput))
+
+        XCTAssertEqual(recoveredResult.exitCode, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["shared_data_written"], "0")
+    }
+
     func testScriptPublishesOneAtomicSnapshotAndRejectsNonNewerRefreshResults() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -143,7 +182,10 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         let preservedPlist = try harness.readPreferencesPlist()
 
         XCTAssertEqual(failedResult.exitCode, 1)
-        XCTAssertTrue(failedResult.standardError.contains("preserving previous shared data"))
+        XCTAssertTrue(
+            failedResult.standardError.contains("preserving previous shared data"),
+            failedResult.standardError
+        )
         XCTAssertEqual(preservedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 99)
         XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 77)
         XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "PreviousProject")
@@ -476,13 +518,21 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
         XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
 
+        try harness.writeHeadReflog(
+            for: alphaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 11, minute: 20, message: "commit: restored")]
+        )
+        try harness.setReflogModificationDate(
+            for: alphaURL,
+            to: Date().addingTimeInterval(60)
+        )
         let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL])
         let recoveredPlist = try harness.readPreferencesPlist()
 
         XCTAssertEqual(recoveredResult.exitCode, 0)
-        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
-        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
-        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
     }
 
     func testScriptPreservesPreviousSharedDataWhenSuccessfulRescanFindsNoRepositories() throws {
@@ -634,17 +684,20 @@ final class GitActivityRefreshScriptTests: XCTestCase {
     func testScriptSkipsInvalidWorktreeMetadataAndDoesNotLetItOverrideRecentProject() throws {
         let harness = try ScriptHarness()
         let validRepoURL = try harness.makeRepository(named: "ProjectAlpha")
-        let brokenWorktreeURL = try harness.makeRepositoryWithExternalGitDir(
-            named: "BrokenWorktree",
-            commonDirRelativePath: "../missing-common-dir"
-        )
-
         try harness.writeHeadReflog(
             for: validRepoURL,
             lines: [
                 harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: valid")
             ]
         )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+
+        let brokenWorktreeURL = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktree",
+            commonDirRelativePath: "../missing-common-dir"
+        )
+
         try harness.writeHeadReflog(
             for: brokenWorktreeURL,
             lines: [
@@ -658,10 +711,141 @@ final class GitActivityRefreshScriptTests: XCTestCase {
 
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertTrue(result.standardError.contains("metadata is incomplete"))
+        XCTAssertTrue(result.standardError.contains("partial refresh"))
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
         XCTAssertEqual(metrics["repository_count"], "1")
+    }
+
+    func testScriptPartiallyRecoversValidRepositoryWhenOneWorktreeIsInvalid() throws {
+        let harness = try ScriptHarness()
+        let validRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: validRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: initial")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+
+        try harness.writeHeadReflog(
+            for: validRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: initial"),
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 20, message: "commit: latest")
+            ]
+        )
+        try harness.setReflogModificationDate(for: validRepoURL, to: Date().addingTimeInterval(60))
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktree",
+            commonDirRelativePath: "../missing-common-dir"
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.standardError.contains("diagnostic=gitdir-layout-incomplete"), result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["invalid_repository_count"], "1")
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+    }
+
+    func testScriptPreservesCacheAndTrustedSnapshotWhenOneDiscoveredRepositoryIsInvalid() throws {
+        let harness = try ScriptHarness()
+        let validRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: validRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: valid")]
+        )
+
+        let initialResult = try harness.run(scanRoots: [harness.scanRootURL])
+        XCTAssertEqual(initialResult.exitCode, 0)
+        let originalCache = try String(contentsOf: harness.repositoryCacheFileURL, encoding: .utf8)
+        let originalStatsCache = try String(contentsOf: harness.repositoryStatsCacheFileURL, encoding: .utf8)
+        let originalSnapshot = try XCTUnwrap(
+            (try harness.readPreferencesPlist())["tinybuddy.gitTodayActivity.trustedSnapshot"] as? String
+        )
+
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktree",
+            commonDirRelativePath: "../missing-common-dir"
+        )
+
+        let failedResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let failedPlist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(failedResult.exitCode, 0)
+        XCTAssertTrue(
+            failedResult.standardError.contains("partial refresh"),
+            failedResult.standardError
+        )
+        XCTAssertEqual(
+            try String(contentsOf: harness.repositoryCacheFileURL, encoding: .utf8),
+            originalCache
+        )
+        XCTAssertEqual(
+            try String(contentsOf: harness.repositoryStatsCacheFileURL, encoding: .utf8),
+            originalStatsCache
+        )
+        XCTAssertEqual(
+            failedPlist["tinybuddy.gitTodayActivity.trustedSnapshot"] as? String,
+            originalSnapshot
+        )
+        XCTAssertEqual(failedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+    }
+
+    func testScriptIdentifiesEachInvalidCandidateWithoutLeakingItsFullPath() throws {
+        let harness = try ScriptHarness()
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktreeA",
+            commonDirRelativePath: "../missing-common-dir-a"
+        )
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktreeB",
+            commonDirRelativePath: "../missing-common-dir-b"
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let diagnostics = result.standardError
+            .split(separator: "\n")
+            .filter { $0.contains("invalid repository candidate") }
+            .map(String.init)
+
+        XCTAssertEqual(diagnostics.count, 2)
+        XCTAssertNotEqual(diagnostics[0], diagnostics[1])
+        XCTAssertTrue(diagnostics.contains { $0.contains("candidate=BrokenWorktreeA-") })
+        XCTAssertTrue(diagnostics.contains { $0.contains("candidate=BrokenWorktreeB-") })
+        XCTAssertFalse(result.standardError.contains(harness.scanRootURL.path))
+    }
+
+    func testInvalidCandidateDiagnosticsRemainStableWhenPerlIsUnavailable() throws {
+        let harness = try ScriptHarness()
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "PerlDeniedCandidateA",
+            commonDirRelativePath: "../missing-perl-common-a"
+        )
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "PerlDeniedCandidateB",
+            commonDirRelativePath: "../missing-perl-common-b"
+        )
+        let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_PERL_BIN": "denied"]
+        )
+        let diagnostics = result.standardError
+            .split(separator: "\n")
+            .filter { $0.contains("invalid repository candidate") }
+            .map(String.init)
+
+        XCTAssertFalse(source.contains("/usr/bin/shasum"))
+        XCTAssertEqual(diagnostics.count, 2)
+        XCTAssertNotEqual(diagnostics[0], diagnostics[1])
+        XCTAssertTrue(diagnostics.allSatisfy { $0.contains("candidate=") })
+        XCTAssertFalse(result.standardError.contains(harness.scanRootURL.path))
     }
 }
 
@@ -699,6 +883,10 @@ private struct ScriptHarness {
 
     var repositoryCacheFileURL: URL {
         cacheDirectoryURL.appendingPathComponent("repositories.txt")
+    }
+
+    var repositoryStatsCacheFileURL: URL {
+        cacheDirectoryURL.appendingPathComponent("repository-stats.tsv")
     }
 
     func makeRepository(named name: String) throws -> URL {

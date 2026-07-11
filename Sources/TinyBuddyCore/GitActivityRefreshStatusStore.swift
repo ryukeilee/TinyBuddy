@@ -2,6 +2,7 @@ import Foundation
 
 public enum GitActivityRefreshOutcome: String, Equatable, Sendable {
     case succeeded
+    case partial
     case skipped
     case failed
 }
@@ -23,6 +24,7 @@ public enum GitActivityRefreshDiagnosticReason: String, Equatable, Sendable {
     case authorizationInvalid
     case scriptExecutionFailed
     case refreshedActivityUnavailable
+    case partialRecovery
 }
 
 public struct GitActivityRefreshDiagnostic: Equatable, Sendable {
@@ -88,6 +90,15 @@ public struct GitActivityRefreshDiagnostic: Equatable, Sendable {
             )
         }
 
+        if normalizedReason.contains("gitactivityrefresh.scriptexecution.partialrecovery")
+            || normalizedReason.contains("partial git refresh") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptExecution,
+                reason: .partialRecovery
+            )
+        }
+
         if normalizedReason.contains("gitactivityrefresh.scriptexecution.scriptexecutionfailed")
             || normalizedReason.contains("refresh script exited with status")
             || normalizedReason.contains("git temporarily unavailable") {
@@ -109,6 +120,7 @@ public struct GitActivityRefreshMetrics: Equatable, Sendable {
     public let cacheHitCount: Int?
     public let reflogUnchangedSkipCount: Int?
     public let recomputedRepositoryCount: Int?
+    public let invalidRepositoryCount: Int?
     public let sharedDataWritten: Bool?
     public let widgetReloaded: Bool?
     public let reason: String?
@@ -120,6 +132,7 @@ public struct GitActivityRefreshMetrics: Equatable, Sendable {
         cacheHitCount: Int? = nil,
         reflogUnchangedSkipCount: Int? = nil,
         recomputedRepositoryCount: Int? = nil,
+        invalidRepositoryCount: Int? = nil,
         sharedDataWritten: Bool? = nil,
         widgetReloaded: Bool? = nil,
         reason: String? = nil
@@ -130,6 +143,7 @@ public struct GitActivityRefreshMetrics: Equatable, Sendable {
         self.cacheHitCount = cacheHitCount
         self.reflogUnchangedSkipCount = reflogUnchangedSkipCount
         self.recomputedRepositoryCount = recomputedRepositoryCount
+        self.invalidRepositoryCount = invalidRepositoryCount
         self.sharedDataWritten = sharedDataWritten
         self.widgetReloaded = widgetReloaded
         self.reason = reason?
@@ -182,6 +196,7 @@ public final class GitActivityRefreshStatusStore {
         public static let cacheHitCount = "tinybuddy.gitRefreshStatus.metrics.cacheHitCount"
         public static let reflogUnchangedSkipCount = "tinybuddy.gitRefreshStatus.metrics.reflogUnchangedSkipCount"
         public static let recomputedRepositoryCount = "tinybuddy.gitRefreshStatus.metrics.recomputedRepositoryCount"
+        public static let invalidRepositoryCount = "tinybuddy.gitRefreshStatus.metrics.invalidRepositoryCount"
         public static let sharedDataWritten = "tinybuddy.gitRefreshStatus.metrics.sharedDataWritten"
         public static let widgetReloaded = "tinybuddy.gitRefreshStatus.metrics.widgetReloaded"
         public static let metricsReason = "tinybuddy.gitRefreshStatus.metrics.reason"
@@ -264,6 +279,7 @@ public final class GitActivityRefreshStatusStore {
         let cacheHitCount = integer(forKey: Key.cacheHitCount)
         let reflogUnchangedSkipCount = integer(forKey: Key.reflogUnchangedSkipCount)
         let recomputedRepositoryCount = integer(forKey: Key.recomputedRepositoryCount)
+        let invalidRepositoryCount = integer(forKey: Key.invalidRepositoryCount)
         let sharedDataWritten = bool(forKey: Key.sharedDataWritten)
         let widgetReloaded = bool(forKey: Key.widgetReloaded)
         let legacyReason = userDefaults.string(forKey: Key.metricsReason)?
@@ -279,6 +295,7 @@ public final class GitActivityRefreshStatusStore {
             cacheHitCount != nil ||
             reflogUnchangedSkipCount != nil ||
             recomputedRepositoryCount != nil ||
+            invalidRepositoryCount != nil ||
             sharedDataWritten != nil ||
             widgetReloaded != nil ||
             reason != nil
@@ -294,6 +311,7 @@ public final class GitActivityRefreshStatusStore {
                 cacheHitCount: cacheHitCount,
                 reflogUnchangedSkipCount: reflogUnchangedSkipCount,
                 recomputedRepositoryCount: recomputedRepositoryCount,
+                invalidRepositoryCount: invalidRepositoryCount,
                 sharedDataWritten: sharedDataWritten,
                 widgetReloaded: widgetReloaded,
                 reason: reason
@@ -354,6 +372,7 @@ public final class GitActivityRefreshStatusStore {
         writeInteger(metrics?.cacheHitCount, forKey: Key.cacheHitCount)
         writeInteger(metrics?.reflogUnchangedSkipCount, forKey: Key.reflogUnchangedSkipCount)
         writeInteger(metrics?.recomputedRepositoryCount, forKey: Key.recomputedRepositoryCount)
+        writeInteger(metrics?.invalidRepositoryCount, forKey: Key.invalidRepositoryCount)
         writeBool(metrics?.sharedDataWritten, forKey: Key.sharedDataWritten)
         writeBool(metrics?.widgetReloaded, forKey: Key.widgetReloaded)
 

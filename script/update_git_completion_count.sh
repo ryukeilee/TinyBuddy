@@ -18,14 +18,20 @@ TODAY="${TINYBUDDY_TODAY:-$(date +%F)}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 FIND_BIN="${TINYBUDDY_FIND_BIN:-find}"
 STAT_BIN="${TINYBUDDY_STAT_BIN:-stat}"
-PERL_BIN="${TINYBUDDY_PERL_BIN:-perl}"
+PERL_BIN="${TINYBUDDY_PERL_BIN:-}"
 CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-repository-cache}"
 CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
 CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
 EMPTY_CACHE_VALUE="__TINYBUDDY_EMPTY__"
-REFRESH_REVISION="${TINYBUDDY_REFRESH_REVISION:-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000000')}"
+if [ -n "${TINYBUDDY_REFRESH_REVISION:-}" ]; then
+  REFRESH_REVISION="$TINYBUDDY_REFRESH_REVISION"
+  REFRESH_REVISION_IS_EXPLICIT=1
+else
+  REFRESH_REVISION="$(/bin/date +%s)"
+  REFRESH_REVISION_IS_EXPLICIT=0
+fi
 SNAPSHOT_WRITE_LOCK="$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-snapshot-write.lock"
 
 total_count=0
@@ -53,8 +59,23 @@ reflog_unchanged_skip_count=0
 recomputed_repository_count=0
 repository_scan_failed=0
 invalid_repository_count=0
+recovery_has_missing_reflog=0
 snapshot_write_lock_acquired=0
 trusted_snapshot_stale=0
+
+record_invalid_repository() {
+  local diagnostic="$1"
+  local candidate_fingerprint
+  local candidate_id
+  invalid_repository_count=$((invalid_repository_count + 1))
+  if candidate_fingerprint="$(printf '%s' "$current_repository_candidate" | /usr/bin/cksum)"; then
+    candidate_fingerprint="${candidate_fingerprint%% *}"
+  else
+    candidate_fingerprint="ordinal"
+  fi
+  candidate_id="${current_repository_candidate##*/}-$candidate_fingerprint-$invalid_repository_count"
+  log_error "invalid repository candidate #$invalid_repository_count candidate=$candidate_id diagnostic=$diagnostic"
+}
 
 log_error() {
   echo "TinyBuddy refresh script: $*" >&2
@@ -278,6 +299,7 @@ reset_activity_snapshot() {
   reflog_unchanged_skip_count=0
   recomputed_repository_count=0
   invalid_repository_count=0
+  recovery_has_missing_reflog=0
   : > "$focus_block_list_file"
   : > "$new_repo_stats_file"
   : > "$validated_repo_list_file"
@@ -287,9 +309,14 @@ emit_refresh_metrics() {
   local authorized_root_count
   authorized_root_count="$(awk 'END { print NR + 0 }' "$scan_roots_file")"
 
-  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tshared_data_written=%s\n' \
+  local refresh_outcome="success"
+  [ "$invalid_repository_count" -gt 0 ] && refresh_outcome="partial"
+
+  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tshared_data_written=%s\n' \
     "$authorized_root_count" \
     "$repository_count" \
+    "$invalid_repository_count" \
+    "$refresh_outcome" \
     "$cache_hit_count" \
     "$reflog_unchanged_skip_count" \
     "$recomputed_repository_count" \
@@ -359,13 +386,22 @@ refresh_repository_list_from_scan() {
 
 write_repository_cache() {
   local cache_signature_file
+  local cache_repository_file
+  local cache_roots_file
+  local cache_signature_destination
   cache_signature_file="$(mktemp)"
 
   /bin/mkdir -p "$CACHE_DIR"
   build_scan_root_signature "$cache_signature_file"
-  cp "$repo_list_file" "$CACHE_REPO_LIST_FILE"
-  cp "$scan_roots_file" "$CACHE_SCAN_ROOTS_FILE"
-  cp "$cache_signature_file" "$CACHE_SCAN_ROOTS_SIGNATURE_FILE"
+  cache_repository_file="$(mktemp "$CACHE_REPO_LIST_FILE.XXXXXX")"
+  cache_roots_file="$(mktemp "$CACHE_SCAN_ROOTS_FILE.XXXXXX")"
+  cache_signature_destination="$(mktemp "$CACHE_SCAN_ROOTS_SIGNATURE_FILE.XXXXXX")"
+  cp "$validated_repo_list_file" "$cache_repository_file"
+  cp "$scan_roots_file" "$cache_roots_file"
+  cp "$cache_signature_file" "$cache_signature_destination"
+  mv "$cache_repository_file" "$CACHE_REPO_LIST_FILE"
+  mv "$cache_roots_file" "$CACHE_SCAN_ROOTS_FILE"
+  mv "$cache_signature_destination" "$CACHE_SCAN_ROOTS_SIGNATURE_FILE"
   rm -f "$cache_signature_file"
 }
 
@@ -405,8 +441,11 @@ load_cached_repository_stats() {
 }
 
 write_repository_stats_cache() {
+  local cache_stats_file
   /bin/mkdir -p "$CACHE_DIR"
-  cp "$new_repo_stats_file" "$CACHE_REPO_STATS_FILE"
+  cache_stats_file="$(mktemp "$CACHE_REPO_STATS_FILE.XXXXXX")"
+  cp "$new_repo_stats_file" "$cache_stats_file"
+  mv "$cache_stats_file" "$CACHE_REPO_STATS_FILE"
 }
 
 read_reflog_mtime() {
@@ -481,14 +520,16 @@ process_repository_list() {
   local cached_repo_focus_blocks
 
   reset_activity_snapshot
+  : > "$validated_repo_list_file"
 
   while IFS= read -r repo_root; do
+    current_repository_candidate="$repo_root"
     if [ ! -e "$repo_root" ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
         log_error "cached repository path is no longer available; rebuilding repository cache"
         return 2
       fi
-      invalid_repository_count=$((invalid_repository_count + 1))
+      record_invalid_repository "candidate-missing"
       continue
     fi
 
@@ -508,7 +549,7 @@ process_repository_list() {
         log_error "cached repository metadata is no longer available; rebuilding repository cache"
         return 2
       fi
-      invalid_repository_count=$((invalid_repository_count + 1))
+      record_invalid_repository "gitdir-resolution-failed"
       continue
     fi
 
@@ -517,7 +558,7 @@ process_repository_list() {
         log_error "cached repository metadata escaped authorized roots; rebuilding repository cache"
         return 2
       fi
-      invalid_repository_count=$((invalid_repository_count + 1))
+      record_invalid_repository "gitdir-outside-authorized-root"
       log_error "resolved git metadata path escaped authorized roots; skipping one repository"
       continue
     fi
@@ -527,7 +568,7 @@ process_repository_list() {
         log_error "cached repository metadata is no longer valid; rebuilding repository cache"
         return 2
       fi
-      invalid_repository_count=$((invalid_repository_count + 1))
+      record_invalid_repository "gitdir-layout-incomplete"
       log_error "resolved git metadata is incomplete for one repository; skipping one repository"
       continue
     fi
@@ -539,14 +580,19 @@ process_repository_list() {
         log_error "cached repository reflog is no longer available; rebuilding repository cache"
         return 2
       fi
+      record_invalid_repository "reflog-missing"
+      recovery_has_missing_reflog=1
       continue
     fi
     if [ ! -r "$reflog_path" ]; then
+      record_invalid_repository "reflog-unreadable"
+      log_error "git reflog path is not readable for one repository; preserving previous shared data"
       continue
     fi
     if [ ! -f "$reflog_path" ]; then
       readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
       failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+      record_invalid_repository "reflog-not-regular-file"
       log_error "git reflog path is not a regular file for one repository; preserving previous shared data"
       continue
     fi
@@ -564,6 +610,7 @@ process_repository_list() {
     enable_error_trap
     if [ "$read_reflog_mtime_exit_code" -ne 0 ]; then
       failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+      record_invalid_repository "reflog-mtime-failed"
       log_error "failed to read git reflog metadata for one repository; preserving previous shared data"
       continue
     fi
@@ -571,7 +618,20 @@ process_repository_list() {
     cached_repo_stats="$(awk -F '\t' -v repo_root="$repo_root" '$1 == repo_root { print; exit }' "$repo_stats_cache_file")"
     if [ -n "$cached_repo_stats" ]; then
       cache_hit_count=$((cache_hit_count + 1))
-      IFS=$'\t' read -r cached_repo_root cached_git_dir cached_reflog_path cached_day cached_reflog_mtime cached_repo_count cached_repo_latest_timestamp cached_repo_focus_blocks <<< "$cached_repo_stats"
+      cached_repo_root="${cached_repo_stats%%$'\t'*}"
+      cached_repo_stats="${cached_repo_stats#*$'\t'}"
+      cached_git_dir="${cached_repo_stats%%$'\t'*}"
+      cached_repo_stats="${cached_repo_stats#*$'\t'}"
+      cached_reflog_path="${cached_repo_stats%%$'\t'*}"
+      cached_repo_stats="${cached_repo_stats#*$'\t'}"
+      cached_day="${cached_repo_stats%%$'\t'*}"
+      cached_repo_stats="${cached_repo_stats#*$'\t'}"
+      cached_reflog_mtime="${cached_repo_stats%%$'\t'*}"
+      cached_repo_stats="${cached_repo_stats#*$'\t'}"
+      cached_repo_count="${cached_repo_stats%%$'\t'*}"
+      cached_repo_stats="${cached_repo_stats#*$'\t'}"
+      cached_repo_latest_timestamp="${cached_repo_stats%%$'\t'*}"
+      cached_repo_focus_blocks="${cached_repo_stats#*$'\t'}"
 
       if [ "$cached_repo_root" = "$repo_root" ] &&
          [ "$cached_git_dir" = "$git_dir" ] &&
@@ -599,7 +659,8 @@ process_repository_list() {
 
     recomputed_repository_count=$((recomputed_repository_count + 1))
     : > "$repo_reflog_file"
-    if ! "$PERL_BIN" -MPOSIX=strftime -e '
+    if [ -n "$PERL_BIN" ]; then
+      if ! "$PERL_BIN" -MPOSIX=strftime -e '
         use strict;
         use warnings;
 
@@ -634,10 +695,38 @@ process_repository_list() {
         if ($latest_epoch > 0) {
             printf "LATEST\t%s\n", strftime("%Y-%m-%dT%H:%M:%S%z", localtime($latest_epoch));
         }
-      ' "$TODAY" "$reflog_path" > "$repo_reflog_file"; then
-      failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
-      log_error "failed to parse git reflog for one repository; preserving previous shared data"
-      continue
+        ' "$TODAY" "$reflog_path" > "$repo_reflog_file"; then
+        failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+        log_error "failed to parse git reflog for one repository; preserving previous shared data"
+        continue
+      fi
+    else
+      : > "$repo_reflog_file"
+      repo_count=0
+      latest_epoch=0
+      while IFS=$'\t' read -r metadata message || [ -n "$metadata" ]; do
+        [[ "$message" =~ ^commit( \(.+\))?:|^merge([[:space:]]+[^:]*)?: ]] || continue
+        metadata_parts=($metadata)
+        [ "${#metadata_parts[@]}" -ge 2 ] || continue
+        epoch="${metadata_parts[${#metadata_parts[@]} - 2]}"
+        [[ "$epoch" =~ ^[0-9]+$ ]] || continue
+        day_identifier="$(/bin/date -r "$epoch" +%Y-%m-%d 2>/dev/null)" || continue
+        [ "$day_identifier" = "$TODAY" ] || continue
+        repo_count=$((repo_count + 1))
+        if [ "$epoch" -gt "$latest_epoch" ]; then
+          latest_epoch="$epoch"
+        fi
+        local_hour="$(/bin/date -r "$epoch" +%H 2>/dev/null)" || continue
+        local_minute="$(/bin/date -r "$epoch" +%M 2>/dev/null)" || continue
+        block_minute=0
+        [ "$local_minute" -ge 30 ] && block_minute=30
+        printf 'BLOCK\t%sT%s:%02d\n' "$day_identifier" "$local_hour" "$block_minute" >> "$repo_reflog_file"
+      done < "$reflog_path"
+      printf 'COUNT\t%d\n' "$repo_count" >> "$repo_reflog_file"
+      if [ "$latest_epoch" -gt 0 ]; then
+        latest_timestamp="$(/bin/date -r "$latest_epoch" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null)" || latest_timestamp=""
+        [ -n "$latest_timestamp" ] && printf 'LATEST\t%s\n' "$latest_timestamp" >> "$repo_reflog_file"
+      fi
     fi
     successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
 
@@ -702,10 +791,13 @@ read_plist_value() {
   local key="$1"
   local value
 
+  trap - ERR
   if ! value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP_GROUP_PREFERENCES_PLIST" 2>/dev/null)"; then
+    enable_error_trap
     return 1
   fi
 
+  enable_error_trap
   printf '%s\n' "$value"
 }
 
@@ -774,9 +866,13 @@ write_trusted_snapshot_if_newer() {
 
     if [[ "$current_revision" =~ ^[0-9]+$ ]] &&
        [ "$current_revision" -ge "$REFRESH_REVISION" ]; then
-      trusted_snapshot_stale=1
-      echo "TinyBuddy git shared snapshot is newer; skipped stale write"
-      return
+      if [ "$REFRESH_REVISION_IS_EXPLICIT" -eq 1 ]; then
+        trusted_snapshot_stale=1
+        echo "TinyBuddy git shared snapshot is newer; skipped stale write"
+        return
+      fi
+
+      REFRESH_REVISION=$((current_revision + 1))
     fi
   fi
 
@@ -803,8 +899,8 @@ if ! command -v git >/dev/null 2>&1; then
   exit 127
 fi
 
-# Avoid here-strings here because the signed sandboxed app can reject bash's
-# implicit temp file creation for `<<<`, leaving the authorized root list empty.
+# Avoid here-strings because the signed sandboxed app can reject bash's
+# implicit temporary-file creation, leaving the authorized root list empty.
 printf '%s' "$SCAN_ROOTS" | while IFS= read -r scan_root || [ -n "$scan_root" ]; do
   if [ -n "$scan_root" ]; then
     printf '%s\n' "$scan_root" >> "$scan_roots_file"
@@ -841,10 +937,12 @@ if [ -s "$CACHE_REPO_LIST_FILE" ]; then
 fi
 
 using_cached_repo_list=0
+cache_was_reused=0
 if cache_matches_current_roots; then
   load_cached_repository_list
   load_cached_repository_stats
   using_cached_repo_list=1
+  cache_was_reused=1
 else
   refresh_repository_list_from_scan
   if [ "$repository_scan_failed" -eq 1 ]; then
@@ -857,35 +955,42 @@ else
     emit_refresh_metrics
     exit 1
   fi
-  write_repository_cache
   load_cached_repository_stats
 fi
 
 process_repository_list "$using_cached_repo_list" || process_result="$?"
 if [ "${process_result:-0}" -ne 0 ]; then
   if [ "$process_result" -ne 2 ]; then
+    emit_runtime_diagnostics_once
+    emit_refresh_metrics
     exit 1
   fi
 
+  recovered_repository_list=0
   refresh_repository_list_from_scan
   if [ "$repository_scan_failed" -eq 0 ] && [ -s "$repo_list_file" ]; then
-    process_repository_list 0
-    if [ "$failed_reflog_repo_count" -eq 0 ] && [ -s "$validated_repo_list_file" ]; then
-      cp "$validated_repo_list_file" "$repo_list_file"
-      write_repository_cache
-      write_repository_stats_cache
+    recovery_process_result=0
+    process_repository_list 0 || recovery_process_result="$?"
+    if [ "$recovery_process_result" -eq 0 ] &&
+       [ "$failed_reflog_repo_count" -eq 0 ] &&
+       [ "$invalid_repository_count" -eq 0 ] &&
+       [ -s "$validated_repo_list_file" ]; then
+      recovered_repository_list=1
+      cache_was_reused=0
     fi
   fi
-  emit_runtime_diagnostics_once
-  log_error "cached repository paths are temporarily unavailable; preserving previous shared data"
-  emit_find_stderr_sample
-  emit_refresh_metrics
-  exit 1
+  if [ "$recovered_repository_list" -eq 0 ]; then
+    emit_runtime_diagnostics_once
+    log_error "cached repository paths are temporarily unavailable; preserving previous shared data"
+    emit_find_stderr_sample
+    emit_refresh_metrics
+    exit 1
+  fi
 fi
 
-if [ "$had_cached_repository_list" -eq 1 ] && [ "$invalid_repository_count" -gt 0 ]; then
+if [ "$invalid_repository_count" -gt 0 ] && [ "$successful_reflog_repo_count" -eq 0 ]; then
   emit_runtime_diagnostics_once
-  log_error "one or more previously known repositories are invalid; preserving previous shared data"
+  log_error "all discovered repositories are invalid or unreadable; preserving previous shared data"
   emit_refresh_metrics
   exit 1
 fi
@@ -927,7 +1032,12 @@ if [ "$trusted_snapshot_stale" -eq 0 ]; then
   write_plist_string_if_changed "$RECENT_PROJECT_DAY_KEY" "$TODAY"
   write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
 fi
-write_repository_stats_cache
+if [ "$invalid_repository_count" -eq 0 ]; then
+  write_repository_cache
+  write_repository_stats_cache
+else
+  log_error "partial refresh: retaining previous repository caches"
+fi
 
 if [ "$shared_data_rewritten" -eq 0 ]; then
   echo "TinyBuddy git shared data unchanged; skipped plist rewrite"

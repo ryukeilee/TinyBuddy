@@ -12,10 +12,27 @@ extension Notification.Name {
 
 struct GitRefreshScriptMetrics: Equatable {
     let repositoryCount: Int?
+    let invalidRepositoryCount: Int?
     let cacheHitCount: Int?
     let reflogUnchangedSkipCount: Int?
     let recomputedRepositoryCount: Int?
     let sharedDataWritten: Bool?
+
+    init(
+        repositoryCount: Int?,
+        invalidRepositoryCount: Int? = nil,
+        cacheHitCount: Int?,
+        reflogUnchangedSkipCount: Int?,
+        recomputedRepositoryCount: Int?,
+        sharedDataWritten: Bool?
+    ) {
+        self.repositoryCount = repositoryCount
+        self.invalidRepositoryCount = invalidRepositoryCount
+        self.cacheHitCount = cacheHitCount
+        self.reflogUnchangedSkipCount = reflogUnchangedSkipCount
+        self.recomputedRepositoryCount = recomputedRepositoryCount
+        self.sharedDataWritten = sharedDataWritten
+    }
 }
 
 struct GitRefreshScriptResult {
@@ -49,6 +66,7 @@ private struct GitRefreshScriptResultParser {
 
         return GitRefreshScriptMetrics(
             repositoryCount: values["repository_count"].flatMap(Int.init),
+            invalidRepositoryCount: values["invalid_repository_count"].flatMap(Int.init),
             cacheHitCount: values["cache_hit_count"].flatMap(Int.init),
             reflogUnchangedSkipCount: values["reflog_unchanged_skip_count"].flatMap(Int.init),
             recomputedRepositoryCount: values["recomputed_repository_count"].flatMap(Int.init),
@@ -387,7 +405,7 @@ final class GitActivityRefreshCoordinator {
             recordRefreshStatus(
                 refreshedAt: now,
                 trigger: trigger,
-                outcome: .skipped,
+                outcome: .failed,
                 diagnostic: diagnostic,
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
@@ -498,8 +516,14 @@ final class GitActivityRefreshCoordinator {
                     self.recordRefreshStatus(
                         refreshedAt: now,
                         trigger: trigger,
-                        outcome: .succeeded,
-                        diagnostic: nil,
+                        outcome: scriptResult.metrics?.invalidRepositoryCount ?? 0 > 0 ? .partial : .succeeded,
+                        diagnostic: scriptResult.metrics?.invalidRepositoryCount ?? 0 > 0
+                            ? GitActivityRefreshDiagnostic(
+                                source: .gitActivityRefresh,
+                                stage: .scriptExecution,
+                                reason: .partialRecovery
+                            )
+                            : nil,
                         metrics: self.makeMetrics(
                             startedAt: now,
                             finishedAt: self.dateProvider(),
@@ -519,6 +543,16 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     let scriptMetrics = (error as? GitRefreshScriptExecutionError)?.metrics
+                    if let scriptError = error as? GitRefreshScriptExecutionError {
+                        NSLog(
+                            "TinyBuddy: git refresh script failure %@",
+                            GitActivityRefreshCoordinator.scriptFailureSummary(
+                                terminationStatus: scriptError.terminationStatus,
+                                standardOutput: scriptError.standardOutput,
+                                standardError: scriptError.standardError
+                            )
+                        )
+                    }
                     let diagnostic = GitActivityRefreshDiagnostic(
                         source: .gitActivityRefresh,
                         stage: .scriptExecution,
@@ -599,6 +633,7 @@ final class GitActivityRefreshCoordinator {
             cacheHitCount: scriptMetrics?.cacheHitCount,
             reflogUnchangedSkipCount: scriptMetrics?.reflogUnchangedSkipCount,
             recomputedRepositoryCount: scriptMetrics?.recomputedRepositoryCount,
+            invalidRepositoryCount: scriptMetrics?.invalidRepositoryCount,
             sharedDataWritten: scriptMetrics?.sharedDataWritten,
             widgetReloaded: widgetReloaded,
             reason: diagnostic?.stableIdentifier
@@ -675,11 +710,13 @@ final class GitActivityRefreshCoordinator {
     private static func runScript(at scriptURL: URL, scanningRoots rootURLs: [URL]) throws -> GitRefreshScriptResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [scriptURL.path]
+        process.arguments = scriptProcessArguments()
         process.currentDirectoryURL = scriptURL.deletingLastPathComponent()
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
+        environment["TMPDIR"] = Self.scriptTemporaryDirectoryEnvironment(temporaryDirectoryURL)
         let userHomePath = resolvedUserHomeDirectoryPath()
         environment["TINYBUDDY_USER_HOME"] = userHomePath
         environment["TINYBUDDY_GIT_SCAN_ROOTS"] = rootURLs
@@ -699,7 +736,6 @@ final class GitActivityRefreshCoordinator {
         }
         process.environment = environment
 
-        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
         let standardOutputURL = temporaryDirectoryURL.appendingPathComponent(UUID().uuidString)
         let standardErrorURL = temporaryDirectoryURL.appendingPathComponent(UUID().uuidString)
         FileManager.default.createFile(atPath: standardOutputURL.path, contents: nil)
@@ -714,8 +750,12 @@ final class GitActivityRefreshCoordinator {
         }
         process.standardOutput = standardOutputHandle
         process.standardError = standardErrorHandle
+        let standardInputPipe = Pipe()
+        process.standardInput = standardInputPipe
 
         try process.run()
+        standardInputPipe.fileHandleForWriting.write(try Data(contentsOf: scriptURL))
+        try standardInputPipe.fileHandleForWriting.close()
         process.waitUntilExit()
         try standardOutputHandle.close()
         try standardErrorHandle.close()
@@ -756,6 +796,10 @@ final class GitActivityRefreshCoordinator {
         )
     }
 
+    static func scriptProcessArguments() -> [String] {
+        ["-s"]
+    }
+
     private static func resolvedUserHomeDirectoryPath() -> String {
         if let homeDirectory = getpwuid(getuid()).map({ String(cString: $0.pointee.pw_dir) }),
            !homeDirectory.isEmpty {
@@ -763,6 +807,71 @@ final class GitActivityRefreshCoordinator {
         }
 
         return FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    static func scriptFailureSummary(
+        terminationStatus: Int32,
+        standardOutput: String,
+        standardError: String
+    ) -> String {
+        let combinedOutput = "\(standardOutput)\n\(standardError)".lowercased()
+        let permissionDenied = combinedOutput.contains("permission denied")
+            || combinedOutput.contains("operation not permitted")
+        let sandboxBlocked = combinedOutput.contains("operation not permitted")
+            || combinedOutput.contains("sandbox")
+        let pathPresent = combinedOutput.contains("/")
+        let command = [
+            ("mktemp", "mktemp"),
+            ("find:", "find"),
+            ("date:", "date"),
+            ("defaults", "defaults"),
+            ("plutil", "plutil"),
+            ("perl", "perl"),
+            ("plistbuddy", "plistbuddy")
+        ].first { combinedOutput.contains($0.0) }?.1 ?? "unknown"
+        let deniedExecutable = combinedOutput
+            .split(whereSeparator: { $0.isWhitespace })
+            .firstIndex(where: { $0 == "operation" })
+            .flatMap { operationIndex in
+                combinedOutput
+                    .split(whereSeparator: { $0.isWhitespace })[..<operationIndex]
+                    .reversed()
+                    .compactMap { token -> String? in
+                        let candidate = token.trimmingCharacters(in: .punctuationCharacters)
+                        guard candidate.contains("/") else {
+                            return nil
+                        }
+                        guard let basename = candidate.split(separator: "/").last.map(String.init),
+                              basename.contains(".") || basename.contains("-") else {
+                            return nil
+                        }
+                        return basename
+                    }
+                    .first
+            }
+        let classifiedCommand = command != "unknown"
+            ? command
+            : deniedExecutable ?? "unknown"
+        let resolvedCommand = classifiedCommand == "unknown" &&
+            (combinedOutput.contains("bash:") || combinedOutput.range(of: #"line [0-9]+:"#, options: .regularExpression) != nil)
+            ? "shell"
+            : classifiedCommand
+
+        let permission = permissionDenied ? "denied" : "unknown"
+        let sandbox = sandboxBlocked ? "blocked" : "unknown"
+        let path = pathPresent ? "present" : "absent"
+        let error = combinedOutput.contains("operation not permitted")
+            ? "operation-not-permitted"
+            : combinedOutput.contains("permission denied") ? "permission-denied" : "unknown"
+        let lineNumber = combinedOutput
+            .range(of: #"line [0-9]+:"#, options: .regularExpression)
+            .map { combinedOutput[$0].filter(\.isNumber) }
+            ?? "unknown"
+        return "status=\(terminationStatus) stdout_bytes=\(standardOutput.utf8.count) stderr_bytes=\(standardError.utf8.count) permission=\(permission) sandbox=\(sandbox) path=\(path) command=\(resolvedCommand) error=\(error) line=\(lineNumber)"
+    }
+
+    static func scriptTemporaryDirectoryEnvironment(_ url: URL) -> String {
+        url.path.hasSuffix("/") ? url.path : "\(url.path)/"
     }
 
     private static func logDiagnostic(

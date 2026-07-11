@@ -315,6 +315,8 @@ private struct RefreshDiagnosticsView: View {
         switch diagnostics.outcome {
         case .succeeded:
             return Color(red: 0.31, green: 0.68, blue: 0.44)
+        case .partial:
+            return Color(red: 0.89, green: 0.66, blue: 0.23)
         case .skipped:
             return Color(red: 0.89, green: 0.66, blue: 0.23)
         case .failed:

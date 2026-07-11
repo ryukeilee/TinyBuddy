@@ -271,6 +271,8 @@ final class PetViewModel: ObservableObject {
                 return "Git 刷新执行失败，请稍后再试。"
             case .refreshedActivityUnavailable:
                 return "Git 刷新完成，但暂时无法恢复活动快照。"
+            case .partialRecovery:
+                return "部分 Git 仓库已刷新；有失效 worktree 被跳过，请检查授权目录中的仓库。"
             }
         }
 
@@ -312,6 +314,10 @@ final class PetViewModel: ObservableObject {
             return "等待 Git 目录授权"
         }
 
+        if diagnosticReason == .partialRecovery {
+            return "Git 活动已部分刷新"
+        }
+
         return "\(triggerTitle(for: status.trigger))触发 \(outcomeTitle(for: status.outcome))"
     }
 
@@ -319,6 +325,8 @@ final class PetViewModel: ObservableObject {
         switch outcome {
         case .succeeded:
             return "成功"
+        case .partial:
+            return "有警告"
         case .skipped:
             return "跳过"
         case .failed:
@@ -330,6 +338,8 @@ final class PetViewModel: ObservableObject {
         switch outcome {
         case .succeeded:
             return "刷新成功"
+        case .partial:
+            return "刷新部分成功"
         case .skipped:
             return "刷新跳过"
         case .failed:

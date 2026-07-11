@@ -4,6 +4,102 @@ import XCTest
 import Foundation
 
 final class GitActivityRefreshCoordinatorTests: XCTestCase {
+    func testScriptFailureSummaryClassifiesSandboxAndPathErrorsWithoutEchoingOutput() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "repo path",
+            standardError: "open /Users/alice/SecretRepo: Operation not permitted"
+        )
+
+        XCTAssertEqual(summary, "status=1 stdout_bytes=9 stderr_bytes=53 permission=denied sandbox=blocked path=present command=unknown error=operation-not-permitted line=unknown")
+        XCTAssertFalse(summary.contains("SecretRepo"))
+        XCTAssertFalse(summary.contains("alice"))
+    }
+
+    func testScriptFailureSummaryIdentifiesDeniedCommand() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "find: /Users/alice/Projects: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("command=find"))
+        XCTAssertFalse(summary.contains("Projects"))
+    }
+
+    func testScriptFailureSummaryIdentifiesDeniedDateTool() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "date: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("command=date"))
+    }
+
+    func testScriptFailureSummaryDoesNotTreatAppGroupPlistDiagnosticAsPlistBuddyCommand() {
+        let diagnosticSummary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "diagnostics: app_group_plist=/private/tmp/shared.plist gitdir-resolution-failed"
+        )
+        let plistBuddySummary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "/usr/libexec/PlistBuddy: Entry, \"count\", Does Not Exist"
+        )
+
+        XCTAssertTrue(diagnosticSummary.contains("command=unknown"))
+        XCTAssertFalse(diagnosticSummary.contains("command=plistbuddy"))
+        XCTAssertTrue(plistBuddySummary.contains("command=plistbuddy"))
+    }
+
+    func testScriptFailureSummaryIdentifiesShellBoundaryWithoutEchoingDeniedPath() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "bash: line 7: /usr/libexec/unknown-tool: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("command=unknown-tool"))
+        XCTAssertTrue(summary.contains("error=operation-not-permitted"))
+        XCTAssertFalse(summary.contains("/usr/libexec"))
+    }
+
+    func testScriptFailureSummaryExtractsDeniedExecutableBasenameOnly() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "bash: line 7: /usr/local/bin/private-tool: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("command=private-tool"))
+        XCTAssertFalse(summary.contains("/usr/local/bin"))
+    }
+
+    func testScriptFailureSummaryIncludesDeniedShellLineNumber() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "bash: line 972: /usr/bin/tool: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("line=972"))
+    }
+
+    func testScriptUsesTheAppSandboxTemporaryDirectoryForChildProcessScratchFiles() {
+        XCTAssertEqual(
+            GitActivityRefreshCoordinator.scriptTemporaryDirectoryEnvironment(
+                URL(fileURLWithPath: "/private/var/folders/tinybuddy", isDirectory: true)
+            ),
+            "/private/var/folders/tinybuddy/"
+        )
+    }
+
+    func testRefreshInvokesBundledScriptThroughSandboxSafeStandardInput() {
+        XCTAssertEqual(GitActivityRefreshCoordinator.scriptProcessArguments(), ["-s"])
+    }
+
     func testRefreshSkipsScriptWhenNoGitScanRootsAreAuthorized() {
         let harness = makeHarness(authorizedRoots: [])
 
@@ -50,7 +146,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             GitActivityRefreshStatus(
                 refreshedAt: harness.currentDate,
                 trigger: .becameActive,
-                outcome: .skipped,
+                outcome: .failed,
                 diagnostic: GitActivityRefreshDiagnostic(
                     source: .gitActivityRefresh,
                     stage: .authorizationResolution,
@@ -185,6 +281,40 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 widgetReloaded: true
             )
         )
+    }
+
+    func testPartialScriptRefreshPropagatesWarningWithoutFalseSuccess() {
+        let harness = makeHarness()
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 3,
+                invalidRepositoryCount: 1,
+                cacheHitCount: 2,
+                reflogUnchangedSkipCount: 1,
+                recomputedRepositoryCount: 1,
+                sharedDataWritten: true
+            )
+        )
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 2, commitCount: 3, recentProjectName: "DevPulse")
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.handleDidBecomeActive()
+        }
+
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .partial)
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.diagnostic,
+            GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptExecution,
+                reason: .partialRecovery
+            )
+        )
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.invalidRepositoryCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
     func testSuccessfulActivityCommitPostsCommittedSnapshotNotificationAfterPersistence() {
@@ -610,7 +740,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.scriptRunCount, 0)
         XCTAssertEqual(harness.widgetReloadCount, 0)
-        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .skipped)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
 
         harness.advanceCurrentDate(by: 6)
