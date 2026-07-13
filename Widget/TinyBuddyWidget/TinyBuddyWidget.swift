@@ -10,8 +10,7 @@ struct TinyBuddyEntry: TimelineEntry {
 
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
-    private let activityStore = GitTodayActivityStore()
-    private let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore()
+    private let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(repairOnLoad: false)
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
         return TinyBuddyEntry(
@@ -39,7 +38,7 @@ struct TinyBuddyProvider: TimelineProvider {
     }
 
     private func makeEntry(for date: Date) -> TinyBuddyEntry {
-        if let combinedSnapshot = combinedSnapshotStore.load(),
+        if let combinedSnapshot = combinedSnapshotStore.loadReadOnly(),
            combinedSnapshot.dayIdentifier == Self.dayIdentifier(for: date) {
             return TinyBuddyEntry(
                 date: date,
@@ -51,7 +50,11 @@ struct TinyBuddyProvider: TimelineProvider {
         return TinyBuddyEntry(
             date: date,
             snapshot: store.loadSnapshot(),
-            activitySnapshot: activityStore.loadTodaySnapshot()
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: nil,
+                commitCount: nil,
+                recentProjectName: nil
+            )
         )
     }
 

@@ -61,6 +61,7 @@ final class PetViewModel: ObservableObject {
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let notificationCenter: NotificationCenter
     private let widgetReloader: () -> Void
+    private var latestRefreshStatus: GitActivityRefreshStatus?
     private var observers: [NSObjectProtocol] = []
 
     init(
@@ -76,10 +77,35 @@ final class PetViewModel: ObservableObject {
         self.store = store
         let session = PetSession(store: store)
         let combinedSnapshotStore = combinedSnapshotStore ?? store.makeCombinedSnapshotStore()
+        let latestRefreshStatus = refreshStatusStore.load()
+        let fallbackSnapshot = store.loadSnapshot()
+        let committedSnapshotBeforePublication = combinedSnapshotStore.loadReadOnly()
+        let hadSameDayCommittedSnapshot = committedSnapshotBeforePublication?.dayIdentifier
+            == fallbackSnapshot.stats.dayIdentifier
+        let widgetPresentationBeforePublication: TinyBuddyWidgetPresentation
+        if let committedSnapshot = committedSnapshotBeforePublication,
+           committedSnapshot.dayIdentifier == fallbackSnapshot.stats.dayIdentifier {
+            widgetPresentationBeforePublication = Self.makeHUDPresentation(
+                snapshot: committedSnapshot.snapshot,
+                activitySnapshot: committedSnapshot.activitySnapshot
+            )
+        } else {
+            widgetPresentationBeforePublication = Self.makeHUDPresentation(
+                snapshot: fallbackSnapshot,
+                activitySnapshot: GitTodayActivitySnapshot(
+                    focusBlockCount: nil,
+                    commitCount: nil,
+                    recentProjectName: nil
+                )
+            )
+        }
         let combinedHUDState = Self.publishAndLoadCombinedSnapshot(
             store: store,
             activityStore: activityStore,
-            combinedSnapshotStore: combinedSnapshotStore
+            combinedSnapshotStore: combinedSnapshotStore,
+            includeTrustedActivity: Self.shouldIncludeTrustedActivity(
+                for: latestRefreshStatus
+            )
         )
         let snapshot = combinedHUDState.snapshot
         let activitySnapshot = combinedHUDState.activitySnapshot
@@ -93,11 +119,16 @@ final class PetViewModel: ObservableObject {
         self.refreshStatusStore = refreshStatusStore
         self.notificationCenter = notificationCenter
         self.widgetReloader = widgetReloader
+        self.latestRefreshStatus = latestRefreshStatus
         self.status = snapshot.status
         self.stats = snapshot.stats
         self.hudPresentation = hudPresentation
         self.displayState = Self.makeDisplayState(from: hudPresentation)
-        self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: refreshStatusStore.load())
+        self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
+        if combinedHUDState.didPersist
+            && (hadSameDayCommittedSnapshot || widgetPresentationBeforePublication != hudPresentation) {
+            widgetReloader()
+        }
         observers.append(notificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
             object: nil,
@@ -109,10 +140,12 @@ final class PetViewModel: ObservableObject {
                 }
 
                 let status = notification.object as? GitActivityRefreshStatus
+                    ?? self.refreshStatusStore.load()
+                self.latestRefreshStatus = status
                 self.refreshDiagnostics = Self.makeRefreshDiagnostics(
-                    from: status ?? self.refreshStatusStore.load()
+                    from: status
                 )
-                self.reloadHUDState()
+                self.reloadCommittedHUDState()
             }
         })
         observers.append(notificationCenter.addObserver(
@@ -121,7 +154,7 @@ final class PetViewModel: ObservableObject {
             queue: nil
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.reloadHUDState()
+                self?.reloadCommittedHUDState()
             }
         })
         observers.append(notificationCenter.addObserver(
@@ -153,7 +186,8 @@ final class PetViewModel: ObservableObject {
     }
 
     private func restorePersistedState() {
-        refreshDiagnostics = Self.makeRefreshDiagnostics(from: refreshStatusStore.load())
+        latestRefreshStatus = refreshStatusStore.load()
+        refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
         if reloadHUDState() {
             widgetReloader()
         }
@@ -189,10 +223,45 @@ final class PetViewModel: ObservableObject {
         let combinedHUDState = Self.publishAndLoadCombinedSnapshot(
             store: store,
             activityStore: activityStore,
-            combinedSnapshotStore: combinedSnapshotStore
+            combinedSnapshotStore: combinedSnapshotStore,
+            includeTrustedActivity: Self.shouldIncludeTrustedActivity(
+                for: latestRefreshStatus
+            )
         )
         let snapshot = combinedHUDState.snapshot
         let activitySnapshot = combinedHUDState.activitySnapshot
+        let didChange = applyHUDState(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot
+        )
+        return didChange && combinedHUDState.didPersist
+    }
+
+    private func reloadCommittedHUDState() {
+        let fallbackSnapshot = store.loadSnapshot()
+        let snapshot: TinyBuddySnapshot
+        let activitySnapshot: GitTodayActivitySnapshot
+
+        if let combinedSnapshot = combinedSnapshotStore.loadReadOnly(),
+           combinedSnapshot.dayIdentifier == fallbackSnapshot.stats.dayIdentifier {
+            snapshot = combinedSnapshot.snapshot
+            activitySnapshot = combinedSnapshot.activitySnapshot
+        } else {
+            snapshot = fallbackSnapshot
+            activitySnapshot = GitTodayActivitySnapshot(
+                focusBlockCount: nil,
+                commitCount: nil,
+                recentProjectName: nil
+            )
+        }
+        _ = applyHUDState(snapshot: snapshot, activitySnapshot: activitySnapshot)
+    }
+
+    @discardableResult
+    private func applyHUDState(
+        snapshot: TinyBuddySnapshot,
+        activitySnapshot: GitTodayActivitySnapshot
+    ) -> Bool {
         let hudPresentation = Self.makeHUDPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot
@@ -202,7 +271,7 @@ final class PetViewModel: ObservableObject {
         stats = snapshot.stats
         self.hudPresentation = hudPresentation
         displayState = Self.makeDisplayState(from: hudPresentation)
-        return didChange && combinedHUDState.didPersist
+        return didChange
     }
 
     private static func makeHUDPresentation(
@@ -215,22 +284,28 @@ final class PetViewModel: ObservableObject {
     private static func publishAndLoadCombinedSnapshot(
         store: DailyStatsStore,
         activityStore: GitTodayActivityStore,
-        combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
+        combinedSnapshotStore: TinyBuddyCombinedSnapshotStore,
+        includeTrustedActivity: Bool
     ) -> CombinedHUDState {
         let snapshot = store.loadSnapshot()
-        let activityRead = activityStore.loadTodaySnapshotRead()
+        let activityRead = includeTrustedActivity
+            ? activityStore.loadTodaySnapshotRead()
+            : nil
         let combinedUpdate = combinedSnapshotStore.updatePetSlice(
             snapshot,
-            fallbackActivitySnapshot: activityRead.snapshot,
-            fallbackActivityRevision: activityRead.trustedRevision
+            fallbackActivitySnapshot: activityRead?.snapshot,
+            fallbackActivityRevision: activityRead?.trustedRevision
         )
 
-        guard combinedUpdate.didPersist,
-              let combinedSnapshot = combinedUpdate.snapshot,
+        guard let combinedSnapshot = combinedUpdate.snapshot,
               combinedSnapshot.dayIdentifier == snapshot.stats.dayIdentifier else {
             return CombinedHUDState(
                 snapshot: snapshot,
-                activitySnapshot: activityRead.snapshot,
+                activitySnapshot: GitTodayActivitySnapshot(
+                    focusBlockCount: nil,
+                    commitCount: nil,
+                    recentProjectName: nil
+                ),
                 didPersist: false
             )
         }
@@ -238,8 +313,15 @@ final class PetViewModel: ObservableObject {
         return CombinedHUDState(
             snapshot: combinedSnapshot.snapshot,
             activitySnapshot: combinedSnapshot.activitySnapshot,
-            didPersist: true
+            didPersist: combinedUpdate.didPersist
         )
+    }
+
+    private static func shouldIncludeTrustedActivity(
+        for refreshStatus: GitActivityRefreshStatus?
+    ) -> Bool {
+        refreshStatus?.outcome != .failed
+            || refreshStatus?.diagnostic?.reason != .combinedSnapshotCommitFailed
     }
 
     private static func makeDisplayState(from presentation: TinyBuddyWidgetPresentation) -> DisplayState {
@@ -273,6 +355,8 @@ final class PetViewModel: ObservableObject {
                 return "Git 刷新完成，但暂时无法恢复活动快照。"
             case .partialRecovery:
                 return "部分 Git 仓库已刷新；有失效 worktree 被跳过，请检查授权目录中的仓库。"
+            case .combinedSnapshotCommitFailed:
+                return "Git 活动已读取，但统一快照提交失败；当前继续显示上次完整数据。"
             }
         }
 

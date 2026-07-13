@@ -2,6 +2,907 @@ import XCTest
 @testable import TinyBuddyCore
 
 final class WidgetSharedDataLinkTests: XCTestCase {
+    func testLegacyNineFieldSnapshotMigratesToRedundantV2Envelope() throws {
+        let defaults = makeDefaults()
+        let legacySnapshot = TinyBuddyCombinedSnapshot(
+            revision: 7,
+            dayIdentifier: "2026-07-01",
+            snapshot: TinyBuddySnapshot(
+                status: .completedOnce,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 2,
+                    completionCount: 1
+                )
+            ),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 3,
+                commitCount: 5,
+                recentProjectName: "TinyBuddy"
+            )
+        )
+        let fields = TinyBuddyCombinedSnapshotStore.encode(legacySnapshot)
+            .split(separator: "\t", omittingEmptySubsequences: false)
+        let nineFieldValue = fields.dropLast().joined(separator: "\t")
+        defaults.set(nineFieldValue, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot)
+
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+
+        XCTAssertEqual(store.load(), legacySnapshot)
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot),
+            TinyBuddyCombinedSnapshotStore.encode(legacySnapshot)
+        )
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            legacySnapshot
+        )
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            legacySnapshot
+        )
+        XCTAssertEqual(
+            defaults.object(forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision) as? Int64,
+            7
+        )
+    }
+
+    func testV2ChecksumRejectsPayloadCorruptionButKeepsClaimedRevisionRecoverable() {
+        let snapshot = makeCombinedSnapshot(revision: 11, focusBlockCount: 4, commitCount: 7)
+        let encoded = TinyBuddyCombinedSnapshotStore.encodeV2(snapshot)
+        let corrupted = corruptLastCharacter(of: encoded)
+
+        XCTAssertNil(TinyBuddyCombinedSnapshotStore.decodeV2(corrupted))
+        XCTAssertNotEqual(corrupted, encoded)
+    }
+
+    func testLegacyTenFieldSnapshotMigratesWithTrustedActivityRevision() throws {
+        let defaults = makeDefaults()
+        let legacySnapshot = makeCombinedSnapshot(
+            revision: 8,
+            focusBlockCount: 5,
+            commitCount: 9,
+            projectName: "TenField"
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encode(legacySnapshot),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+
+        XCTAssertEqual(store.load(), legacySnapshot)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            legacySnapshot
+        )
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(
+                try XCTUnwrap(defaults.string(
+                    forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+                ))
+            ),
+            8
+        )
+    }
+
+    func testLegacySnapshotSurvivesACrashAfterV2RevisionReservation() throws {
+        let defaults = makeDefaults()
+        let legacySnapshot = makeCombinedSnapshot(
+            revision: 9,
+            focusBlockCount: 4,
+            commitCount: 7,
+            projectName: "ReservedLegacy"
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encode(legacySnapshot),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(9),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(widgetStore.load(), legacySnapshot)
+
+        let appStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        XCTAssertEqual(appStore.load(), legacySnapshot)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            legacySnapshot
+        )
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(
+                try XCTUnwrap(defaults.string(
+                    forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+                ))
+            ),
+            9
+        )
+    }
+
+    func testCorruptLegacyMirrorCannotOverrideChecksummedV2() throws {
+        let defaults = makeDefaults()
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let committed = try XCTUnwrap(store.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        var legacyFields = TinyBuddyCombinedSnapshotStore.encode(committed)
+            .split(separator: "\t", omittingEmptySubsequences: false)
+            .map(String.init)
+        legacyFields[0] = String(Int64.max)
+        defaults.set(
+            legacyFields.joined(separator: "\t"),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+
+        XCTAssertEqual(store.load(), committed)
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot),
+            TinyBuddyCombinedSnapshotStore.encode(committed)
+        )
+    }
+
+    func testInterruptedWriteRecoversPreviousPayloadWithoutRevisionRollback() throws {
+        let defaults = makeDefaults()
+        let committed = makeCombinedSnapshot(
+            revision: 12,
+            focusBlockCount: 4,
+            commitCount: 7,
+            projectName: "Committed"
+        )
+        let interrupted = makeCombinedSnapshot(
+            revision: 13,
+            focusBlockCount: 8,
+            commitCount: 9,
+            projectName: "Interrupted"
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeV2(committed),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA
+        )
+        defaults.set(
+            corruptLastCharacter(of: TinyBuddyCombinedSnapshotStore.encodeV2(interrupted)),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(12),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(13),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+        defaults.set(13, forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision)
+
+        let appStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let recovered = try XCTUnwrap(appStore.load())
+
+        XCTAssertEqual(recovered.revision, 12)
+        XCTAssertEqual(recovered.snapshot, committed.snapshot)
+        XCTAssertEqual(recovered.activitySnapshot, committed.activitySnapshot)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            recovered
+        )
+
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(widgetStore.load(), recovered)
+    }
+
+    func testBothCorruptV2CopiesRebuildAboveEveryClaimedRevision() throws {
+        let defaults = makeDefaults()
+        let corruptA = corruptLastCharacter(of: TinyBuddyCombinedSnapshotStore.encodeV2(
+            makeCombinedSnapshot(revision: 20, focusBlockCount: 1, commitCount: 2)
+        ))
+        let corruptB = corruptLastCharacter(of: TinyBuddyCombinedSnapshotStore.encodeV2(
+            makeCombinedSnapshot(revision: 21, focusBlockCount: 3, commitCount: 5)
+        ))
+        defaults.set(corruptA, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA)
+        defaults.set(corruptB, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB)
+        defaults.set("corrupt legacy payload", forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot)
+
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        XCTAssertNil(store.load())
+
+        let rebuilt = store.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 0,
+                commitCount: 0
+            )
+        )
+
+        XCTAssertEqual(rebuilt.outcome, .saved)
+        XCTAssertEqual(rebuilt.snapshot?.revision, 22)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            rebuilt.snapshot
+        )
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            rebuilt.snapshot
+        )
+    }
+
+    func testCorruptLegacyRevisionCounterCannotExhaustValidPayload() throws {
+        let defaults = makeDefaults()
+        let oldSnapshot = makeCombinedSnapshot(revision: 4, focusBlockCount: 2, commitCount: 3)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encode(oldSnapshot),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+        defaults.set(Int64.max, forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision)
+
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let recovered = try XCTUnwrap(store.load())
+
+        XCTAssertEqual(recovered.revision, 4)
+        XCTAssertEqual(recovered.snapshot, oldSnapshot.snapshot)
+        XCTAssertEqual(recovered.activitySnapshot, oldSnapshot.activitySnapshot)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            recovered
+        )
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            recovered
+        )
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(
+                try XCTUnwrap(defaults.string(
+                    forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+                ))
+            ),
+            4
+        )
+
+        let updated = store.updatePetSlice(
+            oldSnapshot.snapshot,
+            fallbackActivitySnapshot: oldSnapshot.activitySnapshot,
+            fallbackActivityRevision: oldSnapshot.activityRevision
+        )
+        XCTAssertEqual(updated.outcome, .saved)
+        XCTAssertEqual(updated.snapshot?.revision, 5)
+    }
+
+    func testTransactionalWritesKeepPreviousCommittedSlotAsBackup() throws {
+        let defaults = makeDefaults()
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let firstPetSnapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 0,
+                completionCount: 0
+            )
+        )
+        let secondPetSnapshot = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 1,
+                completionCount: 0
+            )
+        )
+
+        let first = store.updatePetSlice(firstPetSnapshot, fallbackActivitySnapshot: nil)
+        let second = store.updatePetSlice(secondPetSnapshot, fallbackActivitySnapshot: nil)
+        let slotRevisions = try [
+            decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults).revision,
+            decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults).revision
+        ].sorted()
+
+        XCTAssertEqual(first.snapshot?.revision, 1)
+        XCTAssertEqual(second.snapshot?.revision, 2)
+        XCTAssertEqual(slotRevisions, [1, 2])
+        XCTAssertEqual(store.load(), second.snapshot)
+    }
+
+    func testFailedTransactionalPublicationKeepsReadersOnLastCommitAndRecoversMonotonically() throws {
+        let defaults = makeDefaults()
+        let initialStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initialPetSnapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 0,
+                completionCount: 0
+            )
+        )
+        let changedPetSnapshot = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 1,
+                completionCount: 0
+            )
+        )
+        let initial = try XCTUnwrap(
+            initialStore.updatePetSlice(
+                initialPetSnapshot,
+                fallbackActivitySnapshot: nil
+            ).snapshot
+        )
+        let failingStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                guard key != TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB else {
+                    return false
+                }
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: {
+                defaults.synchronize()
+            }
+        )
+
+        let failed = failingStore.updatePetSlice(
+            changedPetSnapshot,
+            fallbackActivitySnapshot: nil
+        )
+
+        XCTAssertEqual(failed.outcome, .persistenceFailed)
+        XCTAssertFalse(failed.didPersist)
+        XCTAssertEqual(failed.snapshot, initial)
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(widgetStore.load(), initial)
+
+        let recoveringStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let recovered = try XCTUnwrap(recoveringStore.load())
+        XCTAssertEqual(recovered, initial)
+        let retried = recoveringStore.updatePetSlice(
+            changedPetSnapshot,
+            fallbackActivitySnapshot: nil
+        )
+        XCTAssertEqual(retried.outcome, .saved)
+        XCTAssertEqual(retried.snapshot?.revision, 3)
+        XCTAssertEqual(retried.snapshot?.snapshot, changedPetSnapshot)
+    }
+
+    func testFailedSlotSynchronizationDoesNotPublishStagedSnapshot() throws {
+        let defaults = makeDefaults()
+        let initialStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(initialStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        var synchronizationCount = 0
+        let failingStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: {
+                synchronizationCount += 1
+                if synchronizationCount == 3 {
+                    return false
+                }
+                return defaults.synchronize()
+            }
+        )
+
+        let failed = failingStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .focusing,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 1,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        )
+
+        XCTAssertEqual(failed.outcome, .persistenceFailed)
+        XCTAssertEqual(failed.snapshot, initial)
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore(
+                userDefaults: defaults,
+                sharedPreferencesProvider: { nil },
+                repairOnLoad: false
+            ).load(),
+            initial
+        )
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(
+                try XCTUnwrap(defaults.string(
+                    forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+                ))
+            ),
+            initial.revision
+        )
+    }
+
+    func testFailedRevisionReservationLeavesTheLastCommitAndAllowsRevisionReuse() throws {
+        let defaults = makeDefaults()
+        let initialStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(initialStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        let changed = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 1,
+                completionCount: 0
+            )
+        )
+        let failingStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                guard key != TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2 else {
+                    return false
+                }
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: { defaults.synchronize() }
+        )
+
+        let failed = failingStore.updatePetSlice(changed, fallbackActivitySnapshot: nil)
+
+        XCTAssertEqual(failed.outcome, .persistenceFailed)
+        XCTAssertEqual(failed.snapshot, initial)
+        XCTAssertEqual(initialStore.loadReadOnly(), initial)
+
+        let retried = initialStore.updatePetSlice(changed, fallbackActivitySnapshot: nil)
+        XCTAssertEqual(retried.outcome, .saved)
+        XCTAssertEqual(retried.snapshot?.revision, 2)
+    }
+
+    func testFailedCommitMarkerSynchronizationRollsBackStagedSlot() throws {
+        let defaults = makeDefaults()
+        let initialStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(initialStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        var synchronizationCount = 0
+        let failingStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: {
+                synchronizationCount += 1
+                if synchronizationCount == 4 {
+                    return false
+                }
+                return defaults.synchronize()
+            }
+        )
+
+        let failed = failingStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .focusing,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 1,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        )
+
+        XCTAssertEqual(failed.outcome, .persistenceFailed)
+        XCTAssertEqual(failed.snapshot, initial)
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore(
+                userDefaults: defaults,
+                sharedPreferencesProvider: { nil },
+                repairOnLoad: false
+            ).load(),
+            initial
+        )
+    }
+
+    func testSavedRequiresOneCommittedV2SlotAndRepairsAncillaryCopiesLater() throws {
+        let defaults = makeDefaults()
+        let primaryOnlyStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                if key == TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB
+                    || key == TinyBuddyCombinedSnapshotStore.Key.snapshot {
+                    return false
+                }
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: { defaults.synchronize() }
+        )
+        let result = primaryOnlyStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        )
+
+        XCTAssertEqual(result.outcome, .saved)
+        XCTAssertTrue(result.didPersist)
+        XCTAssertEqual(primaryOnlyStore.loadReadOnly(), result.snapshot)
+        XCTAssertNil(defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB))
+        XCTAssertNil(defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot))
+
+        let repairingStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        XCTAssertEqual(repairingStore.load(), result.snapshot)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            result.snapshot
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot)
+                .flatMap(TinyBuddyCombinedSnapshotStore.decode),
+            result.snapshot
+        )
+    }
+
+    func testRepairKeepsTheLastWholeSnapshotBelowTheReservedRevisionFloor() throws {
+        let defaults = makeDefaults()
+        let initialStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(initialStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+        let failingRepairStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { _, _ in false },
+            synchronizeWrites: { defaults.synchronize() }
+        )
+
+        XCTAssertEqual(failingRepairStore.load(), initial)
+
+        let recovered = try XCTUnwrap(TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        ).load())
+        XCTAssertEqual(recovered, initial)
+    }
+
+    func testReadOnlyReaderIgnoresStagedSlotUntilCommitMarkerPublishes() throws {
+        let suiteName = "TinyBuddyWidgetTransactionTests.\(UUID().uuidString)"
+        let writerDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        writerDefaults.removePersistentDomain(forName: suiteName)
+        defer { writerDefaults.removePersistentDomain(forName: suiteName) }
+        let writerStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: writerDefaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(writerStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        let staged = TinyBuddyCombinedSnapshot(
+            revision: 2,
+            dayIdentifier: initial.dayIdentifier,
+            snapshot: TinyBuddySnapshot(
+                status: .focusing,
+                stats: DailyStats(
+                    dayIdentifier: initial.dayIdentifier,
+                    focusCount: 1,
+                    completionCount: 0
+                )
+            ),
+            activitySnapshot: initial.activitySnapshot,
+            activityRevision: initial.activityRevision
+        )
+        writerDefaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeV2(staged),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB
+        )
+        writerDefaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+        writerDefaults.set(2, forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision)
+        writerDefaults.synchronize()
+
+        let readerDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let readerStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: readerDefaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(readerStore.load(), initial)
+
+        writerDefaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+        )
+        writerDefaults.synchronize()
+        readerDefaults.synchronize()
+        XCTAssertEqual(readerStore.load(), staged)
+    }
+
+    func testAppRepairsAValidStagedSlotWhileWidgetKeepsTheLastCommit() throws {
+        let defaults = makeDefaults()
+        let appStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(appStore.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        let staged = makeCombinedSnapshot(
+            revision: 2,
+            focusBlockCount: 5,
+            commitCount: 8,
+            projectName: "Staged"
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeV2(staged),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(widgetStore.load(), initial)
+
+        XCTAssertEqual(appStore.load(), staged)
+        XCTAssertEqual(widgetStore.load(), staged)
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(
+                try XCTUnwrap(defaults.string(
+                    forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+                ))
+            ),
+            2
+        )
+    }
+
+    func testCommittedMarkerAheadOfCorruptSlotRecoversOneWholeBackupPayload() throws {
+        let defaults = makeDefaults()
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(store.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 1,
+                commitCount: 2,
+                recentProjectName: "Committed"
+            )
+        ).snapshot)
+        let corruptNewer = corruptLastCharacter(of: TinyBuddyCombinedSnapshotStore.encodeV2(
+            makeCombinedSnapshot(
+                revision: 2,
+                focusBlockCount: 99,
+                commitCount: 100,
+                projectName: "Corrupt"
+            )
+        ))
+        defaults.set(corruptNewer, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+        )
+
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        let widgetRecovery = try XCTUnwrap(widgetStore.load())
+        XCTAssertEqual(widgetRecovery, initial)
+
+        let appRecovery = try XCTUnwrap(store.load())
+        XCTAssertEqual(appRecovery, widgetRecovery)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            appRecovery
+        )
+    }
+
+    func testLegacyMirrorRecoversAfterReservationAndBothV2SlotsAreCorrupt() throws {
+        let defaults = makeDefaults()
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let initial = try XCTUnwrap(store.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        ).snapshot)
+        let staged = makeCombinedSnapshot(
+            revision: 2,
+            focusBlockCount: 9,
+            commitCount: 11,
+            projectName: "Interrupted"
+        )
+        let corruptStaged = corruptLastCharacter(of: TinyBuddyCombinedSnapshotStore.encodeV2(staged))
+        defaults.set(corruptStaged, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA)
+        defaults.set(corruptStaged, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(2),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+        defaults.set(2, forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision)
+
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(widgetStore.load(), initial)
+
+        let recovered = try XCTUnwrap(store.load())
+        XCTAssertEqual(recovered, initial)
+
+        let changedSnapshot = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 1,
+                completionCount: 0
+            )
+        )
+        let next = store.updatePetSlice(changedSnapshot, fallbackActivitySnapshot: nil)
+        XCTAssertEqual(next.outcome, .saved)
+        XCTAssertEqual(next.snapshot?.revision, 3)
+        XCTAssertEqual(next.snapshot?.snapshot, changedSnapshot)
+    }
+
     func testNegativeActivityRevisionIsRejectedWithoutChangingTrustedSnapshot() {
         let defaults = makeDefaults()
         let store = TinyBuddyCombinedSnapshotStore(userDefaults: defaults, sharedPreferencesProvider: { nil })
@@ -111,6 +1012,43 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(result.snapshot?.activityRevision, 200)
         XCTAssertEqual(result.outcome, .rejectedStaleActivity)
         XCTAssertFalse(result.didPersist)
+    }
+
+    func testActivitySliceRecognizesAnIdenticalTrustedRevisionAsAlreadyCurrent() {
+        let defaults = makeDefaults()
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let petSnapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-01",
+                focusCount: 0,
+                completionCount: 0
+            )
+        )
+        let activity = GitTodayActivitySnapshot(
+            focusBlockCount: 8,
+            commitCount: 13,
+            recentProjectName: "TinyBuddy"
+        )
+        let saved = store.updateActivitySlice(
+            activity,
+            activityRevision: 200,
+            fallbackSnapshot: petSnapshot
+        )
+
+        let alreadyCurrent = store.updateActivitySlice(
+            activity,
+            activityRevision: 200,
+            fallbackSnapshot: petSnapshot
+        )
+
+        XCTAssertEqual(alreadyCurrent.outcome, .alreadyCurrent)
+        XCTAssertFalse(alreadyCurrent.didPersist)
+        XCTAssertEqual(alreadyCurrent.snapshot, saved.snapshot)
+        XCTAssertEqual(store.load(), saved.snapshot)
     }
 
     func testRevisionExhaustionDoesNotOverwriteTrustedSnapshot() {
@@ -307,21 +1245,34 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             recentProjectName: "TinyBuddy"
         )
         let group = DispatchGroup()
+        let resultLock = NSLock()
+        var revisions: [Int64] = []
 
         for _ in 0..<20 {
             group.enter()
             DispatchQueue.global().async {
-                _ = firstStore.updatePetSlice(petSnapshot, fallbackActivitySnapshot: nil)
+                let result = firstStore.updatePetSlice(petSnapshot, fallbackActivitySnapshot: nil)
+                resultLock.lock()
+                if let revision = result.snapshot?.revision, result.didPersist {
+                    revisions.append(revision)
+                }
+                resultLock.unlock()
                 group.leave()
             }
             group.enter()
             DispatchQueue.global().async {
-                _ = secondStore.updateActivitySlice(activitySnapshot, fallbackSnapshot: petSnapshot)
+                let result = secondStore.updateActivitySlice(activitySnapshot, fallbackSnapshot: petSnapshot)
+                resultLock.lock()
+                if let revision = result.snapshot?.revision, result.didPersist {
+                    revisions.append(revision)
+                }
+                resultLock.unlock()
                 group.leave()
             }
         }
 
         XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(revisions.sorted(), Array(1...40).map(Int64.init))
         XCTAssertEqual(firstStore.load()?.snapshot, petSnapshot)
         XCTAssertEqual(firstStore.load()?.activitySnapshot, activitySnapshot)
         XCTAssertEqual(firstStore.load()?.revision, 40)
@@ -733,6 +1684,47 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             completionCountOverride: completionCount,
             statusTitleSource: .gitTodayActivity
         )
+    }
+
+    private func makeCombinedSnapshot(
+        revision: Int64,
+        focusBlockCount: Int,
+        commitCount: Int,
+        projectName: String? = nil
+    ) -> TinyBuddyCombinedSnapshot {
+        TinyBuddyCombinedSnapshot(
+            revision: revision,
+            dayIdentifier: "2026-07-01",
+            snapshot: TinyBuddySnapshot(
+                status: .completedOnce,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-01",
+                    focusCount: 2,
+                    completionCount: 1
+                )
+            ),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: focusBlockCount,
+                commitCount: commitCount,
+                recentProjectName: projectName
+            ),
+            activityRevision: revision * 10
+        )
+    }
+
+    private func decodeV2Slot(
+        _ key: String,
+        defaults: UserDefaults
+    ) throws -> TinyBuddyCombinedSnapshot {
+        let value = try XCTUnwrap(defaults.string(forKey: key))
+        return try XCTUnwrap(TinyBuddyCombinedSnapshotStore.decodeV2(value))
+    }
+
+    private func corruptLastCharacter(of value: String) -> String {
+        guard let lastCharacter = value.last else {
+            return "corrupt"
+        }
+        return String(value.dropLast()) + (lastCharacter == "A" ? "B" : "A")
     }
 
     private func makeDefaults() -> UserDefaults {

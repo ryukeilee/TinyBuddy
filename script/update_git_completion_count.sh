@@ -16,6 +16,11 @@ TRUSTED_SNAPSHOT_KEY="tinybuddy.gitTodayActivity.trustedSnapshot"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
 TODAY="${TINYBUDDY_TODAY:-$(date +%F)}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
+# Signed-runtime dependency boundary: Bash 3.2 plus date, find, stat, mktemp,
+# awk, sed, sort, cmp, cp, mv, rm, mkdir, rmdir, sleep, tr, paste, basename,
+# base64, cksum, defaults, plutil, PlistBuddy, git, and optional perl. The
+# script also requires its inherited temporary directory, authorized scan
+# roots, and the app-group preferences container.
 FIND_BIN="${TINYBUDDY_FIND_BIN:-find}"
 STAT_BIN="${TINYBUDDY_STAT_BIN:-stat}"
 PERL_BIN="${TINYBUDDY_PERL_BIN:-}"
@@ -25,14 +30,40 @@ CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
 EMPTY_CACHE_VALUE="__TINYBUDDY_EMPTY__"
+
+normalize_nonnegative_int64() {
+  local value="$1"
+
+  case "$value" in
+    ""|*[!0-9]*)
+      return 1
+      ;;
+  esac
+
+  while [ "${#value}" -gt 1 ] && [ "${value#0}" != "$value" ]; do
+    value="${value#0}"
+  done
+
+  if [ "${#value}" -gt 19 ] ||
+     { [ "${#value}" -eq 19 ] && [[ "$value" > "9223372036854775807" ]]; }; then
+    return 1
+  fi
+
+  printf '%s\n' "$value"
+}
+
 if [ -n "${TINYBUDDY_REFRESH_REVISION:-}" ]; then
-  REFRESH_REVISION="$TINYBUDDY_REFRESH_REVISION"
+  if ! REFRESH_REVISION="$(normalize_nonnegative_int64 "$TINYBUDDY_REFRESH_REVISION")"; then
+    echo "TinyBuddy refresh script: explicit refresh revision is invalid" >&2
+    exit 64
+  fi
   REFRESH_REVISION_IS_EXPLICIT=1
 else
   REFRESH_REVISION="$(/bin/date +%s)"
   REFRESH_REVISION_IS_EXPLICIT=0
 fi
 SNAPSHOT_WRITE_LOCK="$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-snapshot-write.lock"
+SNAPSHOT_WRITE_LOCK_OWNER="$SNAPSHOT_WRITE_LOCK/owner-$$"
 
 total_count=0
 latest_activity_timestamp=""
@@ -62,6 +93,7 @@ invalid_repository_count=0
 recovery_has_missing_reflog=0
 snapshot_write_lock_acquired=0
 trusted_snapshot_stale=0
+refresh_outcome_override=""
 
 record_invalid_repository() {
   local diagnostic="$1"
@@ -71,9 +103,9 @@ record_invalid_repository() {
   if candidate_fingerprint="$(printf '%s' "$current_repository_candidate" | /usr/bin/cksum)"; then
     candidate_fingerprint="${candidate_fingerprint%% *}"
   else
-    candidate_fingerprint="ordinal"
+    candidate_fingerprint="unavailable"
   fi
-  candidate_id="${current_repository_candidate##*/}-$candidate_fingerprint-$invalid_repository_count"
+  candidate_id="repo-$candidate_fingerprint"
   log_error "invalid repository candidate #$invalid_repository_count candidate=$candidate_id diagnostic=$diagnostic"
 }
 
@@ -83,6 +115,7 @@ log_error() {
 
 cleanup() {
   if [ "$snapshot_write_lock_acquired" -eq 1 ]; then
+    rmdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null || true
     rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
   fi
   rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$find_stderr_file" "$focus_block_list_file"
@@ -95,11 +128,13 @@ emit_runtime_diagnostics_once() {
 
   diagnostics_emitted=1
 
-  local git_path
+  local git_available="no"
+  local home_configured="no"
   local scan_roots_count
-  git_path="$(command -v git 2>/dev/null || true)"
+  command -v git >/dev/null 2>&1 && git_available="yes"
+  [ -n "${HOME:-}" ] && home_configured="yes"
   scan_roots_count="$(awk 'END { print NR + 0 }' "$scan_roots_file")"
-  log_error "diagnostics: script=$0 pwd=$(pwd) home=$HOME user_home=$USER_HOME scan_roots_count=$scan_roots_count path=$PATH git=${git_path:-<missing>} app_group_plist=$APP_GROUP_PREFERENCES_PLIST"
+  log_error "diagnostics: script=${0##*/} paths_redacted=yes home_configured=$home_configured scan_roots_count=$scan_roots_count git_available=$git_available app_group_plist_configured=yes"
 }
 
 emit_find_stderr_sample() {
@@ -107,11 +142,9 @@ emit_find_stderr_sample() {
     return
   fi
 
-  local sample
-  sample="$(sed -n '1,8p' "$find_stderr_file" | tr '\n' '|' | sed 's/|$//')"
-  if [ -n "$sample" ]; then
-    log_error "find stderr sample: $sample"
-  fi
+  local line_count
+  line_count="$(awk 'END { print NR + 0 }' "$find_stderr_file")"
+  log_error "find stderr present: line_count=$line_count contents=redacted"
 }
 
 normalized_scan_root_path() {
@@ -309,8 +342,10 @@ emit_refresh_metrics() {
   local authorized_root_count
   authorized_root_count="$(awk 'END { print NR + 0 }' "$scan_roots_file")"
 
-  local refresh_outcome="success"
-  [ "$invalid_repository_count" -gt 0 ] && refresh_outcome="partial"
+  local refresh_outcome="${refresh_outcome_override:-success}"
+  if [ -z "$refresh_outcome_override" ] && [ "$invalid_repository_count" -gt 0 ]; then
+    refresh_outcome="partial"
+  fi
 
   printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tshared_data_written=%s\n' \
     "$authorized_root_count" \
@@ -831,9 +866,45 @@ write_plist_integer_if_changed() {
 
 acquire_snapshot_write_lock() {
   local attempt=0
+  local owner_name=""
+  local owner_path=""
+  local owner_pid=""
+  local possible_owner=""
 
   while ! mkdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null; do
     attempt=$((attempt + 1))
+    if [ $((attempt % 25)) -eq 0 ]; then
+      owner_path=""
+      for possible_owner in "$SNAPSHOT_WRITE_LOCK"/owner-*; do
+        if [ -d "$possible_owner" ]; then
+          owner_path="$possible_owner"
+          break
+        fi
+      done
+
+      owner_pid=""
+      if [ -n "$owner_path" ]; then
+        owner_name="${owner_path##*/}"
+        owner_pid="${owner_name#owner-}"
+      fi
+
+      case "$owner_pid" in
+        ""|*[!0-9]*)
+          if [ "$attempt" -ge 100 ]; then
+            # An owner-less lock means the previous process died between the
+            # two mkdir calls. rmdir succeeds only while it remains empty, so
+            # it cannot remove a lock whose live owner appeared concurrently.
+            rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
+          fi
+          ;;
+        *)
+          if ! kill -0 "$owner_pid" 2>/dev/null; then
+            rmdir "$owner_path" 2>/dev/null || true
+            rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    fi
     if [ "$attempt" -ge 200 ]; then
       log_error "timed out waiting for shared snapshot write lock"
       return 1
@@ -841,6 +912,10 @@ acquire_snapshot_write_lock() {
     sleep 0.01
   done
 
+  if ! mkdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null; then
+    rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
+    return 1
+  fi
   snapshot_write_lock_acquired=1
 }
 
@@ -848,6 +923,7 @@ write_trusted_snapshot_if_newer() {
   local encoded_project_name
   local current_snapshot=""
   local current_revision=""
+  local normalized_current_revision=""
   local current_payload=""
   local proposed_payload
 
@@ -860,19 +936,29 @@ write_trusted_snapshot_if_newer() {
       current_payload="${current_snapshot#*$'\t'}"
     fi
 
-    if [ "$current_payload" = "$proposed_payload" ]; then
+    normalized_current_revision="$(normalize_nonnegative_int64 "$current_revision" || true)"
+
+    if [ -n "$normalized_current_revision" ] &&
+       [ "$current_payload" = "$proposed_payload" ]; then
       return
     fi
 
-    if [[ "$current_revision" =~ ^[0-9]+$ ]] &&
-       [ "$current_revision" -ge "$REFRESH_REVISION" ]; then
+    if [ -n "$normalized_current_revision" ] &&
+       [ "$normalized_current_revision" -ge "$REFRESH_REVISION" ]; then
       if [ "$REFRESH_REVISION_IS_EXPLICIT" -eq 1 ]; then
         trusted_snapshot_stale=1
+        refresh_outcome_override="skipped"
         echo "TinyBuddy git shared snapshot is newer; skipped stale write"
         return
       fi
 
-      REFRESH_REVISION=$((current_revision + 1))
+      if [ "$normalized_current_revision" = "9223372036854775807" ]; then
+        trusted_snapshot_stale=1
+        log_error "trusted snapshot revision is exhausted; preserving previous shared data"
+        return 75
+      fi
+
+      REFRESH_REVISION=$((10#$normalized_current_revision + 1))
     fi
   fi
 
@@ -883,6 +969,9 @@ write_trusted_snapshot_if_newer() {
 handle_error() {
   local exit_code="$1"
   local line_number="$2"
+  trap - ERR
+  refresh_outcome_override="failed"
+  emit_refresh_metrics || true
   log_error "failed with exit code $exit_code at line $line_number"
   exit "$exit_code"
 }
@@ -895,7 +984,9 @@ trap cleanup EXIT
 enable_error_trap
 
 if ! command -v git >/dev/null 2>&1; then
-  log_error "git executable not found in PATH=$PATH"
+  log_error "git executable not found in configured command search path"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
   exit 127
 fi
 
@@ -927,6 +1018,7 @@ mv "$valid_scan_roots_file" "$scan_roots_file"
 
 if [ ! -s "$scan_roots_file" ]; then
   log_error "no authorized git scan roots supplied; skipping refresh"
+  refresh_outcome_override="skipped"
   emit_refresh_metrics
   exit 0
 fi
@@ -947,11 +1039,13 @@ else
   refresh_repository_list_from_scan
   if [ "$repository_scan_failed" -eq 1 ]; then
     log_error "repository scan failed; preserving previous shared data"
+    refresh_outcome_override="failed"
     emit_refresh_metrics
     exit 1
   fi
   if [ "$had_cached_repository_list" -eq 1 ] && [ ! -s "$repo_list_file" ]; then
     log_error "repository rescan found no repositories; preserving previous shared data"
+    refresh_outcome_override="failed"
     emit_refresh_metrics
     exit 1
   fi
@@ -962,6 +1056,7 @@ process_repository_list "$using_cached_repo_list" || process_result="$?"
 if [ "${process_result:-0}" -ne 0 ]; then
   if [ "$process_result" -ne 2 ]; then
     emit_runtime_diagnostics_once
+    refresh_outcome_override="failed"
     emit_refresh_metrics
     exit 1
   fi
@@ -973,7 +1068,6 @@ if [ "${process_result:-0}" -ne 0 ]; then
     process_repository_list 0 || recovery_process_result="$?"
     if [ "$recovery_process_result" -eq 0 ] &&
        [ "$failed_reflog_repo_count" -eq 0 ] &&
-       [ "$invalid_repository_count" -eq 0 ] &&
        [ -s "$validated_repo_list_file" ]; then
       recovered_repository_list=1
       cache_was_reused=0
@@ -983,6 +1077,7 @@ if [ "${process_result:-0}" -ne 0 ]; then
     emit_runtime_diagnostics_once
     log_error "cached repository paths are temporarily unavailable; preserving previous shared data"
     emit_find_stderr_sample
+    refresh_outcome_override="failed"
     emit_refresh_metrics
     exit 1
   fi
@@ -991,6 +1086,7 @@ fi
 if [ "$invalid_repository_count" -gt 0 ] && [ "$successful_reflog_repo_count" -eq 0 ]; then
   emit_runtime_diagnostics_once
   log_error "all discovered repositories are invalid or unreadable; preserving previous shared data"
+  refresh_outcome_override="failed"
   emit_refresh_metrics
   exit 1
 fi
@@ -1006,6 +1102,7 @@ fi
 if [ "$readable_reflog_repo_count" -gt 0 ] && [ "$successful_reflog_repo_count" -eq 0 ]; then
   emit_runtime_diagnostics_once
   log_error "failed to read git reflog for every readable repository; preserving previous shared data"
+  refresh_outcome_override="failed"
   emit_refresh_metrics
   exit 1
 fi
@@ -1013,6 +1110,7 @@ fi
 if [ "$failed_reflog_repo_count" -gt 0 ]; then
   emit_runtime_diagnostics_once
   log_error "failed to parse one or more readable git reflogs; preserving previous shared data"
+  refresh_outcome_override="failed"
   emit_refresh_metrics
   exit 1
 fi

@@ -485,10 +485,6 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    defer {
-                        self.finishRefresh(succeeded: true)
-                    }
-
                     let refreshResult = self.activityStore.makeRefreshResult(
                         previousSnapshot: previousSnapshot,
                         currentSnapshot: currentSnapshot
@@ -498,6 +494,44 @@ final class GitActivityRefreshCoordinator {
                         activityRevision: currentActivityRead.trustedRevision,
                         fallbackSnapshot: self.dailyStatsStore.loadSnapshot()
                     )
+                    let didReachCommittedCheckpoint: Bool
+                    switch combinedUpdate.outcome {
+                    case .saved:
+                        didReachCommittedCheckpoint = combinedUpdate.didPersist
+                    case .alreadyCurrent:
+                        didReachCommittedCheckpoint = true
+                    case .rejectedStaleActivity,
+                         .rejectedInvalidActivityRevision,
+                         .revisionExhausted,
+                         .persistenceFailed:
+                        didReachCommittedCheckpoint = false
+                    }
+
+                    guard didReachCommittedCheckpoint else {
+                        let diagnostic = GitActivityRefreshDiagnostic(
+                            source: .gitActivityRefresh,
+                            stage: .combinedSnapshotCommit,
+                            reason: .combinedSnapshotCommitFailed
+                        )
+                        self.lastRefreshFailureAt = now
+                        self.recordRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: .failed,
+                            diagnostic: diagnostic,
+                            metrics: self.makeMetrics(
+                                startedAt: now,
+                                finishedAt: self.dateProvider(),
+                                authorizedRootCount: authorizedRootURLs.count,
+                                scriptMetrics: scriptResult.metrics,
+                                widgetReloaded: false,
+                                diagnostic: diagnostic
+                            )
+                        )
+                        self.finishRefresh(succeeded: false)
+                        return
+                    }
+
                     if combinedUpdate.didPersist {
                         self.mirrorActivitySnapshotToStandardDefaults(
                             currentSnapshot,
@@ -534,6 +568,7 @@ final class GitActivityRefreshCoordinator {
                         )
                     )
                     self.lastRefreshFailureAt = nil
+                    self.finishRefresh(succeeded: true)
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in

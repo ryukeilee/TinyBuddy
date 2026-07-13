@@ -42,6 +42,149 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(metrics["shared_data_written"], "0")
     }
 
+    func testScriptRecoversStaleCacheWithValidAndInvalidRepositoriesAsPartialSuccess() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: current")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+
+        _ = try harness.makeRepositoryWithExternalGitDir(
+            named: "BrokenWorktree",
+            commonDirRelativePath: "../missing-common-dir"
+        )
+        try "\(repoURL.path)\n\(harness.scanRootURL.appendingPathComponent("StaleWorktree").path)\n"
+            .write(to: harness.repositoryCacheFileURL, atomically: true, encoding: .utf8)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["invalid_repository_count"], "1")
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+        XCTAssertTrue(result.standardError.contains("partial refresh"))
+    }
+
+    func testScriptRejectsAnInvalidExplicitRevisionBeforeWritingSharedData() throws {
+        let harness = try ScriptHarness()
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "9223372036854775808"]
+        )
+
+        XCTAssertEqual(result.exitCode, 64)
+        XCTAssertTrue(result.standardError.contains("explicit refresh revision is invalid"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.plistURL.path))
+    }
+
+    func testScriptReportsSkippedMetricsWhenNoAuthorizedRootsAreSupplied() throws {
+        let harness = try ScriptHarness()
+
+        let result = try harness.run(scanRoots: [])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(metrics["refresh_outcome"], "skipped")
+        XCTAssertEqual(metrics["authorized_root_count"], "0")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.plistURL.path))
+    }
+
+    func testScriptRecoversSnapshotWriteLocksLeftByTerminatedProcesses() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")]
+        )
+
+        try harness.fileManager.createDirectory(
+            at: harness.snapshotWriteLockURL,
+            withIntermediateDirectories: false
+        )
+        let ownerlessResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "100"]
+        )
+
+        XCTAssertEqual(ownerlessResult.exitCode, 0, ownerlessResult.standardError)
+        XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.snapshotWriteLockURL.path))
+
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "commit: second")
+            ]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: Date().addingTimeInterval(2))
+        try harness.fileManager.createDirectory(
+            at: harness.snapshotWriteLockURL.appendingPathComponent("owner-99999999", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        let terminatedOwnerResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "101"]
+        )
+        let snapshotValue = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let snapshot = try XCTUnwrap(GitTodayActivityTrustedSnapshotStore.decode(snapshotValue))
+
+        XCTAssertEqual(terminatedOwnerResult.exitCode, 0, terminatedOwnerResult.standardError)
+        XCTAssertEqual(snapshot.revision, 101)
+        XCTAssertEqual(snapshot.activity.commitCount, 2)
+        XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.snapshotWriteLockURL.path))
+    }
+
+    func testScriptFailsWithoutChangingSharedDataWhenAutomaticRevisionIsExhausted() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")]
+        )
+        let initialResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "9223372036854775807"]
+        )
+        XCTAssertEqual(initialResult.exitCode, 0, initialResult.standardError)
+        let initialPlist = try harness.readPreferencesPlist()
+        let initialSnapshot = try XCTUnwrap(
+            initialPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "commit: second")
+            ]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: Date().addingTimeInterval(2))
+
+        let exhaustedResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let finalPlist = try harness.readPreferencesPlist()
+        let exhaustedMetrics = try XCTUnwrap(harness.metrics(from: exhaustedResult.standardOutput))
+
+        XCTAssertEqual(exhaustedResult.exitCode, 75)
+        XCTAssertEqual(exhaustedMetrics["refresh_outcome"], "failed")
+        XCTAssertTrue(exhaustedResult.standardError.contains("trusted snapshot revision is exhausted"))
+        XCTAssertEqual(
+            finalPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
+            initialSnapshot
+        )
+        XCTAssertEqual(finalPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(finalPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.snapshotWriteLockURL.path))
+    }
+
     func testScriptPublishesOneAtomicSnapshotAndRejectsNonNewerRefreshResults() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -79,11 +222,15 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "300"]
         )
         let sameRevisionPlist = try harness.readPreferencesPlist()
+        let sameRevisionMetrics = try XCTUnwrap(
+            harness.metrics(from: sameRevisionResult.standardOutput)
+        )
         let sameRevisionEncoded = try XCTUnwrap(
             sameRevisionPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
         )
 
         XCTAssertEqual(sameRevisionResult.exitCode, 0)
+        XCTAssertEqual(sameRevisionMetrics["refresh_outcome"], "skipped")
         XCTAssertTrue(sameRevisionResult.standardOutput.contains("skipped stale write"))
         XCTAssertEqual(sameRevisionEncoded, newerEncoded)
         XCTAssertEqual(sameRevisionPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
@@ -94,13 +241,56 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "200"]
         )
         let finalPlist = try harness.readPreferencesPlist()
+        let olderMetrics = try XCTUnwrap(harness.metrics(from: olderResult.standardOutput))
 
         XCTAssertEqual(olderResult.exitCode, 0)
+        XCTAssertEqual(olderMetrics["refresh_outcome"], "skipped")
         XCTAssertTrue(olderResult.standardOutput.contains("skipped stale write"))
         XCTAssertEqual(
             finalPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
             newerEncoded
         )
+    }
+
+    func testScriptRepairsAnInvalidTrustedRevisionEvenWhenPayloadIsUnchanged() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: current")]
+        )
+        XCTAssertEqual(try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "300"]
+        ).exitCode, 0)
+
+        var plist = try harness.readPreferencesPlist()
+        let snapshot = try XCTUnwrap(
+            plist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let snapshotFields = snapshot.split(
+            separator: "\t",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        XCTAssertEqual(snapshotFields.count, 2)
+        let payload = String(snapshotFields[1])
+        plist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] = "invalid\t\(payload)"
+        try harness.seedPreferencesPlist(plist)
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": "301"]
+        )
+        let repairedValue = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let repaired = try XCTUnwrap(GitTodayActivityTrustedSnapshotStore.decode(repairedValue))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(repaired.revision, 301)
+        XCTAssertEqual(repaired.activity.commitCount, 1)
+        XCTAssertEqual(repaired.activity.focusBlockCount, 1)
     }
 
     func testScriptParsesTodayActivityFromRawHeadReflog() throws {
@@ -484,8 +674,10 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
         ])
         let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
 
         XCTAssertEqual(result.exitCode, 1)
+        XCTAssertEqual(metrics["refresh_outcome"], "failed")
         XCTAssertTrue(result.standardError.contains("preserving previous shared data"))
         XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
@@ -494,7 +686,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
 
     }
 
-    func testScriptRebuildsBadCachedRepositoryListThenRecoversOnNextInvocation() throws {
+    func testScriptPartiallyRebuildsBadCachedRepositoryListThenRecoversOnNextInvocation() throws {
         let harness = try ScriptHarness()
         let alphaURL = try harness.makeRepository(named: "ProjectAlpha")
         let betaURL = try harness.makeRepository(named: "ProjectBeta")
@@ -510,13 +702,18 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         _ = try harness.run(scanRoots: [harness.scanRootURL])
         try FileManager.default.removeItem(at: alphaURL.appendingPathComponent(".git/logs/HEAD"))
 
-        let failedResult = try harness.run(scanRoots: [harness.scanRootURL])
-        let preservedPlist = try harness.readPreferencesPlist()
+        let partialResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let partialPlist = try harness.readPreferencesPlist()
+        let partialMetrics = try XCTUnwrap(harness.metrics(from: partialResult.standardOutput))
 
-        XCTAssertEqual(failedResult.exitCode, 1)
-        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
-        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
-        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+        XCTAssertEqual(partialResult.exitCode, 0, partialResult.standardError)
+        XCTAssertTrue(partialResult.standardError.contains("partial refresh"))
+        XCTAssertEqual(partialMetrics["refresh_outcome"], "partial")
+        XCTAssertEqual(partialMetrics["repository_count"], "2")
+        XCTAssertEqual(partialMetrics["invalid_repository_count"], "1")
+        XCTAssertEqual(partialPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(partialPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(partialPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
 
         try harness.writeHeadReflog(
             for: alphaURL,
@@ -808,15 +1005,26 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         )
 
         let result = try harness.run(scanRoots: [harness.scanRootURL])
-        let diagnostics = result.standardError
-            .split(separator: "\n")
-            .filter { $0.contains("invalid repository candidate") }
-            .map(String.init)
+        let repeatedResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let candidateIDs: (String) -> [String] = { standardError in
+            standardError
+                .split(separator: "\n")
+                .filter { $0.contains("invalid repository candidate") }
+                .compactMap { line in
+                    line.split(separator: " ")
+                        .first { $0.hasPrefix("candidate=") }
+                        .map { String($0.dropFirst("candidate=".count)) }
+                }
+        }
+        let identifiers = candidateIDs(result.standardError)
+        let repeatedIdentifiers = candidateIDs(repeatedResult.standardError)
 
-        XCTAssertEqual(diagnostics.count, 2)
-        XCTAssertNotEqual(diagnostics[0], diagnostics[1])
-        XCTAssertTrue(diagnostics.contains { $0.contains("candidate=BrokenWorktreeA-") })
-        XCTAssertTrue(diagnostics.contains { $0.contains("candidate=BrokenWorktreeB-") })
+        XCTAssertEqual(identifiers.count, 2)
+        XCTAssertEqual(Set(identifiers).count, 2)
+        XCTAssertEqual(Set(repeatedIdentifiers), Set(identifiers))
+        XCTAssertTrue(identifiers.allSatisfy { $0.hasPrefix("repo-") })
+        XCTAssertFalse(result.standardError.contains("BrokenWorktreeA"))
+        XCTAssertFalse(result.standardError.contains("BrokenWorktreeB"))
         XCTAssertFalse(result.standardError.contains(harness.scanRootURL.path))
     }
 
@@ -887,6 +1095,10 @@ private struct ScriptHarness {
 
     var repositoryStatsCacheFileURL: URL {
         cacheDirectoryURL.appendingPathComponent("repository-stats.tsv")
+    }
+
+    var snapshotWriteLockURL: URL {
+        rootURL.appendingPathComponent(".tinybuddy-git-snapshot-write.lock", isDirectory: true)
     }
 
     func makeRepository(named name: String) throws -> URL {

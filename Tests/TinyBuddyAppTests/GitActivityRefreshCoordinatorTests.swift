@@ -317,6 +317,45 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
+    func testRefreshFailsWhenUnifiedSnapshotRevisionCannotAdvance() {
+        let harness = makeHarness()
+        let committedActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 1,
+            commitCount: 2,
+            recentProjectName: "Committed"
+        )
+        _ = harness.seedCombinedSnapshot(activity: committedActivity)
+        harness.exhaustCombinedSnapshotRevision()
+        harness.setScriptRunnerHook { _ in
+            harness.setActivitySnapshot(
+                focusBlockCount: 4,
+                commitCount: 7,
+                recentProjectName: "Uncommitted"
+            )
+        }
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot, committedActivity)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.diagnostic,
+            GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .combinedSnapshotCommit,
+                reason: .combinedSnapshotCommitFailed
+            )
+        )
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.metrics?.reason,
+            "gitActivityRefresh.combinedSnapshotCommit.combinedSnapshotCommitFailed"
+        )
+    }
+
     func testSuccessfulActivityCommitPostsCommittedSnapshotNotificationAfterPersistence() {
         let harness = makeHarness()
         harness.setScriptRunnerHook { _ in
@@ -1425,6 +1464,18 @@ private final class RefreshHarness {
             activityRevision: revision,
             fallbackSnapshot: dailyStatsStore.loadSnapshot()
         ).snapshot!
+    }
+
+    func exhaustCombinedSnapshotRevision() {
+        activityDefaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(Int64.max),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2
+        )
+        activityDefaults.set(
+            Int64.max,
+            forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision
+        )
+        activityDefaults.synchronize()
     }
 
     func setActivitySnapshot(

@@ -2,6 +2,26 @@ import Foundation
 import XCTest
 
 final class BuildAndRunScriptTests: XCTestCase {
+    func testAppConfigurationProhibitsConcurrentSemanticWriters() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let infoPlistData = try Data(contentsOf: repositoryURL
+            .appendingPathComponent("Resources/TinyBuddyApp/Info.plist"))
+        let infoPlist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: infoPlistData, format: nil)
+                as? [String: Any]
+        )
+        let project = try String(
+            contentsOf: repositoryURL.appendingPathComponent("project.yml"),
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(infoPlist["LSMultipleInstancesProhibited"] as? Bool, true)
+        XCTAssertTrue(project.contains("LSMultipleInstancesProhibited: true"))
+    }
+
     func testOptionalGitPreRefreshWarnsAndReturnsSuccessWhenRefreshFails() throws {
         let script = try buildAndRunScript()
         let function = try XCTUnwrap(

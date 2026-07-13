@@ -16,6 +16,7 @@ public enum GitActivityRefreshDiagnosticStage: String, Equatable, Sendable {
     case authorizationResolution
     case scriptExecution
     case activitySnapshotLoad
+    case combinedSnapshotCommit
 }
 
 public enum GitActivityRefreshDiagnosticReason: String, Equatable, Sendable {
@@ -25,6 +26,7 @@ public enum GitActivityRefreshDiagnosticReason: String, Equatable, Sendable {
     case scriptExecutionFailed
     case refreshedActivityUnavailable
     case partialRecovery
+    case combinedSnapshotCommitFailed
 }
 
 public struct GitActivityRefreshDiagnostic: Equatable, Sendable {
@@ -87,6 +89,15 @@ public struct GitActivityRefreshDiagnostic: Equatable, Sendable {
                 source: .gitActivityRefresh,
                 stage: .activitySnapshotLoad,
                 reason: .refreshedActivityUnavailable
+            )
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.combinedsnapshotcommit.combinedsnapshotcommitfailed")
+            || normalizedReason.contains("combined snapshot commit failed") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .combinedSnapshotCommit,
+                reason: .combinedSnapshotCommitFailed
             )
         }
 

@@ -6,6 +6,67 @@ import XCTest
 
 @MainActor
 final class PetViewModelTests: XCTestCase {
+    func testInitKeepsHUDOnPersistedCombinedSnapshotWhenRevisionCannotAdvance() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let petSnapshot = store.loadSnapshot()
+        let persisted = TinyBuddyCombinedSnapshot(
+            revision: Int64.max,
+            dayIdentifier: petSnapshot.stats.dayIdentifier,
+            snapshot: petSnapshot,
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 1,
+                commitCount: 2,
+                recentProjectName: "Persisted"
+            ),
+            activityRevision: 100
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encode(persisted),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+        defaults.set(Int64.max, forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision)
+
+        GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(9)
+        GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(11)
+        GitTodayRecentProjectStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayProjectName("Uncommitted")
+
+        let combinedStore = store.makeCombinedSnapshotStore()
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · Persisted")
+        XCTAssertEqual(combinedStore.load(), persisted)
+    }
+
     func testInitLoadsHUDPresentationFromSharedGitActivityStores() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
@@ -36,11 +97,13 @@ final class PetViewModelTests: XCTestCase {
             sharedFallbacksEnabled: false
         ).saveTodayProjectName("TinyBuddy")
 
+        var widgetReloadCount = 0
         let viewModel = PetViewModel(
             store: store,
             activityStore: activityStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            widgetReloader: { widgetReloadCount += 1 }
         )
         let expectedPresentation = TinyBuddyWidgetPresentation(
             snapshot: store.loadSnapshot(),
@@ -57,6 +120,7 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
         XCTAssertEqual(viewModel.displayState, .active)
         XCTAssertNil(viewModel.displayState.selectedStatus)
+        XCTAssertEqual(widgetReloadCount, 1)
     }
 
     func testLoadsRefreshDiagnosticsFromStoreOnInit() {
@@ -137,7 +201,11 @@ final class PetViewModelTests: XCTestCase {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
         let today = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 0, second: 0)
-        let refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
         let notificationCenter = NotificationCenter()
         let store = DailyStatsStore(
             userDefaults: defaults,
@@ -157,6 +225,7 @@ final class PetViewModelTests: XCTestCase {
             GitTodayActivitySnapshot(focusBlockCount: 3, commitCount: 1, recentProjectName: "Project B"),
             fallbackSnapshot: store.loadSnapshot()
         )
+        let committedRevision = combinedSnapshotStore.load()?.revision
         let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 11, second: 12)
         let updatedStatus = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
@@ -188,6 +257,7 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.hudPresentation.statusTitle, "活跃")
         XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · Project B")
         XCTAssertEqual(viewModel.displayState, .active)
+        XCTAssertEqual(combinedSnapshotStore.load()?.revision, committedRevision)
     }
 
     func testCommittedActivityNotificationPublishesCompleteHUDImmediately() async {
@@ -209,6 +279,7 @@ final class PetViewModelTests: XCTestCase {
             GitTodayActivitySnapshot(focusBlockCount: 5, commitCount: 8, recentProjectName: "TinyBuddy"),
             fallbackSnapshot: store.loadSnapshot()
         )
+        let committedRevision = combinedSnapshotStore.load()?.revision
 
         notificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
 
@@ -226,6 +297,171 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 5)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 8)
         XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(combinedSnapshotStore.load()?.revision, committedRevision)
+    }
+
+    func testFailedRefreshStatusDoesNotRepublishUncommittedActivity() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let focusStore = GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        )
+        let commitStore = GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        )
+        focusStore.saveTodayCount(1)
+        commitStore.saveTodayCount(2)
+        let combinedSnapshotStore = store.makeCombinedSnapshotStore()
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: refreshStatusStore,
+            notificationCenter: notificationCenter,
+            widgetReloader: {}
+        )
+        let committedRevision = combinedSnapshotStore.load()?.revision
+
+        focusStore.saveTodayCount(9)
+        commitStore.saveTodayCount(11)
+        let failedStatus = GitActivityRefreshStatus(
+            refreshedAt: today,
+            trigger: .timer,
+            outcome: .failed,
+            diagnostic: GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .combinedSnapshotCommit,
+                reason: .combinedSnapshotCommitFailed
+            )
+        )
+        refreshStatusStore.save(failedStatus)
+        notificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: failedStatus)
+
+        let expectation = expectation(description: "failed status applied without republishing")
+        Task { @MainActor in
+            while viewModel.refreshDiagnostics.outcome != .failed {
+                await Task.yield()
+            }
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 1.0)
+
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
+        XCTAssertEqual(combinedSnapshotStore.load()?.revision, committedRevision)
+
+        viewModel.select(.focusing)
+        let selectedSnapshot = combinedSnapshotStore.loadReadOnly()
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
+        XCTAssertEqual(selectedSnapshot?.activitySnapshot.focusBlockCount, 1)
+        XCTAssertEqual(selectedSnapshot?.activitySnapshot.commitCount, 2)
+        XCTAssertEqual(selectedSnapshot?.snapshot.status, .focusing)
+
+        store.saveStatus(.completedOnce)
+        notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        let restorationExpectation = self.expectation(
+            description: "foreground restoration preserves committed activity"
+        )
+        Task { @MainActor in
+            while viewModel.selectedStatus != .completedOnce {
+                await Task.yield()
+            }
+            restorationExpectation.fulfill()
+        }
+        await fulfillment(of: [restorationExpectation], timeout: 1.0)
+
+        let restoredSnapshot = combinedSnapshotStore.loadReadOnly()
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
+        XCTAssertEqual(restoredSnapshot?.activitySnapshot.focusBlockCount, 1)
+        XCTAssertEqual(restoredSnapshot?.activitySnapshot.commitCount, 2)
+        XCTAssertEqual(restoredSnapshot?.snapshot.status, .completedOnce)
+    }
+
+    func testFailedFirstCombinedCommitDoesNotExposeTrustedActivityToHUD() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(9)
+        GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(11)
+        let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { _, _ in false },
+            synchronizeWrites: { defaults.synchronize() }
+        )
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter
+        )
+
+        XCTAssertNil(combinedSnapshotStore.loadReadOnly())
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 0)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 0)
+
+        notificationCenter.post(
+            name: .gitActivityRefreshStatusDidChange,
+            object: GitActivityRefreshStatus(
+                refreshedAt: today,
+                trigger: .timer,
+                outcome: .failed,
+                diagnostic: GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .combinedSnapshotCommit,
+                    reason: .combinedSnapshotCommitFailed
+                )
+            )
+        )
+        let expectation = expectation(description: "failed status remains on committed-only HUD state")
+        Task { @MainActor in
+            while viewModel.refreshDiagnostics.outcome != .failed {
+                await Task.yield()
+            }
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 1.0)
+
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 0)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 0)
+        XCTAssertNil(combinedSnapshotStore.loadReadOnly())
     }
 
     func testRefreshDiagnosticsMapsUnauthorizedRootsReasonToChinese() {
