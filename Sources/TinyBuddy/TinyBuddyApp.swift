@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        HUDWindowPositionController.shared.start()
         if authorizationRequestObserver == nil {
             authorizationRequestObserver = notificationCenter.addObserver(
                 forName: .gitScanRootAuthorizationRequested,
@@ -51,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.authorizationRequestObserver = nil
         }
         gitActivityRefreshCoordinator.stop()
+        HUDWindowPositionController.shared.stop()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -68,9 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
         gitActivityRefreshCoordinator.handleReopen()
-        if flag == false {
-            restoreHUDWindow(from: sender)
-        }
+        restoreHUDWindow(from: sender, shouldPresent: flag == false)
         return true
     }
 
@@ -80,13 +80,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restoreHUDWindow(from: NSApp)
     }
 
-    private func restoreHUDWindow(from application: NSApplication) {
+    private func restoreHUDWindow(from application: NSApplication, shouldPresent: Bool = true) {
         guard let window = application.windows.first(where: { $0.canBecomeKey && $0.contentViewController != nil }) else {
             return
         }
 
-        if window.isMiniaturized {
+        if shouldPresent, window.isMiniaturized {
             window.deminiaturize(nil)
+        }
+
+        HUDWindowPositionController.shared.prepare(window: window)
+        guard shouldPresent else {
+            return
         }
 
         application.activate(ignoringOtherApps: true)
@@ -135,5 +140,6 @@ struct WindowConfigurator: NSViewRepresentable {
         window.minSize = targetSize
         window.maxSize = targetSize
         window.standardWindowButton(.zoomButton)?.isHidden = true
+        HUDWindowPositionController.shared.attach(to: window)
     }
 }

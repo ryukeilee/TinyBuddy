@@ -22,6 +22,7 @@
 		6D84274CB66105DB30A81C86 /* GitTodayCommitCountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59CA13CBCA24B5398437BA44 /* GitTodayCommitCountStore.swift */; };
 		7234061598DF198403D751B3 /* PetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */; };
 		770F76C21A74AC083D2B392A /* TinyBuddyWidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */; };
+		7A711448682D280C4087C212 /* HUDWindowPositionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */; };
 		8AC0469D9BB8F7ED958A9C02 /* DailyStatsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */; };
 		8F69DDB084E9DC2E6A897045 /* TinyBuddyWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */; };
 		97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */; };
@@ -101,6 +102,7 @@
 		C509A181592B4E3F45448EBE /* PetViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetViewModel.swift; sourceTree = "<group>"; };
 		C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStats.swift; sourceTree = "<group>"; };
 		CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayRecentProjectStore.swift; sourceTree = "<group>"; };
+		CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDWindowPositionController.swift; sourceTree = "<group>"; };
 		D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		E8F8EEF00869149828C56CC9 /* update_git_completion_count.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = update_git_completion_count.sh; sourceTree = "<group>"; };
 		F621E187E17E0739A05B14B2 /* TinyBuddyArcReactorCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyArcReactorCore.swift; sourceTree = "<group>"; };
@@ -238,6 +240,7 @@
 			children = (
 				FEA309302E10538A5325BABB /* GitActivityRefreshCoordinator.swift */,
 				2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */,
+				CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */,
 				7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */,
 				C509A181592B4E3F45448EBE /* PetViewModel.swift */,
 				017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */,
@@ -435,6 +438,7 @@
 			files = (
 				5B71B2D72982DC8F5D4300D3 /* GitActivityRefreshCoordinator.swift in Sources */,
 				F6D2B174FF12EA89BA853BFD /* GitScanRootAuthorizationStore.swift in Sources */,
+				7A711448682D280C4087C212 /* HUDWindowPositionController.swift in Sources */,
 				7234061598DF198403D751B3 /* PetView.swift in Sources */,
 				0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */,
 				97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */,
