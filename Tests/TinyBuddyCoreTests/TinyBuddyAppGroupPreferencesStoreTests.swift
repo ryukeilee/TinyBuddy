@@ -1,0 +1,165 @@
+import XCTest
+@testable import TinyBuddyCore
+
+final class TinyBuddyAppGroupPreferencesStoreTests: XCTestCase {
+    func testAdapterUsesCurrentUserAnyHostSuiteDomainForEveryOperation() {
+        var observedDomains: [TinyBuddyAppGroupPreferencesStore.Domain] = []
+        let store = TinyBuddyAppGroupPreferencesStore(
+            applicationIdentifier: "group.example.TinyBuddy",
+            loadValues: { domain, _ in
+                observedDomains.append(domain)
+                return [:]
+            },
+            setValue: { domain, _, _ in
+                observedDomains.append(domain)
+            },
+            synchronize: { domain in
+                observedDomains.append(domain)
+                return true
+            }
+        )
+
+        _ = store.loadDictionary()
+        XCTAssertTrue(store.writeValue("value", forKey: "key"))
+        XCTAssertTrue(store.synchronize())
+
+        let expectedDomain = TinyBuddyAppGroupPreferencesStore.Domain(
+            applicationIdentifier: "group.example.TinyBuddy",
+            userScope: .currentUser,
+            hostScope: .anyHost
+        )
+        XCTAssertEqual(store.domain, expectedDomain)
+        XCTAssertEqual(observedDomains, [expectedDomain, expectedDomain, expectedDomain])
+    }
+
+    func testExactDomainPublishesTodaySnapshotAfterYesterdayLegacyState() throws {
+        let preferences = PreferencesValues()
+        let yesterday = TinyBuddyCombinedSnapshot(
+            revision: 86,
+            dayIdentifier: "2026-07-13",
+            snapshot: TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-13",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 1,
+                commitCount: 2,
+                recentProjectName: "Yesterday"
+            ),
+            activityRevision: 1_783_887_950
+        )
+        preferences.values[TinyBuddyCombinedSnapshotStore.Key.snapshot] = TinyBuddyCombinedSnapshotStore.encode(yesterday)
+        preferences.values[TinyBuddyCombinedSnapshotStore.Key.highestRevision] = yesterday.revision
+        let preferencesStore = makePreferencesStore(values: preferences)
+        let appStore = TinyBuddyCombinedSnapshotStore(
+            preferencesStore: preferencesStore,
+            sharedPreferencesProvider: { nil }
+        )
+        let todaySnapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(
+                dayIdentifier: "2026-07-14",
+                focusCount: 0,
+                completionCount: 0
+            )
+        )
+        let todayActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 5,
+            commitCount: 8,
+            recentProjectName: "DevPulse"
+        )
+
+        let update = appStore.updateActivitySlice(
+            todayActivity,
+            activityRevision: 1_784_015_234,
+            fallbackSnapshot: todaySnapshot
+        )
+
+        XCTAssertEqual(update.outcome, .saved)
+        XCTAssertTrue(update.didPersist)
+        let committed = try XCTUnwrap(update.snapshot)
+        XCTAssertEqual(committed.revision, 87)
+        XCTAssertEqual(committed.dayIdentifier, "2026-07-14")
+        XCTAssertEqual(committed.activitySnapshot, todayActivity)
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(
+                try XCTUnwrap(preferences.values[TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2] as? String)
+            ),
+            committed.revision
+        )
+
+        let widgetStore = TinyBuddyCombinedSnapshotStore(
+            preferencesStore: preferencesStore,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false
+        )
+        XCTAssertEqual(widgetStore.loadReadOnly(), committed)
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decode(
+                try XCTUnwrap(preferences.values[TinyBuddyCombinedSnapshotStore.Key.snapshot] as? String)
+            ),
+            committed
+        )
+    }
+
+    func testSetWithoutExactDomainReadbackFailsClosed() {
+        let preferencesStore = TinyBuddyAppGroupPreferencesStore(
+            applicationIdentifier: "group.example.TinyBuddy",
+            loadValues: { _, _ in [:] },
+            setValue: { _, _, _ in },
+            synchronize: { _ in true }
+        )
+        let store = TinyBuddyCombinedSnapshotStore(
+            preferencesStore: preferencesStore,
+            sharedPreferencesProvider: { nil }
+        )
+
+        let update = store.updateActivitySlice(
+            GitTodayActivitySnapshot(
+                focusBlockCount: 5,
+                commitCount: 8,
+                recentProjectName: "DevPulse"
+            ),
+            activityRevision: 1_784_015_234,
+            fallbackSnapshot: TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-14",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            )
+        )
+
+        XCTAssertEqual(update.outcome, .persistenceFailed)
+        XCTAssertFalse(update.didPersist)
+        XCTAssertNil(update.snapshot)
+    }
+
+    private func makePreferencesStore(
+        values: PreferencesValues
+    ) -> TinyBuddyAppGroupPreferencesStore {
+        TinyBuddyAppGroupPreferencesStore(
+            applicationIdentifier: "group.example.TinyBuddy",
+            loadValues: { _, keys in
+                var result: [String: Any] = [:]
+                for key in keys {
+                    result[key] = values.values[key]
+                }
+                return result
+            },
+            setValue: { _, key, value in
+                values.values[key] = value
+            },
+            synchronize: { _ in true }
+        )
+    }
+
+    private final class PreferencesValues {
+        var values: [String: Any] = [:]
+    }
+}

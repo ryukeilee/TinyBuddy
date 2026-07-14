@@ -664,6 +664,7 @@ final class PetViewModelTests: XCTestCase {
         var widgetReloadCount = 0
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
+            activityStore: makeActivityStore(defaults: defaults),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
             widgetReloader: { widgetReloadCount += 1 }
@@ -681,6 +682,7 @@ final class PetViewModelTests: XCTestCase {
         var widgetReloadCount = 0
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
+            activityStore: makeActivityStore(defaults: defaults),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: notificationCenter,
             widgetReloader: { widgetReloadCount += 1 }
@@ -699,6 +701,7 @@ final class PetViewModelTests: XCTestCase {
         var widgetReloadCount = 0
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
+            activityStore: makeActivityStore(defaults: defaults),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: notificationCenter,
             widgetReloader: { widgetReloadCount += 1 }
@@ -865,6 +868,16 @@ final class PetViewModelTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+
+    private func makeActivityStore(
+        defaults: UserDefaults
+    ) -> GitTodayActivityStore {
+        makeActivityStore(
+            defaults: defaults,
+            calendar: .current,
+            today: Date()
+        )
     }
 
     private func makeActivityStore(

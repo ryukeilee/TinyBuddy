@@ -53,6 +53,15 @@ public final class TinyBuddyCombinedSnapshotStore {
         public static let committedRevisionV2 = "tinybuddy.combinedSnapshot.v2.committedRevision"
         public static let snapshotV2SlotA = "tinybuddy.combinedSnapshot.v2.slotA"
         public static let snapshotV2SlotB = "tinybuddy.combinedSnapshot.v2.slotB"
+
+        static let all = [
+            snapshot,
+            highestRevision,
+            highestRevisionV2,
+            committedRevisionV2,
+            snapshotV2SlotA,
+            snapshotV2SlotB
+        ]
     }
 
     private struct SourceValues {
@@ -75,7 +84,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         let snapshot: TinyBuddyCombinedSnapshot?
     }
 
-    private let userDefaults: UserDefaults
+    private let directPreferencesProvider: () -> [String: Any]
+    private let synchronizeReads: () -> Void
     private let sharedPreferencesProvider: () -> [String: Any]?
     private let fallbackDefaults: UserDefaults?
     private let repairOnLoad: Bool
@@ -86,28 +96,67 @@ public final class TinyBuddyCombinedSnapshotStore {
     // repair inside that process. WidgetKit uses repairOnLoad=false and stays read-only.
     private static let writerLock = NSLock()
 
-    public init(
-        userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
+    public convenience init(repairOnLoad: Bool = true) {
+        let preferencesStore = TinyBuddyAppGroupPreferencesStore()
+        self.init(
+            preferencesStore: preferencesStore,
+            repairOnLoad: repairOnLoad
+        )
+    }
+
+    convenience init(
+        preferencesStore: TinyBuddyAppGroupPreferencesStore,
+        sharedPreferencesProvider: @escaping () -> [String: Any]? = {
+            TinyBuddySharedData.loadAppGroupPreferencesDictionary()
+        },
+        repairOnLoad: Bool = true
+    ) {
+        self.init(
+            directPreferencesProvider: {
+                preferencesStore.loadDictionary() ?? [:]
+            },
+            synchronizeReads: {},
+            sharedPreferencesProvider: sharedPreferencesProvider,
+            fallbackDefaults: nil,
+            repairOnLoad: repairOnLoad,
+            writeValue: { value, key in
+                preferencesStore.writeValue(value, forKey: key)
+            },
+            synchronizeWrites: {
+                preferencesStore.synchronize()
+            }
+        )
+    }
+
+    public convenience init(
+        userDefaults: UserDefaults,
         sharedPreferencesProvider: @escaping () -> [String: Any]? = {
             TinyBuddySharedData.loadAppGroupPreferencesDictionary()
         },
         fallbackDefaults: UserDefaults? = nil,
         repairOnLoad: Bool = true
     ) {
-        self.userDefaults = userDefaults
-        self.sharedPreferencesProvider = sharedPreferencesProvider
-        self.fallbackDefaults = fallbackDefaults
-        self.repairOnLoad = repairOnLoad
-        self.writeValue = { value, key in
-            userDefaults.set(value, forKey: key)
-            return true
-        }
-        self.synchronizeWrites = {
-            userDefaults.synchronize()
-        }
+        self.init(
+            directPreferencesProvider: {
+                Self.combinedPreferenceValues(from: userDefaults)
+            },
+            synchronizeReads: {
+                _ = userDefaults.synchronize()
+            },
+            sharedPreferencesProvider: sharedPreferencesProvider,
+            fallbackDefaults: fallbackDefaults,
+            repairOnLoad: repairOnLoad,
+            writeValue: { value, key in
+                userDefaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: {
+                userDefaults.synchronize()
+            }
+        )
     }
 
-    init(
+    convenience init(
         userDefaults: UserDefaults,
         sharedPreferencesProvider: @escaping () -> [String: Any]?,
         fallbackDefaults: UserDefaults? = nil,
@@ -115,12 +164,47 @@ public final class TinyBuddyCombinedSnapshotStore {
         writeValue: @escaping (Any, String) -> Bool,
         synchronizeWrites: @escaping () -> Bool
     ) {
-        self.userDefaults = userDefaults
+        self.init(
+            directPreferencesProvider: {
+                Self.combinedPreferenceValues(from: userDefaults)
+            },
+            synchronizeReads: {
+                _ = userDefaults.synchronize()
+            },
+            sharedPreferencesProvider: sharedPreferencesProvider,
+            fallbackDefaults: fallbackDefaults,
+            repairOnLoad: repairOnLoad,
+            writeValue: writeValue,
+            synchronizeWrites: synchronizeWrites
+        )
+    }
+
+    private init(
+        directPreferencesProvider: @escaping () -> [String: Any],
+        synchronizeReads: @escaping () -> Void,
+        sharedPreferencesProvider: @escaping () -> [String: Any]?,
+        fallbackDefaults: UserDefaults?,
+        repairOnLoad: Bool,
+        writeValue: @escaping (Any, String) -> Bool,
+        synchronizeWrites: @escaping () -> Bool
+    ) {
+        self.directPreferencesProvider = directPreferencesProvider
+        self.synchronizeReads = synchronizeReads
         self.sharedPreferencesProvider = sharedPreferencesProvider
         self.fallbackDefaults = fallbackDefaults
         self.repairOnLoad = repairOnLoad
         self.writeValue = writeValue
         self.synchronizeWrites = synchronizeWrites
+    }
+
+    private static func combinedPreferenceValues(from defaults: UserDefaults) -> [String: Any] {
+        var values: [String: Any] = [:]
+        for key in Key.all {
+            if let value = defaults.object(forKey: key) {
+                values[key] = value
+            }
+        }
+        return values
     }
 
     public func load() -> TinyBuddyCombinedSnapshot? {
@@ -327,7 +411,7 @@ public final class TinyBuddyCombinedSnapshotStore {
     }
 
     private func readStateLocked(repair: Bool) -> ReadState {
-        userDefaults.synchronize()
+        synchronizeReads()
         fallbackDefaults?.synchronize()
 
         let sources = sourceValues()
@@ -444,15 +528,16 @@ public final class TinyBuddyCombinedSnapshotStore {
     }
 
     private func sourceValues() -> [SourceValues] {
+        let directPreferences = directPreferencesProvider()
         let direct = SourceValues(
-            legacySnapshot: userDefaults.string(forKey: Key.snapshot),
-            v2SlotA: userDefaults.string(forKey: Key.snapshotV2SlotA),
-            v2SlotB: userDefaults.string(forKey: Key.snapshotV2SlotB),
+            legacySnapshot: directPreferences[Key.snapshot] as? String,
+            v2SlotA: directPreferences[Key.snapshotV2SlotA] as? String,
+            v2SlotB: directPreferences[Key.snapshotV2SlotB] as? String,
             legacyHighestRevision: Self.nonnegativeRevision(
-                userDefaults.object(forKey: Key.highestRevision)
+                directPreferences[Key.highestRevision]
             ),
-            revisionMarker: userDefaults.string(forKey: Key.highestRevisionV2),
-            committedRevisionMarker: userDefaults.string(forKey: Key.committedRevisionV2)
+            revisionMarker: directPreferences[Key.highestRevisionV2] as? String,
+            committedRevisionMarker: directPreferences[Key.committedRevisionV2] as? String
         )
         let sharedPreferences = sharedPreferencesProvider()
         let shared = SourceValues(
@@ -497,7 +582,7 @@ public final class TinyBuddyCombinedSnapshotStore {
                 ?? DirectSlot(key: targetKey, rawValue: nil, snapshot: nil)
             guard writeValue(encoded, targetKey),
                   synchronizeWrites(),
-                  userDefaults.string(forKey: targetKey).flatMap(Self.decodeV2) == canonical else {
+                  directString(forKey: targetKey).flatMap(Self.decodeV2) == canonical else {
                 restoreValueLocked(target.rawValue, forKey: target.key)
                 _ = synchronizeWrites()
                 return false
@@ -505,13 +590,13 @@ public final class TinyBuddyCombinedSnapshotStore {
             writtenTarget = target
         }
 
-        let previousCommittedMarker = userDefaults.string(forKey: Key.committedRevisionV2)
+        let previousCommittedMarker = directString(forKey: Key.committedRevisionV2)
         let currentCommittedRevision = previousCommittedMarker.flatMap(Self.decodeRevisionMarker)
         if currentCommittedRevision.map({ $0 < canonical.revision }) ?? true {
             guard let marker = Self.encodeRevisionMarker(canonical.revision),
                   writeValue(marker, Key.committedRevisionV2),
                   synchronizeWrites(),
-                  userDefaults.string(forKey: Key.committedRevisionV2)
+                  directString(forKey: Key.committedRevisionV2)
                     .flatMap(Self.decodeRevisionMarker) == canonical.revision else {
                 restoreValueLocked(previousCommittedMarker, forKey: Key.committedRevisionV2)
                 if let writtenTarget {
@@ -523,7 +608,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         }
 
         repairAncillaryCopiesLocked(canonical)
-        let committedRevision = userDefaults.string(forKey: Key.committedRevisionV2)
+        let committedRevision = directString(forKey: Key.committedRevisionV2)
             .flatMap(Self.decodeRevisionMarker)
         return committedRevision.map { $0 >= canonical.revision } == true
             && directSlots().contains { $0.snapshot == canonical }
@@ -542,10 +627,10 @@ public final class TinyBuddyCombinedSnapshotStore {
         }
 
         let legacyValue = Self.encode(canonical)
-        if userDefaults.string(forKey: Key.snapshot) != legacyValue {
+        if directString(forKey: Key.snapshot) != legacyValue {
             changed = writeValue(legacyValue, Key.snapshot) || changed
         }
-        if Self.nonnegativeRevision(userDefaults.object(forKey: Key.highestRevision))
+        if Self.nonnegativeRevision(directValue(forKey: Key.highestRevision))
             != canonical.revision {
             changed = writeValue(canonical.revision, Key.highestRevision) || changed
         }
@@ -563,7 +648,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         _ revision: Int64,
         currentDirectRevision: Int64? = nil
     ) -> Bool {
-        let previousMarker = userDefaults.string(forKey: Key.highestRevisionV2)
+        let previousMarker = directString(forKey: Key.highestRevisionV2)
         let currentRevision = currentDirectRevision
             ?? previousMarker.flatMap(Self.decodeRevisionMarker)
         guard currentRevision == nil || currentRevision! < revision else {
@@ -572,7 +657,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         guard let marker = Self.encodeRevisionMarker(revision),
               writeValue(marker, Key.highestRevisionV2),
               synchronizeWrites(),
-              userDefaults.string(forKey: Key.highestRevisionV2)
+              directString(forKey: Key.highestRevisionV2)
                 .flatMap(Self.decodeRevisionMarker) == revision else {
             restoreValueLocked(previousMarker, forKey: Key.highestRevisionV2)
             _ = synchronizeWrites()
@@ -584,8 +669,9 @@ public final class TinyBuddyCombinedSnapshotStore {
     }
 
     private func directSlots() -> [DirectSlot] {
-        let slotAValue = userDefaults.string(forKey: Key.snapshotV2SlotA)
-        let slotBValue = userDefaults.string(forKey: Key.snapshotV2SlotB)
+        let directPreferences = directPreferencesProvider()
+        let slotAValue = directPreferences[Key.snapshotV2SlotA] as? String
+        let slotBValue = directPreferences[Key.snapshotV2SlotB] as? String
         return [
             DirectSlot(
                 key: Key.snapshotV2SlotA,
@@ -598,6 +684,14 @@ public final class TinyBuddyCombinedSnapshotStore {
                 snapshot: slotBValue.flatMap(Self.decodeV2)
             )
         ]
+    }
+
+    private func directString(forKey key: String) -> String? {
+        directValue(forKey: key) as? String
+    }
+
+    private func directValue(forKey key: String) -> Any? {
+        directPreferencesProvider()[key]
     }
 
     private func transactionalTargetKey(for slots: [DirectSlot]) -> String {
@@ -764,7 +858,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         let encodedV2 = Self.encodeV2(combinedSnapshot)
         guard writeValue(encodedV2, targetKey),
               synchronizeWrites(),
-              userDefaults.string(forKey: targetKey).flatMap(Self.decodeV2) == combinedSnapshot else {
+              directString(forKey: targetKey).flatMap(Self.decodeV2) == combinedSnapshot else {
             restoreValueLocked(target.rawValue, forKey: target.key)
             _ = synchronizeWrites()
             return UpdateResult(
@@ -776,11 +870,11 @@ public final class TinyBuddyCombinedSnapshotStore {
 
         // The slot is staged until this independently checksummed marker is
         // durable. Readers ignore revisions newer than the committed marker.
-        let previousCommittedMarker = userDefaults.string(forKey: Key.committedRevisionV2)
+        let previousCommittedMarker = directString(forKey: Key.committedRevisionV2)
         guard let committedMarker = Self.encodeRevisionMarker(combinedSnapshot.revision),
               writeValue(committedMarker, Key.committedRevisionV2),
               synchronizeWrites(),
-              userDefaults.string(forKey: Key.committedRevisionV2)
+              directString(forKey: Key.committedRevisionV2)
                 .flatMap(Self.decodeRevisionMarker) == combinedSnapshot.revision else {
             restoreValueLocked(previousCommittedMarker, forKey: Key.committedRevisionV2)
             restoreValueLocked(target.rawValue, forKey: target.key)

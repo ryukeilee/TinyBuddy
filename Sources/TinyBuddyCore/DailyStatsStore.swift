@@ -12,15 +12,51 @@ public final class DailyStatsStore {
     private let userDefaults: UserDefaults
     private let calendar: Calendar
     private let dateProvider: () -> Date
+    private let combinedSnapshotStoreFactory: () -> TinyBuddyCombinedSnapshotStore
 
-    public init(
-        userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
+    public convenience init(
         calendar: Calendar = .current,
         dateProvider: @escaping () -> Date = Date.init
+    ) {
+        let userDefaults = TinyBuddySharedData.makeUserDefaults()
+        self.init(
+            userDefaults: userDefaults,
+            calendar: calendar,
+            dateProvider: dateProvider,
+            combinedSnapshotStoreFactory: {
+                TinyBuddyCombinedSnapshotStore()
+            }
+        )
+    }
+
+    public convenience init(
+        userDefaults: UserDefaults,
+        calendar: Calendar = .current,
+        dateProvider: @escaping () -> Date = Date.init
+    ) {
+        self.init(
+            userDefaults: userDefaults,
+            calendar: calendar,
+            dateProvider: dateProvider,
+            combinedSnapshotStoreFactory: {
+                TinyBuddyCombinedSnapshotStore(
+                    userDefaults: userDefaults,
+                    sharedPreferencesProvider: { nil }
+                )
+            }
+        )
+    }
+
+    private init(
+        userDefaults: UserDefaults,
+        calendar: Calendar,
+        dateProvider: @escaping () -> Date,
+        combinedSnapshotStoreFactory: @escaping () -> TinyBuddyCombinedSnapshotStore
     ) {
         self.userDefaults = userDefaults
         self.calendar = calendar
         self.dateProvider = dateProvider
+        self.combinedSnapshotStoreFactory = combinedSnapshotStoreFactory
     }
 
     public func loadToday() -> DailyStats {
@@ -76,10 +112,7 @@ public final class DailyStatsStore {
     }
 
     public func makeCombinedSnapshotStore() -> TinyBuddyCombinedSnapshotStore {
-        TinyBuddyCombinedSnapshotStore(
-            userDefaults: userDefaults,
-            sharedPreferencesProvider: { nil }
-        )
+        combinedSnapshotStoreFactory()
     }
 
     private func save(_ stats: DailyStats) -> DailyStats {

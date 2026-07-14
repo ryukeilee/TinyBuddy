@@ -50,6 +50,75 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertTrue(modeBlock("release-verify|--release-verify", in: script).contains("run_optional_git_pre_refresh"))
     }
 
+    func testXcodeBuildDefaultsToBoundedSummaryOutputWithVerboseOptOut() throws {
+        let script = try buildAndRunScript()
+        let function = try XCTUnwrap(
+            shellFunction(named: "run_xcode_build", in: script)
+        )
+
+        XCTAssertTrue(script.contains("BUILD_LOG_MODE=\"${TINYBUDDY_BUILD_LOG_MODE:-summary}\""))
+        XCTAssertTrue(function.contains("verbose)"))
+        XCTAssertTrue(function.contains(">\"$log_file\" 2>&1"))
+        XCTAssertTrue(function.contains("/usr/bin/tail -n 80"))
+        XCTAssertTrue(function.contains("$BUILD_FAILURE_TAIL_LINES"))
+        XCTAssertTrue(function.contains("full log:"))
+    }
+
+    func testXcodeBuildSummaryKeepsFullLogButBoundsFailureOutput() throws {
+        let function = try XCTUnwrap(
+            shellFunction(named: "run_xcode_build", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBuddyBuildLogTests.\(UUID().uuidString)")
+        let fakeXcodebuild = temporaryDirectory.appendingPathComponent("fake-xcodebuild.sh")
+        let logDirectory = temporaryDirectory.appendingPathComponent("logs")
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let fakeCommand = """
+        #!/bin/bash
+        index=1
+        while [ "$index" -le 200 ]; do
+          echo "build-line-$index"
+          index=$((index + 1))
+        done
+        echo "error: focused diagnostic" >&2
+        exit 37
+        """
+        try Data(fakeCommand.utf8).write(to: fakeXcodebuild)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakeXcodebuild.path
+        )
+
+        let probe = """
+        set -euo pipefail
+        XCODEBUILD_BIN=\(shellQuote(fakeXcodebuild.path))
+        BUILD_CONFIGURATION=Debug
+        DERIVED_DATA_DIR=\(shellQuote(temporaryDirectory.appendingPathComponent("derived-data").path))
+        SIGNING_ARGS=(CODE_SIGNING_ALLOWED=NO)
+        BUILD_LOG_MODE=summary
+        BUILD_FAILURE_TAIL_LINES=3
+        BUILD_LOG_DIR=\(shellQuote(logDirectory.path))
+        APP_NAME=TinyBuddy
+        \(function)
+        run_xcode_build
+        """
+
+        let result = try runBash(probe)
+        let logFiles = try FileManager.default.contentsOfDirectory(at: logDirectory, includingPropertiesForKeys: nil)
+
+        XCTAssertEqual(result.exitCode, 37)
+        XCTAssertTrue(result.standardError.contains("error: focused diagnostic"))
+        XCTAssertTrue(result.standardError.contains("build-line-200"))
+        XCTAssertFalse(result.standardError.contains("build-line-100"))
+        XCTAssertEqual(logFiles.count, 1)
+        XCTAssertTrue(
+            try String(contentsOf: XCTUnwrap(logFiles.first), encoding: .utf8)
+                .contains("build-line-100")
+        )
+    }
+
     func testReleaseInstallRollsBackPreviousBundleWhenActivationFails() throws {
         let script = try buildAndRunScript()
         let rollbackFunction = try XCTUnwrap(

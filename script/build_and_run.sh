@@ -8,8 +8,12 @@ WIDGET_BUNDLE_ID="com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension"
 WIDGET_EXTENSION_POINT="com.apple.widgetkit-extension"
 APP_RUNTIME_TIMEOUT="${TINYBUDDY_APP_RUNTIME_TIMEOUT:-15}"
 WIDGET_RUNTIME_TIMEOUT="${TINYBUDDY_WIDGET_RUNTIME_TIMEOUT:-30}"
+BUILD_LOG_MODE="${TINYBUDDY_BUILD_LOG_MODE:-summary}"
+BUILD_FAILURE_TAIL_LINES="${TINYBUDDY_BUILD_FAILURE_TAIL_LINES:-120}"
+XCODEBUILD_BIN="${TINYBUDDY_XCODEBUILD_BIN:-/usr/bin/xcodebuild}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_LOG_DIR="${TINYBUDDY_BUILD_LOG_DIR:-${TMPDIR:-/tmp}/TinyBuddyBuildLogs}"
 case "$MODE" in
   release-install|--release-install|release-verify|--release-verify)
     BUILD_CONFIGURATION="${TINYBUDDY_BUILD_CONFIGURATION:-Release}"
@@ -191,14 +195,60 @@ case "$MODE" in
     ;;
 esac
 
-xcodebuild \
-  -project TinyBuddy.xcodeproj \
-  -scheme TinyBuddy \
-  -configuration "$BUILD_CONFIGURATION" \
-  -derivedDataPath "$DERIVED_DATA_DIR" \
-  -destination 'platform=macOS' \
-  "${SIGNING_ARGS[@]}" \
-  build
+run_xcode_build() {
+  local status
+  local timestamp
+  local log_file
+  local -a command=(
+    "$XCODEBUILD_BIN"
+    -project TinyBuddy.xcodeproj
+    -scheme TinyBuddy
+    -configuration "$BUILD_CONFIGURATION"
+    -derivedDataPath "$DERIVED_DATA_DIR"
+    -destination 'platform=macOS'
+    "${SIGNING_ARGS[@]}"
+    build
+  )
+
+  case "$BUILD_LOG_MODE" in
+    verbose)
+      "${command[@]}"
+      ;;
+    summary)
+      case "$BUILD_FAILURE_TAIL_LINES" in
+        ''|*[!0-9]*)
+          echo "TINYBUDDY_BUILD_FAILURE_TAIL_LINES must be a non-negative integer" >&2
+          return 2
+          ;;
+      esac
+
+      /bin/mkdir -p "$BUILD_LOG_DIR"
+      timestamp="$(/bin/date '+%Y%m%d-%H%M%S')"
+      log_file="$BUILD_LOG_DIR/${APP_NAME}-${BUILD_CONFIGURATION}-${timestamp}-$$.log"
+      if "${command[@]}" >"$log_file" 2>&1; then
+        echo "xcodebuild succeeded: configuration=$BUILD_CONFIGURATION; full log: $log_file"
+        return 0
+      else
+        status="$?"
+      fi
+
+      echo "xcodebuild failed with exit code $status; full log: $log_file" >&2
+      echo "key diagnostics:" >&2
+      /usr/bin/grep -E '(^|[[:space:]])(fatal )?error:|\*\* BUILD FAILED \*\*|The following build commands failed:' "$log_file" \
+        | /usr/bin/tail -n 80 >&2 || true
+      echo "last $BUILD_FAILURE_TAIL_LINES log lines:" >&2
+      /usr/bin/tail -n "$BUILD_FAILURE_TAIL_LINES" "$log_file" >&2
+      return "$status"
+      ;;
+    *)
+      echo "unsupported TINYBUDDY_BUILD_LOG_MODE: $BUILD_LOG_MODE" >&2
+      echo "use 'summary' or 'verbose'" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_xcode_build
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

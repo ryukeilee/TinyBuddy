@@ -79,11 +79,19 @@ Signed Debug build:
 TINYBUDDY_SIGNING_MODE=signed ./script/build_and_run.sh
 ```
 
+Xcode build output is concise by default. The complete log is kept under
+`$TMPDIR/TinyBuddyBuildLogs`; set `TINYBUDDY_BUILD_LOG_MODE=verbose` when the
+full live build stream is needed.
+
 Install a signed Release build into `/Applications` and register the widget:
 
 ```bash
 ./script/build_and_run.sh release-install
 ```
+
+A successful `release-install` already verifies the current build, installed
+bundle, running app, and widget. Run `release-verify` separately only when the
+source/build inputs changed or a standalone recheck is needed.
 
 Verify the installed signed app and widget registration:
 

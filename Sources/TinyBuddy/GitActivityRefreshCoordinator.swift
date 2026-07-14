@@ -110,6 +110,20 @@ final class GitActivityRefreshCoordinator {
     typealias AuthorizedRootsProvider = () -> GitScanRootAccessResult
     typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
 
+    private struct PublishedWidgetActivity: Equatable {
+        let focusBlockCount: Int
+        let commitCount: Int
+        let recentProjectName: String?
+
+        init(_ snapshot: GitTodayActivitySnapshot?) {
+            focusBlockCount = max(0, snapshot?.focusBlockCount ?? 0)
+            commitCount = max(0, snapshot?.commitCount ?? 0)
+            let projectName = snapshot?.recentProjectName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            recentProjectName = projectName?.isEmpty == false ? projectName : nil
+        }
+    }
+
     private let activityStore: GitTodayActivityStore
     private let dailyStatsStore: DailyStatsStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
@@ -441,7 +455,6 @@ final class GitActivityRefreshCoordinator {
         isRefreshing = true
         lastRefreshAttemptAt = now
         let lifecycleGeneration = self.lifecycleGeneration
-        let previousSnapshot = activityStore.loadTodaySnapshot()
         let scriptRunner = self.scriptRunner
 
         refreshQueue.async { [weak self] in
@@ -485,14 +498,16 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    let refreshResult = self.activityStore.makeRefreshResult(
-                        previousSnapshot: previousSnapshot,
-                        currentSnapshot: currentSnapshot
-                    )
+                    let fallbackSnapshot = self.dailyStatsStore.loadSnapshot()
+                    let previouslyCommittedSnapshot = self.combinedSnapshotStore.loadReadOnly()
+                    let previouslyPublishedActivity = previouslyCommittedSnapshot?.dayIdentifier
+                        == fallbackSnapshot.stats.dayIdentifier
+                        ? previouslyCommittedSnapshot?.activitySnapshot
+                        : nil
                     let combinedUpdate = self.combinedSnapshotStore.updateActivitySlice(
                         currentSnapshot,
                         activityRevision: currentActivityRead.trustedRevision,
-                        fallbackSnapshot: self.dailyStatsStore.loadSnapshot()
+                        fallbackSnapshot: fallbackSnapshot
                     )
                     let didReachCommittedCheckpoint: Bool
                     switch combinedUpdate.outcome {
@@ -532,7 +547,17 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    if combinedUpdate.didPersist {
+                    let committedSnapshotAfterUpdate = self.combinedSnapshotStore.loadReadOnly()
+                    let publishedActivityAfterUpdate = committedSnapshotAfterUpdate?.dayIdentifier
+                        == fallbackSnapshot.stats.dayIdentifier
+                        ? committedSnapshotAfterUpdate?.activitySnapshot
+                        : nil
+                    let didPublishCommittedSnapshot = previouslyCommittedSnapshot
+                        != committedSnapshotAfterUpdate
+                    let didChangePublishedWidgetActivity = PublishedWidgetActivity(previouslyPublishedActivity)
+                        != PublishedWidgetActivity(publishedActivityAfterUpdate)
+
+                    if didPublishCommittedSnapshot {
                         self.mirrorActivitySnapshotToStandardDefaults(
                             currentSnapshot,
                             refreshedAt: now
@@ -541,7 +566,7 @@ final class GitActivityRefreshCoordinator {
                     }
                     let didReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
-                        didChange: refreshResult.didChange && combinedUpdate.didPersist
+                        didChange: didChangePublishedWidgetActivity
                     )
                     if didReloadWidget {
                         self.widgetReloader()
