@@ -24,8 +24,8 @@ TinyBuddy is a Swift 5.9 macOS 14 project with both Swift Package Manager and Xc
 - `./script/build_and_run.sh --logs` launches the app and streams process logs.
 - `./script/build_and_run.sh --telemetry` launches the app and streams subsystem telemetry logs.
 - `TINYBUDDY_SIGNING_MODE=signed ./script/build_and_run.sh` builds with automatic provisioning updates when signed builds are required.
-- `./script/build_and_run.sh release-install` builds a signed Release app, installs it to `/Applications`, and registers the widget extension.
-- `./script/build_and_run.sh release-verify` verifies the installed signed app, code signature, and WidgetKit extension registration.
+- `./script/build_and_run.sh release-install` builds a signed Release app, stages and verifies it on the installation filesystem, atomically replaces `/Applications/TinyBuddy.app` with rollback on failure, then verifies the relaunched app and widget processes use the installed executables.
+- `./script/build_and_run.sh release-verify` verifies the installed signed app matches the current Release build, checks WidgetKit registration, and proves the running app and widget executable paths and hashes come from the installed bundle.
 - `./script/verify_resource_stability.sh --help` documents the optional resource-stability check and its local environment overrides.
 
 ## Coding Style & Naming Conventions
