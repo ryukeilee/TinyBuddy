@@ -23,11 +23,26 @@ public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
 }
 
 public final class TinyBuddyCombinedSnapshotStore {
+    public static let legacySchemaVersion = 1
+    public static let currentSchemaVersion = 2
+
+    public static func migrationPath(from version: Int) -> [Int]? {
+        switch version {
+        case legacySchemaVersion:
+            return [legacySchemaVersion, currentSchemaVersion]
+        case currentSchemaVersion:
+            return [currentSchemaVersion]
+        default:
+            return nil
+        }
+    }
+
     public enum UpdateOutcome: Equatable, Sendable {
         case saved
         case alreadyCurrent
         case rejectedStaleActivity
         case rejectedInvalidActivityRevision
+        case versionIncompatible
         case revisionExhausted
         case persistenceFailed
     }
@@ -61,6 +76,8 @@ public final class TinyBuddyCombinedSnapshotStore {
                 reason = .staleData
             case .rejectedInvalidActivityRevision:
                 reason = .invalidActivityRevision
+            case .versionIncompatible:
+                reason = .versionIncompatible
             case .saved, .alreadyCurrent:
                 reason = nil
             }
@@ -86,6 +103,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         public static let committedRevisionV2 = "tinybuddy.combinedSnapshot.v2.committedRevision"
         public static let snapshotV2SlotA = "tinybuddy.combinedSnapshot.v2.slotA"
         public static let snapshotV2SlotB = "tinybuddy.combinedSnapshot.v2.slotB"
+        public static let schemaVersion = "tinybuddy.combinedSnapshot.schemaVersion"
+        public static let migrationBackupV1 = "tinybuddy.combinedSnapshot.migrationBackup.v1"
 
         static let all = [
             snapshot,
@@ -93,7 +112,9 @@ public final class TinyBuddyCombinedSnapshotStore {
             highestRevisionV2,
             committedRevisionV2,
             snapshotV2SlotA,
-            snapshotV2SlotB
+            snapshotV2SlotB,
+            schemaVersion,
+            migrationBackupV1
         ]
     }
 
@@ -104,6 +125,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         let legacyHighestRevision: Int64?
         let revisionMarker: String?
         let committedRevisionMarker: String?
+        let schemaVersionMarker: String?
+        let migrationBackupV1: String?
     }
 
     private struct ReadState {
@@ -397,6 +420,13 @@ public final class TinyBuddyCombinedSnapshotStore {
 
         let state = readStateLocked(repair: true)
         let current = state.snapshot
+        guard state.diagnosticReason != .versionIncompatible else {
+            return UpdateResult(
+                snapshot: nil,
+                outcome: .versionIncompatible,
+                didPersist: false
+            )
+        }
         guard fallbackActivityRevision.map({ $0 >= 0 }) ?? true else {
             return UpdateResult(
                 snapshot: current,
@@ -435,6 +465,13 @@ public final class TinyBuddyCombinedSnapshotStore {
 
         let state = readStateLocked(repair: true)
         let current = state.snapshot
+        guard state.diagnosticReason != .versionIncompatible else {
+            return UpdateResult(
+                snapshot: nil,
+                outcome: .versionIncompatible,
+                didPersist: false
+            )
+        }
         guard activityRevision.map({ $0 >= 0 }) ?? true else {
             return UpdateResult(
                 snapshot: current,
@@ -577,12 +614,33 @@ public final class TinyBuddyCombinedSnapshotStore {
         return revision
     }
 
+    public static func encodeSchemaVersion(_ version: Int = currentSchemaVersion) -> String? {
+        guard version >= legacySchemaVersion else {
+            return nil
+        }
+        return [String(version), checksum(Data("schema\t\(version)".utf8))]
+            .joined(separator: "\t")
+    }
+
+    public static func decodeSchemaVersion(_ value: String) -> Int? {
+        let fields = value.split(separator: "\t", omittingEmptySubsequences: false)
+        guard fields.count == 2,
+              let version = Int(fields[0]), version >= 0,
+              fields[1] == Substring(checksum(Data("schema\t\(version)".utf8))) else {
+            return nil
+        }
+        return version
+    }
+
     private func readStateLocked(repair: Bool) -> ReadState {
         synchronizeReads()
         fallbackDefaults?.synchronize()
 
         let sources = sourceValues()
         let diagnosticReason = Self.diagnosticReason(in: sources)
+        if diagnosticReason == .versionIncompatible {
+            return ReadState(snapshot: nil, revisionFloor: 0, diagnosticReason: diagnosticReason)
+        }
         let committedMarkerRevision = sources.compactMap { source in
             source.committedRevisionMarker.flatMap(Self.decodeRevisionMarker)
         }.max()
@@ -621,8 +679,10 @@ public final class TinyBuddyCombinedSnapshotStore {
 
         var legacyCandidates: [TinyBuddyCombinedSnapshot] = []
         for source in sources {
-            if let value = source.legacySnapshot,
-               let snapshot = Self.decode(value) {
+            for value in [source.legacySnapshot, source.migrationBackupV1].compactMap({ $0 }) {
+                guard let snapshot = Self.decode(value) else {
+                    continue
+                }
                 let sourceCommittedRevision = source.committedRevisionMarker
                     .flatMap(Self.decodeRevisionMarker)
                 let sourceReservedRevision = source.revisionMarker
@@ -753,12 +813,15 @@ public final class TinyBuddyCombinedSnapshotStore {
         let markers = sources.flatMap { source in
             [source.revisionMarker, source.committedRevisionMarker].compactMap { $0 }
         }
+        let schemaMarkers = sources.compactMap(\.schemaVersionMarker)
         if snapshotValues.contains(where: isUnknownEnvelopeVersion)
-            || markers.contains(where: isUnknownMarkerVersion) {
+            || markers.contains(where: isUnknownMarkerVersion)
+            || schemaMarkers.contains(where: isFutureSchemaVersion) {
             return .versionIncompatible
         }
         if snapshotValues.contains(where: isMalformedSnapshotValue)
-            || markers.contains(where: isMalformedRevisionMarker) {
+            || markers.contains(where: isMalformedRevisionMarker)
+            || schemaMarkers.contains(where: isMalformedSchemaVersion) {
             return .snapshotCorrupt
         }
         return nil
@@ -800,6 +863,24 @@ public final class TinyBuddyCombinedSnapshotStore {
         value.isEmpty == false && decodeRevisionMarker(value) == nil
     }
 
+    private static func isFutureSchemaVersion(_ value: String) -> Bool {
+        guard let firstField = value.split(separator: "\t", omittingEmptySubsequences: false).first,
+              let version = Int(firstField) else {
+            return false
+        }
+        return version > currentSchemaVersion
+    }
+
+    private static func isMalformedSchemaVersion(_ value: String) -> Bool {
+        guard value.isEmpty == false, !isFutureSchemaVersion(value) else {
+            return false
+        }
+        guard let version = decodeSchemaVersion(value) else {
+            return true
+        }
+        return migrationPath(from: version) == nil
+    }
+
     private static func newestSnapshot(
         in candidates: [TinyBuddyCombinedSnapshot]
     ) -> TinyBuddyCombinedSnapshot? {
@@ -822,7 +903,9 @@ public final class TinyBuddyCombinedSnapshotStore {
                 directPreferences[Key.highestRevision]
             ),
             revisionMarker: directPreferences[Key.highestRevisionV2] as? String,
-            committedRevisionMarker: directPreferences[Key.committedRevisionV2] as? String
+            committedRevisionMarker: directPreferences[Key.committedRevisionV2] as? String,
+            schemaVersionMarker: directPreferences[Key.schemaVersion] as? String,
+            migrationBackupV1: directPreferences[Key.migrationBackupV1] as? String
         )
         let sharedPreferences = sharedPreferencesProvider()
         let shared = SourceValues(
@@ -831,7 +914,9 @@ public final class TinyBuddyCombinedSnapshotStore {
             v2SlotB: sharedPreferences?[Key.snapshotV2SlotB] as? String,
             legacyHighestRevision: Self.nonnegativeRevision(sharedPreferences?[Key.highestRevision]),
             revisionMarker: sharedPreferences?[Key.highestRevisionV2] as? String,
-            committedRevisionMarker: sharedPreferences?[Key.committedRevisionV2] as? String
+            committedRevisionMarker: sharedPreferences?[Key.committedRevisionV2] as? String,
+            schemaVersionMarker: sharedPreferences?[Key.schemaVersion] as? String,
+            migrationBackupV1: sharedPreferences?[Key.migrationBackupV1] as? String
         )
         let fallback = SourceValues(
             legacySnapshot: fallbackDefaults?.string(forKey: Key.snapshot),
@@ -841,7 +926,9 @@ public final class TinyBuddyCombinedSnapshotStore {
                 fallbackDefaults?.object(forKey: Key.highestRevision)
             ),
             revisionMarker: fallbackDefaults?.string(forKey: Key.highestRevisionV2),
-            committedRevisionMarker: fallbackDefaults?.string(forKey: Key.committedRevisionV2)
+            committedRevisionMarker: fallbackDefaults?.string(forKey: Key.committedRevisionV2),
+            schemaVersionMarker: fallbackDefaults?.string(forKey: Key.schemaVersion),
+            migrationBackupV1: fallbackDefaults?.string(forKey: Key.migrationBackupV1)
         )
         return [direct, shared, fallback]
     }
@@ -850,7 +937,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         _ canonical: TinyBuddyCombinedSnapshot,
         directSource: SourceValues
     ) -> Bool {
-        guard reserveRevisionLocked(
+        guard ensureCurrentSchemaLocked(directSource: directSource),
+              reserveRevisionLocked(
             canonical.revision,
             currentDirectRevision: directSource.revisionMarker.flatMap(Self.decodeRevisionMarker)
         ) else {
@@ -897,6 +985,35 @@ public final class TinyBuddyCombinedSnapshotStore {
             .flatMap(Self.decodeRevisionMarker)
         return committedRevision.map { $0 >= canonical.revision } == true
             && directSlots().contains { $0.snapshot == canonical }
+    }
+
+    private func ensureCurrentSchemaLocked(directSource: SourceValues) -> Bool {
+        if directSource.schemaVersionMarker.flatMap(Self.decodeSchemaVersion)
+            == Self.currentSchemaVersion {
+            return true
+        }
+
+        if directString(forKey: Key.migrationBackupV1) == nil,
+           let legacyValue = directSource.legacySnapshot,
+           Self.decode(legacyValue) != nil {
+            guard writeValue(legacyValue, Key.migrationBackupV1),
+                  synchronizeWrites(),
+                  directString(forKey: Key.migrationBackupV1) == legacyValue else {
+                return false
+            }
+        }
+
+        let previousMarker = directString(forKey: Key.schemaVersion)
+        guard let marker = Self.encodeSchemaVersion(),
+              writeValue(marker, Key.schemaVersion),
+              synchronizeWrites(),
+              directString(forKey: Key.schemaVersion)
+                .flatMap(Self.decodeSchemaVersion) == Self.currentSchemaVersion else {
+            restoreValueLocked(previousMarker, forKey: Key.schemaVersion)
+            _ = synchronizeWrites()
+            return false
+        }
+        return true
     }
 
     private func repairAncillaryCopiesLocked(_ canonical: TinyBuddyCombinedSnapshot) {
@@ -1125,6 +1242,15 @@ public final class TinyBuddyCombinedSnapshotStore {
             ),
             activityRevision: activityRevision
         ))
+
+        guard let directSource = sourceValues().first,
+              ensureCurrentSchemaLocked(directSource: directSource) else {
+            return UpdateResult(
+                snapshot: current,
+                outcome: .persistenceFailed,
+                didPersist: false
+            )
+        }
 
         // Reserve before publication. If the process stops between these writes,
         // the previous whole snapshot stays valid while the next save advances

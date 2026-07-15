@@ -557,6 +557,7 @@ final class GitActivityRefreshCoordinator {
                         didReachCommittedCheckpoint = true
                     case .rejectedStaleActivity,
                          .rejectedInvalidActivityRevision,
+                         .versionIncompatible,
                          .revisionExhausted,
                          .persistenceFailed:
                         didReachCommittedCheckpoint = false

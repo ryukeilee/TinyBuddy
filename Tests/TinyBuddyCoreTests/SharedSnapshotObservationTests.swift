@@ -185,6 +185,69 @@ final class SharedSnapshotObservationTests: XCTestCase {
         }
     }
 
+    func testFutureSchemaBlocksRepairAndUpdatesWithoutChangingPersistedValues() throws {
+        let defaults = UserDefaults(
+            suiteName: "SharedSnapshotObservationTests.\(UUID().uuidString)"
+        )!
+        let trusted = makeSnapshot(dayIdentifier: "2026-07-16")
+        let futureSchema = try XCTUnwrap(
+            TinyBuddyCombinedSnapshotStore.encodeSchemaVersion(
+                TinyBuddyCombinedSnapshotStore.currentSchemaVersion + 1
+            )
+        )
+        let originalValues: [String: Any] = [
+            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA:
+                TinyBuddyCombinedSnapshotStore.encodeV2(trusted),
+            TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2:
+                TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(trusted.revision)!,
+            TinyBuddyCombinedSnapshotStore.Key.schemaVersion: futureSchema,
+            "tinybuddy.future.only": "preserve-me"
+        ]
+        for (key, value) in originalValues {
+            defaults.set(value, forKey: key)
+        }
+        var writeCount = 0
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                writeCount += 1
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: { defaults.synchronize() }
+        )
+
+        XCTAssertNil(store.load())
+        let read = store.readValidated(expectedDayIdentifier: "2026-07-16")
+        XCTAssertNil(read.snapshot)
+        XCTAssertEqual(read.observation?.reason, .versionIncompatible)
+
+        let update = store.updatePetSlice(
+            TinyBuddySnapshot(
+                status: .idle,
+                stats: DailyStats(
+                    dayIdentifier: "2026-07-16",
+                    focusCount: 0,
+                    completionCount: 0
+                )
+            ),
+            fallbackActivitySnapshot: nil
+        )
+        XCTAssertEqual(update.outcome, .versionIncompatible)
+        XCTAssertFalse(update.didPersist)
+        XCTAssertNil(update.snapshot)
+        XCTAssertEqual(update.observation?.reason, .versionIncompatible)
+        XCTAssertEqual(writeCount, 0)
+        for (key, expectedValue) in originalValues {
+            XCTAssertEqual(
+                defaults.object(forKey: key) as? NSObject,
+                expectedValue as? NSObject,
+                "changed future-schema value for \(key)"
+            )
+        }
+    }
+
     func testRecoveredRedundantSnapshotCanBeRepairedWithoutAnotherRevision() {
         let defaults = UserDefaults(suiteName: "SharedSnapshotObservationTests.\(UUID().uuidString)")!
         let snapshot = makeSnapshot(dayIdentifier: "2026-07-16")

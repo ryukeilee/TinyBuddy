@@ -2,6 +2,36 @@ import XCTest
 @testable import TinyBuddyCore
 
 final class WidgetSharedDataLinkTests: XCTestCase {
+    func testCombinedSnapshotSchemaDeclaresVerifiableMigrationPath() throws {
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.migrationPath(
+                from: TinyBuddyCombinedSnapshotStore.legacySchemaVersion
+            ),
+            [1, 2]
+        )
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.migrationPath(
+                from: TinyBuddyCombinedSnapshotStore.currentSchemaVersion
+            ),
+            [2]
+        )
+        XCTAssertNil(
+            TinyBuddyCombinedSnapshotStore.migrationPath(
+                from: TinyBuddyCombinedSnapshotStore.currentSchemaVersion + 1
+            )
+        )
+        let marker = try XCTUnwrap(TinyBuddyCombinedSnapshotStore.encodeSchemaVersion())
+        XCTAssertEqual(
+            TinyBuddyCombinedSnapshotStore.decodeSchemaVersion(marker),
+            TinyBuddyCombinedSnapshotStore.currentSchemaVersion
+        )
+        XCTAssertNil(
+            TinyBuddyCombinedSnapshotStore.decodeSchemaVersion(
+                corruptLastCharacter(of: marker)
+            )
+        )
+    }
+
     func testLegacyNineFieldSnapshotMigratesToRedundantV2Envelope() throws {
         let defaults = makeDefaults()
         let legacySnapshot = TinyBuddyCombinedSnapshot(
@@ -47,6 +77,73 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(
             defaults.object(forKey: TinyBuddyCombinedSnapshotStore.Key.highestRevision) as? Int64,
             7
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.migrationBackupV1),
+            nineFieldValue
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.schemaVersion)
+                .flatMap(TinyBuddyCombinedSnapshotStore.decodeSchemaVersion),
+            TinyBuddyCombinedSnapshotStore.currentSchemaVersion
+        )
+    }
+
+    func testInterruptedLegacyMigrationKeepsRecoverableBackupAndCanResume() throws {
+        let defaults = makeDefaults()
+        let legacySnapshot = makeCombinedSnapshot(
+            revision: 6,
+            focusBlockCount: 2,
+            commitCount: 4,
+            projectName: "BeforeUpgrade"
+        )
+        let legacyValue = TinyBuddyCombinedSnapshotStore.encode(legacySnapshot)
+        defaults.set(legacyValue, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot)
+
+        let interruptedStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                guard key != TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA,
+                      key != TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB else {
+                    return false
+                }
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: { defaults.synchronize() }
+        )
+
+        XCTAssertEqual(interruptedStore.load(), legacySnapshot)
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.migrationBackupV1),
+            legacyValue
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot),
+            legacyValue
+        )
+        defaults.set(
+            "corrupt-after-interruption",
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+
+        let resumedStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        XCTAssertEqual(resumedStore.load(), legacySnapshot)
+        XCTAssertEqual(
+            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            legacySnapshot
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.migrationBackupV1),
+            legacyValue
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot),
+            legacyValue
         )
     }
 
