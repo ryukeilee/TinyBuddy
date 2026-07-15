@@ -36,11 +36,44 @@ public final class TinyBuddyCombinedSnapshotStore {
         public let snapshot: TinyBuddyCombinedSnapshot?
         public let outcome: UpdateOutcome
         public let didPersist: Bool
+        public let observation: TinyBuddySharedSnapshotObservation?
 
-        public init(snapshot: TinyBuddyCombinedSnapshot?, outcome: UpdateOutcome, didPersist: Bool) {
+        public init(
+            snapshot: TinyBuddyCombinedSnapshot?,
+            outcome: UpdateOutcome,
+            didPersist: Bool,
+            observation: TinyBuddySharedSnapshotObservation? = nil
+        ) {
             self.snapshot = snapshot
             self.outcome = outcome
             self.didPersist = didPersist
+            self.observation = observation ?? Self.observation(for: outcome)
+        }
+
+        private static func observation(
+            for outcome: UpdateOutcome
+        ) -> TinyBuddySharedSnapshotObservation? {
+            let reason: TinyBuddySharedSnapshotReason?
+            switch outcome {
+            case .persistenceFailed, .revisionExhausted:
+                reason = .persistenceFailed
+            case .rejectedStaleActivity:
+                reason = .staleData
+            case .rejectedInvalidActivityRevision:
+                reason = .invalidActivityRevision
+            case .saved, .alreadyCurrent:
+                reason = nil
+            }
+
+            guard let reason else {
+                return nil
+            }
+            return TinyBuddySharedSnapshotObservation(
+                phase: .snapshotWrite,
+                reason: reason,
+                recovery: .stopped,
+                attemptCount: 1
+            )
         }
     }
 
@@ -76,12 +109,23 @@ public final class TinyBuddyCombinedSnapshotStore {
     private struct ReadState {
         let snapshot: TinyBuddyCombinedSnapshot?
         let revisionFloor: Int64
+        let diagnosticReason: TinyBuddySharedSnapshotReason?
     }
 
     private struct DirectSlot {
         let key: String
         let rawValue: String?
         let snapshot: TinyBuddyCombinedSnapshot?
+    }
+
+    private final class AppGroupReadTracker {
+        private(set) var failure: TinyBuddySharedSnapshotReason?
+
+        func load() -> [String: Any]? {
+            let read = TinyBuddySharedData.readAppGroupPreferences()
+            failure = read.failure
+            return read.values
+        }
     }
 
     private let directPreferencesProvider: () -> [String: Any]
@@ -91,6 +135,7 @@ public final class TinyBuddyCombinedSnapshotStore {
     private let repairOnLoad: Bool
     private let writeValue: (Any, String) -> Bool
     private let synchronizeWrites: () -> Bool
+    private let readFailureProvider: () -> TinyBuddySharedSnapshotReason?
 
     // The app is the only semantic writer. This lock also serializes migration and
     // repair inside that process. WidgetKit uses repairOnLoad=false and stays read-only.
@@ -98,9 +143,22 @@ public final class TinyBuddyCombinedSnapshotStore {
 
     public convenience init(repairOnLoad: Bool = true) {
         let preferencesStore = TinyBuddyAppGroupPreferencesStore()
+        let sharedReadTracker = AppGroupReadTracker()
         self.init(
             preferencesStore: preferencesStore,
-            repairOnLoad: repairOnLoad
+            sharedPreferencesProvider: {
+                sharedReadTracker.load()
+            },
+            repairOnLoad: repairOnLoad,
+            readFailureProvider: {
+                if let failure = sharedReadTracker.failure {
+                    return failure
+                }
+                return TinyBuddySharedData.isAppGroupContainerAvailable()
+                    && TinyBuddySharedData.isAppGroupDefaultsAvailable()
+                    ? nil
+                    : .appGroupUnavailable
+            }
         )
     }
 
@@ -109,7 +167,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         sharedPreferencesProvider: @escaping () -> [String: Any]? = {
             TinyBuddySharedData.loadAppGroupPreferencesDictionary()
         },
-        repairOnLoad: Bool = true
+        repairOnLoad: Bool = true,
+        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason? = { nil }
     ) {
         self.init(
             directPreferencesProvider: {
@@ -124,7 +183,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             },
             synchronizeWrites: {
                 preferencesStore.synchronize()
-            }
+            },
+            readFailureProvider: readFailureProvider
         )
     }
 
@@ -152,7 +212,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             },
             synchronizeWrites: {
                 userDefaults.synchronize()
-            }
+            },
+            readFailureProvider: { nil }
         )
     }
 
@@ -162,7 +223,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         fallbackDefaults: UserDefaults? = nil,
         repairOnLoad: Bool = true,
         writeValue: @escaping (Any, String) -> Bool,
-        synchronizeWrites: @escaping () -> Bool
+        synchronizeWrites: @escaping () -> Bool,
+        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason? = { nil }
     ) {
         self.init(
             directPreferencesProvider: {
@@ -175,7 +237,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             fallbackDefaults: fallbackDefaults,
             repairOnLoad: repairOnLoad,
             writeValue: writeValue,
-            synchronizeWrites: synchronizeWrites
+            synchronizeWrites: synchronizeWrites,
+            readFailureProvider: readFailureProvider
         )
     }
 
@@ -186,7 +249,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         fallbackDefaults: UserDefaults?,
         repairOnLoad: Bool,
         writeValue: @escaping (Any, String) -> Bool,
-        synchronizeWrites: @escaping () -> Bool
+        synchronizeWrites: @escaping () -> Bool,
+        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason?
     ) {
         self.directPreferencesProvider = directPreferencesProvider
         self.synchronizeReads = synchronizeReads
@@ -195,6 +259,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         self.repairOnLoad = repairOnLoad
         self.writeValue = writeValue
         self.synchronizeWrites = synchronizeWrites
+        self.readFailureProvider = readFailureProvider
     }
 
     private static func combinedPreferenceValues(from defaults: UserDefaults) -> [String: Any] {
@@ -217,6 +282,108 @@ public final class TinyBuddyCombinedSnapshotStore {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
         return readStateLocked(repair: false).snapshot
+    }
+
+    /// Repairs redundant local copies for a snapshot that was already validated
+    /// by `readValidated`. This is intentionally unavailable to read-only
+    /// WidgetKit callers through their use of `readValidated` alone.
+    @discardableResult
+    public func repairValidatedSnapshot(_ snapshot: TinyBuddyCombinedSnapshot) -> Bool {
+        Self.writerLock.lock()
+        defer { Self.writerLock.unlock() }
+
+        let current = readStateLocked(repair: false)
+        guard current.snapshot == snapshot,
+              readFailureProvider() == nil,
+              let directSource = sourceValues().first,
+              readFailureProvider() == nil else {
+            return false
+        }
+        return repairLocked(snapshot, directSource: directSource)
+    }
+
+    /// Reads a display-safe snapshot and reports bounded, redacted diagnostics.
+    /// A caller that supplies a day identifier will never receive another day's
+    /// snapshot. Corrupt V2 input is reread at most once; read-only clients never
+    /// write as part of this API.
+    public func readValidated(
+        expectedDayIdentifier: String? = nil
+    ) -> TinyBuddyValidatedCombinedSnapshotRead {
+        Self.writerLock.lock()
+        defer { Self.writerLock.unlock() }
+
+        let first = readStateLocked(repair: false)
+        let firstReason = readFailureProvider() ?? first.diagnosticReason
+        guard let firstReason else {
+            return validatedRead(
+                from: first.snapshot,
+                expectedDayIdentifier: expectedDayIdentifier,
+                attemptCount: 1
+            )
+        }
+
+        guard firstReason == .snapshotCorrupt else {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                // A missing entitlement, denied read, or a newer on-disk
+                // format makes the source contract itself untrustworthy. Do
+                // not expose a candidate selected from another cache layer as
+                // though it were a confirmed shared snapshot.
+                snapshot: nil,
+                observation: observation(
+                    reason: firstReason,
+                    recovery: .stopped,
+                    attemptCount: 1
+                )
+            )
+        }
+
+        // A second source read is deliberately the only recovery attempt. In
+        // particular, unknown formats and permission failures observed on this
+        // read are not overwritten or retried.
+        let second = readStateLocked(repair: false)
+        let secondReason = readFailureProvider() ?? second.diagnosticReason
+        let secondSnapshot = safeSnapshot(
+            second.snapshot,
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        if second.snapshot != nil, secondSnapshot == nil {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                snapshot: nil,
+                observation: observation(
+                    reason: .staleData,
+                    recovery: .stopped,
+                    attemptCount: 2
+                )
+            )
+        }
+        if let secondReason, secondReason != .snapshotCorrupt {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                snapshot: nil,
+                observation: observation(
+                    reason: secondReason,
+                    recovery: .stopped,
+                    attemptCount: 2
+                )
+            )
+        }
+        if let secondSnapshot {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                snapshot: secondSnapshot,
+                observation: observation(
+                    reason: .snapshotCorrupt,
+                    recovery: .rereadSucceeded,
+                    attemptCount: 2
+                )
+            )
+        }
+        return TinyBuddyValidatedCombinedSnapshotRead(
+            snapshot: nil,
+            observation: observation(
+                reason: secondReason ?? .snapshotCorrupt,
+                recovery: .stopped,
+                attemptCount: 2
+            )
+        )
     }
 
     @discardableResult
@@ -415,6 +582,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         fallbackDefaults?.synchronize()
 
         let sources = sourceValues()
+        let diagnosticReason = Self.diagnosticReason(in: sources)
         let committedMarkerRevision = sources.compactMap { source in
             source.committedRevisionMarker.flatMap(Self.decodeRevisionMarker)
         }.max()
@@ -501,18 +669,135 @@ public final class TinyBuddyCombinedSnapshotStore {
            let newestStaged,
            selected.map({ newestStaged.revision > $0.revision }) ?? true,
            repairLocked(newestStaged, directSource: sources[0]) {
-            return ReadState(snapshot: newestStaged, revisionFloor: revisionFloor)
+            return ReadState(
+                snapshot: newestStaged,
+                revisionFloor: revisionFloor,
+                diagnosticReason: diagnosticReason
+            )
         }
 
         guard let selected else {
-            return ReadState(snapshot: nil, revisionFloor: revisionFloor)
+            return ReadState(
+                snapshot: nil,
+                revisionFloor: revisionFloor,
+                diagnosticReason: diagnosticReason
+            )
         }
 
         if repair {
             _ = repairLocked(selected, directSource: sources[0])
-            return ReadState(snapshot: selected, revisionFloor: revisionFloor)
+            return ReadState(
+                snapshot: selected,
+                revisionFloor: revisionFloor,
+                diagnosticReason: diagnosticReason
+            )
         }
-        return ReadState(snapshot: selected, revisionFloor: revisionFloor)
+        return ReadState(
+            snapshot: selected,
+            revisionFloor: revisionFloor,
+            diagnosticReason: diagnosticReason
+        )
+    }
+
+    private func validatedRead(
+        from snapshot: TinyBuddyCombinedSnapshot?,
+        expectedDayIdentifier: String?,
+        attemptCount: Int
+    ) -> TinyBuddyValidatedCombinedSnapshotRead {
+        let safe = safeSnapshot(snapshot, expectedDayIdentifier: expectedDayIdentifier)
+        if snapshot != nil, safe == nil {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                snapshot: nil,
+                observation: observation(
+                    reason: .staleData,
+                    recovery: .stopped,
+                    attemptCount: attemptCount
+                )
+            )
+        }
+        return TinyBuddyValidatedCombinedSnapshotRead(snapshot: safe, observation: nil)
+    }
+
+    private func safeSnapshot(
+        _ snapshot: TinyBuddyCombinedSnapshot?,
+        expectedDayIdentifier: String?
+    ) -> TinyBuddyCombinedSnapshot? {
+        guard let snapshot else {
+            return nil
+        }
+        guard expectedDayIdentifier == nil || snapshot.dayIdentifier == expectedDayIdentifier else {
+            return nil
+        }
+        return snapshot
+    }
+
+    private func observation(
+        reason: TinyBuddySharedSnapshotReason,
+        recovery: TinyBuddySharedSnapshotRecovery,
+        attemptCount: Int
+    ) -> TinyBuddySharedSnapshotObservation {
+        TinyBuddySharedSnapshotObservation(
+            phase: .snapshotRead,
+            reason: reason,
+            recovery: recovery,
+            attemptCount: attemptCount
+        )
+    }
+
+    private static func diagnosticReason(
+        in sources: [SourceValues]
+    ) -> TinyBuddySharedSnapshotReason? {
+        let snapshotValues = sources.flatMap { source in
+            [source.v2SlotA, source.v2SlotB, source.legacySnapshot].compactMap { $0 }
+        }
+        let markers = sources.flatMap { source in
+            [source.revisionMarker, source.committedRevisionMarker].compactMap { $0 }
+        }
+        if snapshotValues.contains(where: isUnknownEnvelopeVersion)
+            || markers.contains(where: isUnknownMarkerVersion) {
+            return .versionIncompatible
+        }
+        if snapshotValues.contains(where: isMalformedSnapshotValue)
+            || markers.contains(where: isMalformedRevisionMarker) {
+            return .snapshotCorrupt
+        }
+        return nil
+    }
+
+    private static func isMalformedSnapshotValue(_ value: String) -> Bool {
+        guard value.isEmpty == false else {
+            return false
+        }
+        return decodeV2(value) == nil && decode(value) == nil
+    }
+
+    private static func isUnknownEnvelopeVersion(_ value: String) -> Bool {
+        let fields = value.split(separator: "\t", omittingEmptySubsequences: false)
+        // A complete legacy payload has 9 or 10 fields and starts with a
+        // revision, not an envelope version. Short numeric input instead has
+        // enough shape to be a truncated V2 envelope, so preserve the safer
+        // version-incompatible distinction for future writers.
+        guard fields.count <= 5,
+              let firstField = fields.first,
+              let version = Int(firstField),
+              version >= 0 else {
+            return false
+        }
+        return version != 2
+    }
+
+    private static func isUnknownMarkerVersion(_ value: String) -> Bool {
+        let fields = value.split(separator: "\t", omittingEmptySubsequences: false)
+        guard let firstField = fields.first,
+              let version = Int(firstField),
+              version >= 0 else {
+            return false
+        }
+        return version != 2
+    }
+
+    private static func isMalformedRevisionMarker(_ value: String) -> Bool {
+        value.isEmpty == false && decodeRevisionMarker(value) == nil
     }
 
     private static func newestSnapshot(

@@ -128,7 +128,8 @@ final class GitActivityRefreshCoordinator {
     private let dailyStatsStore: DailyStatsStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
-    private let widgetReloader: () -> Void
+    private let widgetReloader: () throws -> Void
+    private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private let scriptRunner: ScriptRunner
     private let scriptURLProvider: ScriptURLProvider
     private let authorizedRootsProvider: AuthorizedRootsProvider
@@ -161,7 +162,7 @@ final class GitActivityRefreshCoordinator {
         gitScanRootStore: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
         refreshInterval: TimeInterval = 5 * 60,
         minimumRefreshSpacing: TimeInterval = 60,
-        widgetReloader: @escaping () -> Void = {
+        widgetReloader: @escaping () throws -> Void = {
             WidgetCenter.shared.reloadAllTimelines()
         },
         scriptURLProvider: @escaping ScriptURLProvider = GitActivityRefreshCoordinator.locateRefreshScript,
@@ -171,6 +172,7 @@ final class GitActivityRefreshCoordinator {
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         statusNotificationCenter: NotificationCenter = .default,
         diagnosticRecorder: @escaping DiagnosticRecorder = GitActivityRefreshCoordinator.logDiagnostic(_:trigger:),
+        sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared,
         wakeRefreshCoalescingInterval: TimeInterval = 5
     ) {
         self.activityStore = activityStore
@@ -180,6 +182,7 @@ final class GitActivityRefreshCoordinator {
         self.refreshInterval = refreshInterval
         self.minimumRefreshSpacing = minimumRefreshSpacing
         self.widgetReloader = widgetReloader
+        self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
         self.scriptURLProvider = scriptURLProvider
         self.scriptRunner = scriptRunner
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
@@ -499,11 +502,48 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     let fallbackSnapshot = self.dailyStatsStore.loadSnapshot()
-                    let previouslyCommittedSnapshot = self.combinedSnapshotStore.loadReadOnly()
-                    let previouslyPublishedActivity = previouslyCommittedSnapshot?.dayIdentifier
-                        == fallbackSnapshot.stats.dayIdentifier
-                        ? previouslyCommittedSnapshot?.activitySnapshot
-                        : nil
+                    let expectedDayIdentifier = fallbackSnapshot.stats.dayIdentifier
+                    let previouslyCommittedRead = self.combinedSnapshotStore.readValidated(
+                        expectedDayIdentifier: expectedDayIdentifier
+                    )
+                    previouslyCommittedRead.observation.map(self.sharedSnapshotDiagnosticRecorder.record)
+                    if let observation = previouslyCommittedRead.observation,
+                       observation.reason == .versionIncompatible
+                        || observation.reason == .appGroupUnavailable
+                        || observation.reason == .sandboxReadDenied {
+                        let diagnostic = GitActivityRefreshDiagnostic(
+                            source: .gitActivityRefresh,
+                            stage: .combinedSnapshotCommit,
+                            reason: .combinedSnapshotCommitFailed
+                        )
+                        self.lastRefreshFailureAt = now
+                        self.recordRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: .failed,
+                            diagnostic: diagnostic,
+                            metrics: self.makeMetrics(
+                                startedAt: now,
+                                finishedAt: self.dateProvider(),
+                                authorizedRootCount: authorizedRootURLs.count,
+                                scriptMetrics: scriptResult.metrics,
+                                widgetReloaded: false,
+                                diagnostic: diagnostic
+                            )
+                        )
+                        self.finishRefresh(succeeded: false)
+                        return
+                    }
+                    let recoverableReadFault: TinyBuddySharedSnapshotObservation?
+                    if let observation = previouslyCommittedRead.observation,
+                       previouslyCommittedRead.snapshot == nil,
+                       observation.reason == .snapshotCorrupt || observation.reason == .staleData {
+                        recoverableReadFault = observation
+                    } else {
+                        recoverableReadFault = nil
+                    }
+                    let previouslyCommittedSnapshot = previouslyCommittedRead.snapshot
+                    let previouslyPublishedActivity = previouslyCommittedSnapshot?.activitySnapshot
                     let combinedUpdate = self.combinedSnapshotStore.updateActivitySlice(
                         currentSnapshot,
                         activityRevision: currentActivityRead.trustedRevision,
@@ -523,6 +563,7 @@ final class GitActivityRefreshCoordinator {
                     }
 
                     guard didReachCommittedCheckpoint else {
+                        combinedUpdate.observation.map(self.sharedSnapshotDiagnosticRecorder.record)
                         let diagnostic = GitActivityRefreshDiagnostic(
                             source: .gitActivityRefresh,
                             stage: .combinedSnapshotCommit,
@@ -547,11 +588,50 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    let committedSnapshotAfterUpdate = self.combinedSnapshotStore.loadReadOnly()
-                    let publishedActivityAfterUpdate = committedSnapshotAfterUpdate?.dayIdentifier
-                        == fallbackSnapshot.stats.dayIdentifier
-                        ? committedSnapshotAfterUpdate?.activitySnapshot
-                        : nil
+                    let committedReadAfterUpdate = self.combinedSnapshotStore.readValidated(
+                        expectedDayIdentifier: expectedDayIdentifier
+                    )
+                    committedReadAfterUpdate.observation.map(self.sharedSnapshotDiagnosticRecorder.record)
+                    guard let committedSnapshotAfterUpdate = committedReadAfterUpdate.snapshot else {
+                        if committedReadAfterUpdate.observation == nil {
+                            self.sharedSnapshotDiagnosticRecorder.record(
+                                phase: .snapshotWrite,
+                                reason: .persistenceFailed,
+                                recovery: .stopped
+                            )
+                        }
+                        let diagnostic = GitActivityRefreshDiagnostic(
+                            source: .gitActivityRefresh,
+                            stage: .combinedSnapshotCommit,
+                            reason: .combinedSnapshotCommitFailed
+                        )
+                        self.lastRefreshFailureAt = now
+                        self.recordRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: .failed,
+                            diagnostic: diagnostic,
+                            metrics: self.makeMetrics(
+                                startedAt: now,
+                                finishedAt: self.dateProvider(),
+                                authorizedRootCount: authorizedRootURLs.count,
+                                scriptMetrics: scriptResult.metrics,
+                                widgetReloaded: false,
+                                diagnostic: diagnostic
+                            )
+                        )
+                        self.finishRefresh(succeeded: false)
+                        return
+                    }
+                    if let recoverableReadFault {
+                        self.sharedSnapshotDiagnosticRecorder.record(
+                            phase: .snapshotRead,
+                            reason: recoverableReadFault.reason,
+                            recovery: combinedUpdate.didPersist ? .rebuilt : .rereadSucceeded,
+                            attemptCount: recoverableReadFault.attemptCount + 1
+                        )
+                    }
+                    let publishedActivityAfterUpdate = committedSnapshotAfterUpdate.activitySnapshot
                     let didPublishCommittedSnapshot = previouslyCommittedSnapshot
                         != committedSnapshotAfterUpdate
                     let didChangePublishedWidgetActivity = PublishedWidgetActivity(previouslyPublishedActivity)
@@ -564,12 +644,22 @@ final class GitActivityRefreshCoordinator {
                         )
                         self.statusNotificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
                     }
-                    let didReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
+                    let shouldReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
                         didChange: didChangePublishedWidgetActivity
                     )
-                    if didReloadWidget {
-                        self.widgetReloader()
+                    var didReloadWidget = false
+                    if shouldReloadWidget {
+                        do {
+                            try self.widgetReloader()
+                            didReloadWidget = true
+                        } catch {
+                            self.sharedSnapshotDiagnosticRecorder.record(
+                                phase: .timelineReload,
+                                reason: .timelineReloadFailed,
+                                recovery: .stopped
+                            )
+                        }
                     }
 
                     self.recordRefreshStatus(
@@ -664,6 +754,10 @@ final class GitActivityRefreshCoordinator {
         diagnostic: GitActivityRefreshDiagnostic?,
         metrics: GitActivityRefreshMetrics? = nil
     ) {
+        if let diagnostic {
+            diagnosticRecorder(diagnostic, trigger)
+            recordSharedSnapshotObservation(for: diagnostic)
+        }
         let status = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
             trigger: trigger,
@@ -673,8 +767,35 @@ final class GitActivityRefreshCoordinator {
         )
         refreshStatusStore.save(status)
         statusNotificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: status)
-        if let diagnostic {
-            diagnosticRecorder(diagnostic, trigger)
+    }
+
+    private func recordSharedSnapshotObservation(
+        for diagnostic: GitActivityRefreshDiagnostic
+    ) {
+        switch diagnostic.reason {
+        case .authorizationRequired, .authorizationInvalid:
+            sharedSnapshotDiagnosticRecorder.record(
+                phase: .gitScan,
+                reason: .gitScanSkipped,
+                recovery: .stopped
+            )
+        case .partialRecovery:
+            sharedSnapshotDiagnosticRecorder.record(
+                phase: .gitScan,
+                reason: .gitScanPartial,
+                recovery: .none
+            )
+        case .scriptMissing, .scriptExecutionFailed, .refreshedActivityUnavailable:
+            sharedSnapshotDiagnosticRecorder.record(
+                phase: .gitScan,
+                reason: .gitScanFailed,
+                recovery: .stopped
+            )
+        case .combinedSnapshotCommitFailed:
+            // The underlying read/update path records the precise snapshot
+            // observation before this user-facing status is emitted. Do not
+            // overwrite an access, version, stale, or write diagnostic here.
+            break
         }
     }
 
@@ -897,12 +1018,37 @@ final class GitActivityRefreshCoordinator {
                     .split(whereSeparator: { $0.isWhitespace })[..<operationIndex]
                     .reversed()
                     .compactMap { token -> String? in
-                        let candidate = token.trimmingCharacters(in: .punctuationCharacters)
-                        guard candidate.contains("/") else {
+                        let candidate = token.trimmingCharacters(
+                            in: CharacterSet(charactersIn: "\"'`()[]{}<>,:;")
+                        )
+                        let trustedExecutablePrefixes = [
+                            "/usr/bin/",
+                            "/bin/",
+                            "/usr/sbin/",
+                            "/sbin/",
+                            "/usr/libexec/",
+                            "/usr/local/bin/",
+                            "/opt/homebrew/bin/",
+                            "/opt/local/bin/"
+                        ]
+                        let pathComponents = candidate.split(
+                            separator: "/",
+                            omittingEmptySubsequences: true
+                        )
+                        guard !pathComponents.contains("..") else {
                             return nil
                         }
-                        guard let basename = candidate.split(separator: "/").last.map(String.init),
-                              basename.contains(".") || basename.contains("-") else {
+                        let standardizedCandidate = URL(fileURLWithPath: candidate)
+                            .standardizedFileURL.path
+                        guard trustedExecutablePrefixes.contains(where: standardizedCandidate.hasPrefix) else {
+                            return nil
+                        }
+                        guard let basename = standardizedCandidate.split(separator: "/").last.map(String.init),
+                              !basename.isEmpty,
+                              basename.allSatisfy({ character in
+                                  character.isLetter || character.isNumber
+                                      || character == "." || character == "-" || character == "_"
+                              }) else {
                             return nil
                         }
                         return basename

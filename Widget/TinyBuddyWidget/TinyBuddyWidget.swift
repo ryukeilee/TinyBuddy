@@ -1,6 +1,7 @@
 import SwiftUI
 import TinyBuddyCore
 import WidgetKit
+import OSLog
 
 struct TinyBuddyEntry: TimelineEntry {
     let date: Date
@@ -11,6 +12,7 @@ struct TinyBuddyEntry: TimelineEntry {
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
     private let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(repairOnLoad: false)
+    private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
         return TinyBuddyEntry(
@@ -38,8 +40,16 @@ struct TinyBuddyProvider: TimelineProvider {
     }
 
     private func makeEntry(for date: Date) -> TinyBuddyEntry {
-        if let combinedSnapshot = combinedSnapshotStore.loadReadOnly(),
-           combinedSnapshot.dayIdentifier == Self.dayIdentifier(for: date) {
+        let expectedDayIdentifier = Self.dayIdentifier(for: date)
+        let combinedRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        if let observation = combinedRead.observation {
+            Self.logger.error(
+                "shared snapshot id=\(observation.identifier, privacy: .public) phase=\(observation.phase.rawValue, privacy: .public) reason=\(observation.reason.rawValue, privacy: .public) recovery=\(observation.recovery.rawValue, privacy: .public) attempt=\(observation.attemptCount, privacy: .public)"
+            )
+        }
+        if let combinedSnapshot = combinedRead.snapshot {
             return TinyBuddyEntry(
                 date: date,
                 snapshot: combinedSnapshot.snapshot,
@@ -47,14 +57,34 @@ struct TinyBuddyProvider: TimelineProvider {
             )
         }
 
+        if let observation = combinedRead.observation,
+           observation.reason == .staleData || observation.reason == .snapshotCorrupt {
+            return TinyBuddyEntry(
+                date: date,
+                snapshot: store.loadSnapshot(),
+                activitySnapshot: neutralActivitySnapshot
+            )
+        }
+
         return TinyBuddyEntry(
             date: date,
-            snapshot: store.loadSnapshot(),
-            activitySnapshot: GitTodayActivitySnapshot(
-                focusBlockCount: nil,
-                commitCount: nil,
-                recentProjectName: nil
-            )
+            snapshot: neutralSnapshot(dayIdentifier: expectedDayIdentifier),
+            activitySnapshot: neutralActivitySnapshot
+        )
+    }
+
+    private var neutralActivitySnapshot: GitTodayActivitySnapshot {
+        GitTodayActivitySnapshot(
+            focusBlockCount: nil,
+            commitCount: nil,
+            recentProjectName: nil
+        )
+    }
+
+    private func neutralSnapshot(dayIdentifier: String) -> TinyBuddySnapshot {
+        TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: dayIdentifier, focusCount: 0, completionCount: 0)
         )
     }
 

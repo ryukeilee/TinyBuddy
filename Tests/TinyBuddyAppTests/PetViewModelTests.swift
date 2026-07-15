@@ -707,7 +707,7 @@ final class PetViewModelTests: XCTestCase {
             widgetReloader: { widgetReloadCount += 1 }
         )
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 3)
+        XCTAssertEqual(viewModel.notificationObserverCount, 4)
 
         for _ in 0..<25 {
             notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
@@ -715,7 +715,7 @@ final class PetViewModelTests: XCTestCase {
         await Task.yield()
         await Task.yield()
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 3)
+        XCTAssertEqual(viewModel.notificationObserverCount, 4)
         XCTAssertEqual(widgetReloadCount, 0)
     }
 
@@ -861,6 +861,251 @@ final class PetViewModelTests: XCTestCase {
                 expectedSelectedStatus(for: testCase.displayState)
             )
         }
+    }
+
+    func testCorruptCombinedSnapshotIsRebuiltOnceAndRecordsRedactedRecovery() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today })
+        let validSnapshot = TinyBuddyCombinedSnapshot(
+            revision: 1,
+            dayIdentifier: store.loadSnapshot().stats.dayIdentifier,
+            snapshot: store.loadSnapshot(),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 1,
+                commitCount: 1,
+                recentProjectName: "Redacted"
+            )
+        )
+        let validPayload = TinyBuddyCombinedSnapshotStore.encodeV2(validSnapshot)
+        let corruptedPayload = String(validPayload.dropLast()) + "x"
+        defaults.set(corruptedPayload, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA)
+        defaults.set(corruptedPayload, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(1),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+        )
+        let recorder = TinyBuddySharedSnapshotDiagnosticRecorder()
+
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: TinyBuddyCombinedSnapshotStore(
+                userDefaults: defaults,
+                sharedPreferencesProvider: { nil }
+            ),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: {},
+            sharedSnapshotDiagnosticRecorder: recorder
+        )
+
+        XCTAssertEqual(recorder.latestSummary?.identifier, "tinybuddy.sharedSnapshot.snapshotRead.snapshotCorrupt")
+        XCTAssertEqual(recorder.latestSummary?.recovery, .rebuilt)
+        XCTAssertEqual(viewModel.hiddenSnapshotDiagnosticSummary?.attemptCount, 3)
+        XCTAssertNotNil(store.makeCombinedSnapshotStore().readValidated(
+            expectedDayIdentifier: store.loadSnapshot().stats.dayIdentifier
+        ).snapshot)
+    }
+
+    func testRecoveredRedundantSnapshotIsRepairedOnceInTheApp() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today })
+        let snapshot = TinyBuddyCombinedSnapshot(
+            revision: 1,
+            dayIdentifier: store.loadSnapshot().stats.dayIdentifier,
+            snapshot: store.loadSnapshot(),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 1,
+                commitCount: 1,
+                recentProjectName: "Redacted"
+            )
+        )
+        let corruptedPayload = String(TinyBuddyCombinedSnapshotStore.encodeV2(snapshot).dropLast()) + "x"
+        defaults.set(corruptedPayload, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeV2(snapshot),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB
+        )
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(snapshot.revision),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+        )
+        let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let recorder = TinyBuddySharedSnapshotDiagnosticRecorder()
+
+        _ = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: {},
+            sharedSnapshotDiagnosticRecorder: recorder
+        )
+
+        XCTAssertEqual(recorder.latestSummary?.reason, .snapshotCorrupt)
+        XCTAssertEqual(recorder.latestSummary?.recovery, .rebuilt)
+        XCTAssertNil(
+            combinedSnapshotStore.readValidated(
+                expectedDayIdentifier: store.loadSnapshot().stats.dayIdentifier
+            ).observation
+        )
+    }
+
+    func testStaleCombinedSnapshotIsRebuiltOnceBeforeDisplayingActivity() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today })
+        let staleDayIdentifier = "2026-07-03"
+        let staleSnapshot = TinyBuddyCombinedSnapshot(
+            revision: 1,
+            dayIdentifier: staleDayIdentifier,
+            snapshot: TinyBuddySnapshot(
+                status: .completedOnce,
+                stats: DailyStats(
+                    dayIdentifier: staleDayIdentifier,
+                    focusCount: 8,
+                    completionCount: 5
+                )
+            ),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 7,
+                commitCount: 6,
+                recentProjectName: "Stale"
+            )
+        )
+        let stalePayload = TinyBuddyCombinedSnapshotStore.encodeV2(staleSnapshot)
+        defaults.set(stalePayload, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA)
+        defaults.set(stalePayload, forKey: TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB)
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(staleSnapshot.revision),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2
+        )
+        let recorder = TinyBuddySharedSnapshotDiagnosticRecorder()
+        let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+
+        _ = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: {},
+            sharedSnapshotDiagnosticRecorder: recorder
+        )
+
+        XCTAssertEqual(recorder.latestSummary?.reason, .staleData)
+        XCTAssertEqual(recorder.latestSummary?.recovery, .rebuilt)
+        XCTAssertEqual(
+            combinedSnapshotStore.readValidated(
+                expectedDayIdentifier: store.loadSnapshot().stats.dayIdentifier
+            ).snapshot?.dayIdentifier,
+            store.loadSnapshot().stats.dayIdentifier
+        )
+    }
+
+    func testVersionOrAccessFailureDoesNotWriteOrExposeGitActivity() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today })
+        var writeAttemptCount = 0
+        let recorder = TinyBuddySharedSnapshotDiagnosticRecorder()
+        let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { _, _ in
+                writeAttemptCount += 1
+                return true
+            },
+            synchronizeWrites: { true },
+            readFailureProvider: { .versionIncompatible }
+        )
+
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: {},
+            sharedSnapshotDiagnosticRecorder: recorder
+        )
+
+        XCTAssertEqual(writeAttemptCount, 0)
+        XCTAssertEqual(viewModel.hudPresentation.focusCount, 0)
+        XCTAssertEqual(viewModel.hudPresentation.completionCount, 0)
+        XCTAssertEqual(recorder.latestSummary?.reason, .versionIncompatible)
+        XCTAssertEqual(recorder.latestSummary?.recovery, .stopped)
+    }
+
+    func testWidgetReloadFailureRecordsStructuredHiddenSummary() {
+        enum ReloadError: Error { case unavailable }
+
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let recorder = TinyBuddySharedSnapshotDiagnosticRecorder()
+        GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(1)
+        _ = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today }),
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: { throw ReloadError.unavailable },
+            sharedSnapshotDiagnosticRecorder: recorder
+        )
+
+        XCTAssertEqual(recorder.latestSummary?.identifier, "tinybuddy.sharedSnapshot.timelineReload.timelineReloadFailed")
+        XCTAssertEqual(recorder.latestSummary?.recovery, .stopped)
+    }
+
+    func testSharedSnapshotRecorderPublishesHiddenDiagnosticSummary() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let recorder = TinyBuddySharedSnapshotDiagnosticRecorder()
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today }),
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: TinyBuddyCombinedSnapshotStore(
+                userDefaults: defaults,
+                sharedPreferencesProvider: { nil }
+            ),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            widgetReloader: {},
+            sharedSnapshotDiagnosticRecorder: recorder
+        )
+
+        recorder.record(
+            phase: .gitScan,
+            reason: .gitScanFailed,
+            recovery: .stopped
+        )
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.notificationObserverCount, 4)
+        XCTAssertEqual(
+            viewModel.hiddenSnapshotDiagnosticSummary?.identifier,
+            "tinybuddy.sharedSnapshot.gitScan.gitScanFailed"
+        )
     }
 
     private func makeDefaults() -> UserDefaults {

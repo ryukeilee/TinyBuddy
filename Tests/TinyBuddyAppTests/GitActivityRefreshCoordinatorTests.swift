@@ -77,6 +77,30 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertFalse(summary.contains("/usr/local/bin"))
     }
 
+    func testScriptFailureSummaryDoesNotTreatRepositoryPathAsAnExecutable() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "bash: line 7: /Users/alice/Code/private-project-v1.2: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("command=shell"))
+        XCTAssertFalse(summary.contains("private-project-v1.2"))
+        XCTAssertFalse(summary.contains("alice"))
+    }
+
+    func testScriptFailureSummaryRejectsTraversalDisguisedAsTrustedExecutablePath() {
+        let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
+            terminationStatus: 1,
+            standardOutput: "",
+            standardError: "bash: line 7: /usr/bin/../../Users/alice/Secret-Repo: Operation not permitted"
+        )
+
+        XCTAssertTrue(summary.contains("command=shell"))
+        XCTAssertFalse(summary.contains("Secret-Repo"))
+        XCTAssertFalse(summary.contains("alice"))
+    }
+
     func testScriptFailureSummaryIncludesDeniedShellLineNumber() {
         let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
             terminationStatus: 1,
@@ -131,6 +155,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.diagnosticEventIdentifiers,
             ["gitActivityRefresh.authorizationResolution.authorizationRequired"]
         )
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanSkipped)
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.recovery, .stopped)
     }
 
     func testRefreshReportsInvalidSavedGitAuthorizationWhenBookmarksNoLongerResolve() {
@@ -164,6 +190,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.diagnosticEventIdentifiers,
             ["gitActivityRefresh.authorizationResolution.authorizationInvalid"]
         )
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanSkipped)
     }
 
     func testRefreshReportsStructuredDiagnosticWhenScriptIsMissing() {
@@ -195,6 +222,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.diagnosticEventIdentifiers,
             ["gitActivityRefresh.scriptLookup.scriptMissing"]
         )
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanFailed)
     }
 
     func testRefreshPassesAuthorizedGitScanRootsToScript() {
@@ -262,6 +290,33 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
         XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, true)
+    }
+
+    func testTimelineReloadFailureKeepsSuccessfulGitRefreshStatus() {
+        enum ReloadError: Error { case unavailable }
+
+        let harness = makeHarness()
+        harness.setActivitySnapshot(
+            focusBlockCount: 5,
+            commitCount: 8,
+            recentProjectName: "DevPulse"
+        )
+        harness.setWidgetReloaderHook { throw ReloadError.unavailable }
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertNil(harness.lastRefreshStatus?.diagnostic)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, false)
+        XCTAssertEqual(
+            harness.latestHiddenDiagnosticSummary?.identifier,
+            "tinybuddy.sharedSnapshot.timelineReload.timelineReloadFailed"
+        )
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.recovery, .stopped)
     }
 
     func testVisibleRefreshReloadsWidgetWhenRepairPublishesPreviouslyStagedActivity() {
@@ -379,6 +434,11 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(harness.lastRefreshStatus?.metrics?.invalidRepositoryCount, 1)
         XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanPartial)
+        XCTAssertEqual(
+            harness.latestHiddenDiagnosticSummary?.recovery,
+            TinyBuddySharedSnapshotRecovery.none
+        )
     }
 
     func testRefreshFailsWhenUnifiedSnapshotRevisionCannotAdvance() {
@@ -418,6 +478,35 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.lastRefreshStatus?.metrics?.reason,
             "gitActivityRefresh.combinedSnapshotCommit.combinedSnapshotCommitFailed"
         )
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.phase, .snapshotWrite)
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .persistenceFailed)
+    }
+
+    func testPostCommitReadFailureDoesNotReportGitRefreshSuccess() {
+        let harness = makeHarness()
+        harness.failValidatedSnapshotRead(
+            number: 2,
+            with: .sandboxReadDenied
+        )
+        harness.setActivitySnapshot(
+            focusBlockCount: 4,
+            commitCount: 7,
+            recentProjectName: "TinyBuddy"
+        )
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.diagnostic?.reason,
+            .combinedSnapshotCommitFailed
+        )
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.phase, .snapshotRead)
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .sandboxReadDenied)
     }
 
     func testSuccessfulActivityCommitPostsCommittedSnapshotNotificationAfterPersistence() {
@@ -589,6 +678,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertFalse(harness.lastRefreshStatus?.reason?.contains("/Users/alice") ?? false)
         XCTAssertFalse(harness.lastRefreshStatus?.reason?.contains("SecretRepo") ?? false)
         XCTAssertFalse(harness.lastRefreshStatus?.reason?.contains("alice") ?? false)
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanFailed)
     }
 
     func testFailedRefreshBacksOffWakeRetriesAndAutomaticallyRecoversLater() {
@@ -1353,6 +1443,7 @@ private final class RefreshHarness {
     private let calendar: Calendar
     private let dailyStatsStore: DailyStatsStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
+    private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private var statusObserver: NSObjectProtocol?
 
     let coordinator: GitActivityRefreshCoordinator
@@ -1379,8 +1470,20 @@ private final class RefreshHarness {
         )
         self.combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
             userDefaults: defaults,
-            sharedPreferencesProvider: { nil }
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: {
+                defaults.synchronize()
+            },
+            readFailureProvider: { [state] in
+                state.validatedSnapshotReadCount += 1
+                return state.validatedSnapshotReadFailures[state.validatedSnapshotReadCount]
+            }
         )
+        self.sharedSnapshotDiagnosticRecorder = TinyBuddySharedSnapshotDiagnosticRecorder()
         self.refreshStatusStore = GitActivityRefreshStatusStore(
             userDefaults: defaults,
             calendar: calendar,
@@ -1429,6 +1532,7 @@ private final class RefreshHarness {
                     return
                 }
 
+                try state.widgetReloaderHook?()
                 state.widgetReloadCount += 1
                 state.onWidgetReload?(state.widgetReloadCount)
             },
@@ -1462,7 +1566,8 @@ private final class RefreshHarness {
             statusNotificationCenter: statusNotificationCenter,
             diagnosticRecorder: { [state] diagnostic, _ in
                 state.diagnosticEventIdentifiers.append(diagnostic.stableIdentifier)
-            }
+            },
+            sharedSnapshotDiagnosticRecorder: sharedSnapshotDiagnosticRecorder
         )
         statusObserver = statusNotificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
@@ -1498,6 +1603,9 @@ private final class RefreshHarness {
     var lastRefreshStatus: GitActivityRefreshStatus? { refreshStatusStore.load() }
     var statusHistory: [GitActivityRefreshStatus] { state.statusHistory }
     var diagnosticEventIdentifiers: [String] { state.diagnosticEventIdentifiers }
+    var latestHiddenDiagnosticSummary: TinyBuddyHiddenSnapshotDiagnosticSummary? {
+        sharedSnapshotDiagnosticRecorder.latestSummary
+    }
     var combinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.load() }
     var readOnlyCombinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.loadReadOnly() }
     var statusNotificationCenterForTesting: NotificationCenter { statusNotificationCenter }
@@ -1520,6 +1628,17 @@ private final class RefreshHarness {
 
     func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
         state.scriptRunnerHook = hook
+    }
+
+    func setWidgetReloaderHook(_ hook: @escaping () throws -> Void) {
+        state.widgetReloaderHook = hook
+    }
+
+    func failValidatedSnapshotRead(
+        number: Int,
+        with reason: TinyBuddySharedSnapshotReason
+    ) {
+        state.validatedSnapshotReadFailures[number] = reason
     }
 
     func setScriptMetrics(_ metrics: GitRefreshScriptMetrics?) {
@@ -1743,7 +1862,10 @@ private final class RefreshHarness {
         var onWidgetReload: ((Int) -> Void)?
         var onScriptRun: ((Int) -> Void)?
         var scriptRunnerHook: ((Int) throws -> Void)?
+        var widgetReloaderHook: (() throws -> Void)?
         var scriptMetrics: GitRefreshScriptMetrics?
+        var validatedSnapshotReadCount = 0
+        var validatedSnapshotReadFailures: [Int: TinyBuddySharedSnapshotReason] = [:]
         var statusHistory: [GitActivityRefreshStatus] = []
         var diagnosticEventIdentifiers: [String] = []
 

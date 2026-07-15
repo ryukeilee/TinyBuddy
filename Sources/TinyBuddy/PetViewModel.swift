@@ -45,6 +45,7 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var hudPresentation: TinyBuddyWidgetPresentation
     @Published private(set) var displayState: DisplayState
     @Published private(set) var refreshDiagnostics: RefreshDiagnostics
+    @Published private(set) var hiddenSnapshotDiagnosticSummary: TinyBuddyHiddenSnapshotDiagnosticSummary?
 
     var selectedStatus: PetStatus {
         status
@@ -60,7 +61,9 @@ final class PetViewModel: ObservableObject {
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let notificationCenter: NotificationCenter
-    private let widgetReloader: () -> Void
+    private let widgetReloader: () throws -> Void
+    private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
+    private var rebuiltSnapshotFaultIdentifiers: Set<String>
     private var latestRefreshStatus: GitActivityRefreshStatus?
     private var observers: [NSObjectProtocol] = []
 
@@ -70,16 +73,22 @@ final class PetViewModel: ObservableObject {
         combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
         notificationCenter: NotificationCenter = .default,
-        widgetReloader: @escaping () -> Void = {
+        widgetReloader: @escaping () throws -> Void = {
             WidgetCenter.shared.reloadAllTimelines()
-        }
+        },
+        sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared
     ) {
         self.store = store
         let session = PetSession(store: store)
         let combinedSnapshotStore = combinedSnapshotStore ?? store.makeCombinedSnapshotStore()
         let latestRefreshStatus = refreshStatusStore.load()
         let fallbackSnapshot = store.loadSnapshot()
-        let committedSnapshotBeforePublication = combinedSnapshotStore.loadReadOnly()
+        var rebuiltSnapshotFaultIdentifiers: Set<String> = []
+        let committedReadBeforePublication = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: fallbackSnapshot.stats.dayIdentifier
+        )
+        committedReadBeforePublication.observation.map(sharedSnapshotDiagnosticRecorder.record)
+        let committedSnapshotBeforePublication = committedReadBeforePublication.snapshot
         let hadSameDayCommittedSnapshot = committedSnapshotBeforePublication?.dayIdentifier
             == fallbackSnapshot.stats.dayIdentifier
         let widgetPresentationBeforePublication: TinyBuddyWidgetPresentation
@@ -105,7 +114,9 @@ final class PetViewModel: ObservableObject {
             combinedSnapshotStore: combinedSnapshotStore,
             includeTrustedActivity: Self.shouldIncludeTrustedActivity(
                 for: latestRefreshStatus
-            )
+            ),
+            diagnosticRecorder: sharedSnapshotDiagnosticRecorder,
+            rebuiltSnapshotFaultIdentifiers: &rebuiltSnapshotFaultIdentifiers
         )
         let snapshot = combinedHUDState.snapshot
         let activitySnapshot = combinedHUDState.activitySnapshot
@@ -119,15 +130,18 @@ final class PetViewModel: ObservableObject {
         self.refreshStatusStore = refreshStatusStore
         self.notificationCenter = notificationCenter
         self.widgetReloader = widgetReloader
+        self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
+        self.rebuiltSnapshotFaultIdentifiers = rebuiltSnapshotFaultIdentifiers
         self.latestRefreshStatus = latestRefreshStatus
         self.status = snapshot.status
         self.stats = snapshot.stats
         self.hudPresentation = hudPresentation
         self.displayState = Self.makeDisplayState(from: hudPresentation)
         self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
+        self.hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
         if combinedHUDState.didPersist
             && (hadSameDayCommittedSnapshot || widgetPresentationBeforePublication != hudPresentation) {
-            widgetReloader()
+            reloadWidgetIfPossible()
         }
         observers.append(notificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
@@ -166,12 +180,25 @@ final class PetViewModel: ObservableObject {
                 self?.restorePersistedState()
             }
         })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .tinyBuddySharedSnapshotDiagnosticDidChange,
+            object: sharedSnapshotDiagnosticRecorder,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+
+                self.hiddenSnapshotDiagnosticSummary = self.sharedSnapshotDiagnosticRecorder.latestSummary
+            }
+        })
     }
 
     func select(_ nextStatus: PetStatus) {
         session.select(nextStatus)
         if reloadHUDState() {
-            widgetReloader()
+            reloadWidgetIfPossible()
         }
     }
 
@@ -182,6 +209,7 @@ final class PetViewModel: ObservableObject {
     deinit {
         for observer in observers {
             notificationCenter.removeObserver(observer)
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -189,7 +217,7 @@ final class PetViewModel: ObservableObject {
         latestRefreshStatus = refreshStatusStore.load()
         refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
         if reloadHUDState() {
-            widgetReloader()
+            reloadWidgetIfPossible()
         }
     }
 
@@ -226,7 +254,9 @@ final class PetViewModel: ObservableObject {
             combinedSnapshotStore: combinedSnapshotStore,
             includeTrustedActivity: Self.shouldIncludeTrustedActivity(
                 for: latestRefreshStatus
-            )
+            ),
+            diagnosticRecorder: sharedSnapshotDiagnosticRecorder,
+            rebuiltSnapshotFaultIdentifiers: &rebuiltSnapshotFaultIdentifiers
         )
         let snapshot = combinedHUDState.snapshot
         let activitySnapshot = combinedHUDState.activitySnapshot
@@ -234,6 +264,7 @@ final class PetViewModel: ObservableObject {
             snapshot: snapshot,
             activitySnapshot: activitySnapshot
         )
+        hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
         return didChange && combinedHUDState.didPersist
     }
 
@@ -242,8 +273,17 @@ final class PetViewModel: ObservableObject {
         let snapshot: TinyBuddySnapshot
         let activitySnapshot: GitTodayActivitySnapshot
 
-        if let combinedSnapshot = combinedSnapshotStore.loadReadOnly(),
-           combinedSnapshot.dayIdentifier == fallbackSnapshot.stats.dayIdentifier {
+        let combinedRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: fallbackSnapshot.stats.dayIdentifier
+        )
+        combinedRead.observation.map(sharedSnapshotDiagnosticRecorder.record)
+        if let observation = combinedRead.observation,
+           combinedRead.snapshot == nil,
+           observation.reason == .snapshotCorrupt || observation.reason == .staleData {
+            _ = reloadHUDState()
+            return
+        }
+        if let combinedSnapshot = combinedRead.snapshot {
             snapshot = combinedSnapshot.snapshot
             activitySnapshot = combinedSnapshot.activitySnapshot
         } else {
@@ -255,6 +295,7 @@ final class PetViewModel: ObservableObject {
             )
         }
         _ = applyHUDState(snapshot: snapshot, activitySnapshot: activitySnapshot)
+        hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
     }
 
     @discardableResult
@@ -285,29 +326,146 @@ final class PetViewModel: ObservableObject {
         store: DailyStatsStore,
         activityStore: GitTodayActivityStore,
         combinedSnapshotStore: TinyBuddyCombinedSnapshotStore,
-        includeTrustedActivity: Bool
+        includeTrustedActivity: Bool,
+        diagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder,
+        rebuiltSnapshotFaultIdentifiers: inout Set<String>
     ) -> CombinedHUDState {
         let snapshot = store.loadSnapshot()
+        let expectedDayIdentifier = snapshot.stats.dayIdentifier
+        let validatedRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        validatedRead.observation.map(diagnosticRecorder.record)
+        if validatedRead.observation == nil, validatedRead.snapshot != nil {
+            rebuiltSnapshotFaultIdentifiers = Set(
+                rebuiltSnapshotFaultIdentifiers.filter {
+                    !$0.hasSuffix(".\(expectedDayIdentifier)")
+                }
+            )
+        }
         let activityRead = includeTrustedActivity
             ? activityStore.loadTodaySnapshotRead()
             : nil
+
+        if let observation = validatedRead.observation {
+            if let recoveredSnapshot = validatedRead.snapshot {
+                let faultBudgetIdentifier = "\(observation.identifier).\(expectedDayIdentifier)"
+                if observation.reason == .snapshotCorrupt,
+                   rebuiltSnapshotFaultIdentifiers.insert(faultBudgetIdentifier).inserted {
+                    guard combinedSnapshotStore.repairValidatedSnapshot(recoveredSnapshot) else {
+                        diagnosticRecorder.record(
+                            phase: .snapshotWrite,
+                            reason: .persistenceFailed,
+                            recovery: .stopped
+                        )
+                        return CombinedHUDState(
+                            snapshot: recoveredSnapshot.snapshot,
+                            activitySnapshot: recoveredSnapshot.activitySnapshot,
+                            didPersist: false
+                        )
+                    }
+                    let repairedRead = combinedSnapshotStore.readValidated(
+                        expectedDayIdentifier: expectedDayIdentifier
+                    )
+                    repairedRead.observation.map(diagnosticRecorder.record)
+                    guard let repairedSnapshot = repairedRead.snapshot,
+                          repairedRead.observation == nil else {
+                        diagnosticRecorder.record(
+                            phase: .snapshotWrite,
+                            reason: .persistenceFailed,
+                            recovery: .stopped
+                        )
+                        return CombinedHUDState(
+                            snapshot: recoveredSnapshot.snapshot,
+                            activitySnapshot: recoveredSnapshot.activitySnapshot,
+                            didPersist: false
+                        )
+                    }
+                    diagnosticRecorder.record(
+                        phase: .snapshotRead,
+                        reason: .snapshotCorrupt,
+                        recovery: .rebuilt,
+                        attemptCount: observation.attemptCount + 1
+                    )
+                    rebuiltSnapshotFaultIdentifiers.remove(faultBudgetIdentifier)
+                    return CombinedHUDState(
+                        snapshot: repairedSnapshot.snapshot,
+                        activitySnapshot: repairedSnapshot.activitySnapshot,
+                        didPersist: true
+                    )
+                }
+                return CombinedHUDState(
+                    snapshot: recoveredSnapshot.snapshot,
+                    activitySnapshot: recoveredSnapshot.activitySnapshot,
+                    didPersist: false
+                )
+            }
+            let faultBudgetIdentifier = "\(observation.identifier).\(expectedDayIdentifier)"
+            guard observation.reason == .snapshotCorrupt || observation.reason == .staleData,
+                  rebuiltSnapshotFaultIdentifiers.insert(faultBudgetIdentifier).inserted else {
+                return neutralHUDState(snapshot)
+            }
+
+            let rebuiltUpdate = combinedSnapshotStore.updatePetSlice(
+                snapshot,
+                fallbackActivitySnapshot: activityRead?.snapshot,
+                fallbackActivityRevision: activityRead?.trustedRevision
+            )
+            rebuiltUpdate.observation.map(diagnosticRecorder.record)
+            guard rebuiltUpdate.didPersist || rebuiltUpdate.outcome == .alreadyCurrent else {
+                if rebuiltUpdate.observation == nil {
+                    diagnosticRecorder.record(
+                        phase: .snapshotWrite,
+                        reason: .persistenceFailed,
+                        recovery: .stopped
+                    )
+                }
+                return neutralHUDState(snapshot)
+            }
+            diagnosticRecorder.record(
+                phase: .snapshotRead,
+                reason: observation.reason,
+                recovery: rebuiltUpdate.didPersist ? .rebuilt : .rereadSucceeded,
+                attemptCount: observation.attemptCount + 1
+            )
+            let rebuiltRead = combinedSnapshotStore.readValidated(
+                expectedDayIdentifier: expectedDayIdentifier
+            )
+            rebuiltRead.observation.map(diagnosticRecorder.record)
+            guard let rebuiltSnapshot = rebuiltRead.snapshot else {
+                return neutralHUDState(snapshot)
+            }
+            rebuiltSnapshotFaultIdentifiers.remove(faultBudgetIdentifier)
+            return CombinedHUDState(
+                snapshot: rebuiltSnapshot.snapshot,
+                activitySnapshot: rebuiltSnapshot.activitySnapshot,
+                didPersist: true
+            )
+        }
+
         let combinedUpdate = combinedSnapshotStore.updatePetSlice(
             snapshot,
             fallbackActivitySnapshot: activityRead?.snapshot,
             fallbackActivityRevision: activityRead?.trustedRevision
         )
+        combinedUpdate.observation.map(diagnosticRecorder.record)
 
-        guard let combinedSnapshot = combinedUpdate.snapshot,
-              combinedSnapshot.dayIdentifier == snapshot.stats.dayIdentifier else {
-            return CombinedHUDState(
-                snapshot: snapshot,
-                activitySnapshot: GitTodayActivitySnapshot(
-                    focusBlockCount: nil,
-                    commitCount: nil,
-                    recentProjectName: nil
-                ),
-                didPersist: false
-            )
+        guard combinedUpdate.didPersist || combinedUpdate.outcome == .alreadyCurrent else {
+            if let retainedSnapshot = validatedRead.snapshot {
+                return CombinedHUDState(
+                    snapshot: retainedSnapshot.snapshot,
+                    activitySnapshot: retainedSnapshot.activitySnapshot,
+                    didPersist: false
+                )
+            }
+            return neutralHUDState(snapshot)
+        }
+        let publishedRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        publishedRead.observation.map(diagnosticRecorder.record)
+        guard let combinedSnapshot = publishedRead.snapshot else {
+            return neutralHUDState(snapshot)
         }
 
         return CombinedHUDState(
@@ -315,6 +473,31 @@ final class PetViewModel: ObservableObject {
             activitySnapshot: combinedSnapshot.activitySnapshot,
             didPersist: combinedUpdate.didPersist
         )
+    }
+
+    private static func neutralHUDState(_ snapshot: TinyBuddySnapshot) -> CombinedHUDState {
+        CombinedHUDState(
+            snapshot: snapshot,
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: nil,
+                commitCount: nil,
+                recentProjectName: nil
+            ),
+            didPersist: false
+        )
+    }
+
+    private func reloadWidgetIfPossible() {
+        do {
+            try widgetReloader()
+        } catch {
+            sharedSnapshotDiagnosticRecorder.record(
+                phase: .timelineReload,
+                reason: .timelineReloadFailed,
+                recovery: .stopped
+            )
+            hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
+        }
     }
 
     private static func shouldIncludeTrustedActivity(
