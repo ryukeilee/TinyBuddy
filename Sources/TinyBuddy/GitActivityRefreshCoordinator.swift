@@ -10,9 +10,22 @@ extension Notification.Name {
     static let gitScanRootAuthorizationRequested = Notification.Name("TinyBuddy.gitScanRootAuthorizationRequested")
 }
 
+enum GitRefreshScriptOutcome: String, Equatable {
+    case success
+    case partial
+    case skipped
+    case failed
+    case unknown
+
+    init(metricsValue: String) {
+        self = Self(rawValue: metricsValue) ?? .unknown
+    }
+}
+
 struct GitRefreshScriptMetrics: Equatable {
     let repositoryCount: Int?
     let invalidRepositoryCount: Int?
+    let refreshOutcome: GitRefreshScriptOutcome?
     let cacheHitCount: Int?
     let reflogUnchangedSkipCount: Int?
     let recomputedRepositoryCount: Int?
@@ -21,6 +34,7 @@ struct GitRefreshScriptMetrics: Equatable {
     init(
         repositoryCount: Int?,
         invalidRepositoryCount: Int? = nil,
+        refreshOutcome: GitRefreshScriptOutcome? = nil,
         cacheHitCount: Int?,
         reflogUnchangedSkipCount: Int?,
         recomputedRepositoryCount: Int?,
@@ -28,6 +42,7 @@ struct GitRefreshScriptMetrics: Equatable {
     ) {
         self.repositoryCount = repositoryCount
         self.invalidRepositoryCount = invalidRepositoryCount
+        self.refreshOutcome = refreshOutcome
         self.cacheHitCount = cacheHitCount
         self.reflogUnchangedSkipCount = reflogUnchangedSkipCount
         self.recomputedRepositoryCount = recomputedRepositoryCount
@@ -41,7 +56,7 @@ struct GitRefreshScriptResult {
     let metrics: GitRefreshScriptMetrics?
 }
 
-private struct GitRefreshScriptResultParser {
+struct GitRefreshScriptResultParser {
     static let metricsPrefix = "TINYBUDDY_REFRESH_METRICS\t"
 
     static func parseMetrics(from standardOutput: String) -> GitRefreshScriptMetrics? {
@@ -67,6 +82,7 @@ private struct GitRefreshScriptResultParser {
         return GitRefreshScriptMetrics(
             repositoryCount: values["repository_count"].flatMap(Int.init),
             invalidRepositoryCount: values["invalid_repository_count"].flatMap(Int.init),
+            refreshOutcome: values["refresh_outcome"].map(GitRefreshScriptOutcome.init(metricsValue:)),
             cacheHitCount: values["cache_hit_count"].flatMap(Int.init),
             reflogUnchangedSkipCount: values["reflog_unchanged_skip_count"].flatMap(Int.init),
             recomputedRepositoryCount: values["recomputed_repository_count"].flatMap(Int.init),
@@ -415,7 +431,8 @@ final class GitActivityRefreshCoordinator {
         let accessResult = authorizedRootsProvider()
         let scopedRoots = accessResult.roots
         let authorizedRootURLs = scopedRoots.map(\.url)
-        if accessResult.issue == .authorizationInvalid {
+        if accessResult.issue == .authorizationInvalid,
+           authorizedRootURLs.isEmpty {
             lastRefreshAttemptAt = now
             lastRefreshFailureAt = now
             let diagnostic = diagnostic(for: accessResult.issue)
@@ -470,6 +487,62 @@ final class GitActivityRefreshCoordinator {
                 DispatchQueue.main.async { [weak self] in
                     guard let self,
                           self.lifecycleGeneration == lifecycleGeneration else {
+                        return
+                    }
+
+                    let scriptOutcome = scriptResult.metrics?.refreshOutcome
+                    if scriptOutcome == .failed || scriptOutcome == .unknown {
+                        let diagnostic = GitActivityRefreshDiagnostic(
+                            source: .gitActivityRefresh,
+                            stage: .scriptExecution,
+                            reason: .scriptExecutionFailed
+                        )
+                        self.lastRefreshFailureAt = now
+                        self.recordRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: .failed,
+                            diagnostic: diagnostic,
+                            metrics: self.makeMetrics(
+                                startedAt: now,
+                                finishedAt: self.dateProvider(),
+                                authorizedRootCount: authorizedRootURLs.count,
+                                scriptMetrics: scriptResult.metrics,
+                                widgetReloaded: false,
+                                diagnostic: diagnostic
+                            )
+                        )
+                        self.finishRefresh(succeeded: false)
+                        return
+                    }
+
+                    let hasPartialRecovery = accessResult.issue == .authorizationInvalid
+                        || scriptOutcome == .partial
+                        || (scriptOutcome == nil && (scriptResult.metrics?.invalidRepositoryCount ?? 0) > 0)
+                    if scriptOutcome == .skipped {
+                        let diagnostic = hasPartialRecovery
+                            ? GitActivityRefreshDiagnostic(
+                                source: .gitActivityRefresh,
+                                stage: .scriptExecution,
+                                reason: .partialRecovery
+                            )
+                            : nil
+                        self.recordRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: hasPartialRecovery ? .partial : .skipped,
+                            diagnostic: diagnostic,
+                            metrics: self.makeMetrics(
+                                startedAt: now,
+                                finishedAt: self.dateProvider(),
+                                authorizedRootCount: authorizedRootURLs.count,
+                                scriptMetrics: scriptResult.metrics,
+                                widgetReloaded: false,
+                                diagnostic: nil
+                            )
+                        )
+                        self.lastRefreshFailureAt = nil
+                        self.finishRefresh(succeeded: true)
                         return
                     }
 
@@ -663,17 +736,25 @@ final class GitActivityRefreshCoordinator {
                         }
                     }
 
+                    let refreshOutcome: GitActivityRefreshOutcome
+                    if hasPartialRecovery {
+                        refreshOutcome = .partial
+                    } else {
+                        refreshOutcome = .succeeded
+                    }
+                    let diagnostic = hasPartialRecovery
+                        ? GitActivityRefreshDiagnostic(
+                            source: .gitActivityRefresh,
+                            stage: .scriptExecution,
+                            reason: .partialRecovery
+                        )
+                        : nil
+
                     self.recordRefreshStatus(
                         refreshedAt: now,
                         trigger: trigger,
-                        outcome: scriptResult.metrics?.invalidRepositoryCount ?? 0 > 0 ? .partial : .succeeded,
-                        diagnostic: scriptResult.metrics?.invalidRepositoryCount ?? 0 > 0
-                            ? GitActivityRefreshDiagnostic(
-                                source: .gitActivityRefresh,
-                                stage: .scriptExecution,
-                                reason: .partialRecovery
-                            )
-                            : nil,
+                        outcome: refreshOutcome,
+                        diagnostic: diagnostic,
                         metrics: self.makeMetrics(
                             startedAt: now,
                             finishedAt: self.dateProvider(),

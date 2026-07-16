@@ -23,13 +23,18 @@ PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 # roots, and the app-group preferences container.
 FIND_BIN="${TINYBUDDY_FIND_BIN:-find}"
 STAT_BIN="${TINYBUDDY_STAT_BIN:-stat}"
+GIT_BIN="${TINYBUDDY_GIT_BIN:-git}"
 PERL_BIN="${TINYBUDDY_PERL_BIN:-}"
+DUPLICATE_EVENT_WINDOW_SECONDS="${TINYBUDDY_DUPLICATE_EVENT_WINDOW_SECONDS:-120}"
+REPOSITORY_CACHE_MAX_AGE_SECONDS="${TINYBUDDY_GIT_REPOSITORY_CACHE_MAX_AGE_SECONDS:-300}"
 CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-repository-cache}"
 CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
 CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
+CACHE_REPO_STATS_CHECKSUM_FILE="$CACHE_DIR/repository-stats.cksum"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
 EMPTY_CACHE_VALUE="__TINYBUDDY_EMPTY__"
+MISSING_PLIST_VALUE="__TINYBUDDY_MISSING_PLIST_VALUE__"
 
 normalize_nonnegative_int64() {
   local value="$1"
@@ -80,6 +85,14 @@ repo_git_paths_file="$(mktemp)"
 repo_stats_cache_file="$(mktemp)"
 new_repo_stats_file="$(mktemp)"
 validated_repo_list_file="$(mktemp)"
+repository_identity_file="$(mktemp)"
+repository_records_file="$(mktemp)"
+unique_repository_records_file="$(mktemp)"
+raw_activity_events_file="$(mktemp)"
+normalized_activity_events_file="$(mktemp)"
+repo_activity_events_file="$(mktemp)"
+rewrite_log_file="$(mktemp)"
+rewrite_candidates_file="$(mktemp)"
 find_stderr_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
 diagnostics_emitted=0
@@ -89,6 +102,7 @@ cache_hit_count=0
 reflog_unchanged_skip_count=0
 recomputed_repository_count=0
 repository_scan_failed=0
+repository_scan_failure_count=0
 invalid_repository_count=0
 recovery_has_missing_reflog=0
 snapshot_write_lock_acquired=0
@@ -118,7 +132,7 @@ cleanup() {
     rmdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null || true
     rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
   fi
-  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$find_stderr_file" "$focus_block_list_file"
+  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
 emit_runtime_diagnostics_once() {
@@ -169,17 +183,27 @@ path_contains_noise_component() {
   case "$candidate_path" in
     */.build|*/.build/*|\
     */.cache|*/.cache/*|\
+    */.gradle|*/.gradle/*|\
+    */.next|*/.next/*|\
     */.pnpm-store|*/.pnpm-store/*|\
     */.swiftpm|*/.swiftpm/*|\
+    */.terraform|*/.terraform/*|\
     */.tmp|*/.tmp/*|\
+    */.turbo|*/.turbo/*|\
+    */.venv|*/.venv/*|\
     */__fixtures__|*/__fixtures__/*|\
+    */bower_components|*/bower_components/*|\
+    */build|*/build/*|\
     */caches|*/caches/*|\
     */carthage|*/carthage/*|\
+    */coverage|*/coverage/*|\
     */deriveddata|*/deriveddata/*|\
     */deps|*/deps/*|\
+    */dist|*/dist/*|\
     */fixtures|*/fixtures/*|\
     */node_modules|*/node_modules/*|\
     */pods|*/pods/*|\
+    */target|*/target/*|\
     */temp|*/temp/*|\
     */testdata|*/testdata/*|\
     */third_party|*/third_party/*|\
@@ -320,6 +344,446 @@ validate_git_metadata_layout() {
   [ -d "$common_dir" ]
 }
 
+resolve_common_git_dir() {
+  local git_dir="$1"
+  local common_dir_path_file="$git_dir/commondir"
+  local common_dir_path
+
+  if [ ! -f "$common_dir_path_file" ]; then
+    printf '%s\n' "$git_dir"
+    return
+  fi
+
+  common_dir_path="$(sed -n '1p' "$common_dir_path_file")"
+  [ -n "$common_dir_path" ] || return 1
+  resolve_git_metadata_dir "$git_dir" "$common_dir_path"
+}
+
+repository_display_name() {
+  local repo_root="$1"
+  local common_dir="$2"
+  local common_basename
+
+  common_basename="$(basename "$common_dir")"
+  if [ "$common_basename" = ".git" ]; then
+    basename "${common_dir%/.git}"
+  else
+    basename "$repo_root"
+  fi
+}
+
+record_field_is_supported() {
+  case "$1" in
+    *$'\t'*|*$'\n'*|*$'\r'*)
+      return 1
+      ;;
+  esac
+}
+
+identity_looks_automated() {
+  local normalized_identity
+  normalized_identity="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+
+  case "$normalized_identity" in
+    *'[bot]'*|*dependabot*|*renovate-bot*|*renovate\ bot*|*github-actions*|*copilot-swe-agent*|*automation@*|*bot@*|*' bot <'*|*' robot <'*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+git_commit_is_automated() {
+  local git_dir="$1"
+  local object_id="$2"
+  local commit_identity
+  local git_identity_exit_code
+
+  case "$object_id" in
+    ""|*[!0-9a-fA-F]*)
+      return 1
+      ;;
+  esac
+  [ "${#object_id}" -eq 40 ] || [ "${#object_id}" -eq 64 ] || return 1
+
+  trap - ERR
+  if commit_identity="$(
+      GIT_CONFIG_NOSYSTEM=1 \
+      GIT_CONFIG_GLOBAL=/dev/null \
+      GIT_OPTIONAL_LOCKS=0 \
+      "$GIT_BIN" --git-dir="$git_dir" show -s --format='%an <%ae> %cn <%ce>' "$object_id" 2>/dev/null
+    )"; then
+    git_identity_exit_code=0
+  else
+    git_identity_exit_code="$?"
+  fi
+  enable_error_trap
+  [ "$git_identity_exit_code" -eq 0 ] || return 1
+
+  identity_looks_automated "$commit_identity"
+}
+
+parse_reflog_events() {
+  local reflog_path="$1"
+  local metadata
+  local message
+  local kind
+  local old_object_id
+  local new_object_id
+  local epoch
+  local actor_is_automated
+
+  : > "$repo_reflog_file"
+
+  if [ -n "$PERL_BIN" ]; then
+    "$PERL_BIN" -e '
+      use strict;
+      use warnings;
+
+      while (my $line = <>) {
+          chomp $line;
+          my ($metadata, $message) = split /\t/, $line, 2;
+          next unless defined $message;
+
+          my $kind;
+          if ($message =~ /^commit \(amend\):/) {
+              $kind = "amend";
+          } elsif ($message =~ /^commit(?: \(.+\))?:/) {
+              $kind = "commit";
+          } elsif ($message =~ /^merge(?:\s+[^:]*)?:/) {
+              $kind = "merge";
+          } elsif ($message =~ /^rebase \(start\):/) {
+              $kind = "rewriteStart";
+          } elsif ($message =~ /^rebase \((?:pick|reword|edit|squash|fixup)\):/) {
+              $kind = "rewrite";
+          } elsif ($message =~ /^rebase \(finish\):/) {
+              $kind = "rewriteFinish";
+          } else {
+              next;
+          }
+
+          my @parts = split / /, $metadata;
+          next if @parts < 4;
+          my ($old_object_id, $new_object_id) = @parts[0, 1];
+          my $epoch = $parts[-2];
+          next unless $old_object_id =~ /^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$/;
+          next unless $new_object_id =~ /^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$/;
+          next unless $epoch =~ /^\d+$/;
+
+          my $identity = lc $metadata;
+          my $actor_is_automated = $identity =~ /\[bot\]|dependabot|renovate-bot|renovate bot|github-actions|copilot-swe-agent|automation\@|bot\@| bot <| robot </ ? 1 : 0;
+          $message =~ s/[\t\r\n]+/ /g;
+          print join("\t", $kind, $old_object_id, $new_object_id, $epoch, $actor_is_automated, $message), "\n";
+      }
+    ' "$reflog_path" > "$repo_reflog_file"
+    return
+  fi
+
+  while IFS=$'\t' read -r metadata message || [ -n "${metadata:-}" ]; do
+    case "$message" in
+      "commit (amend):"*)
+        kind="amend"
+        ;;
+      commit:*|"commit ("*"):"*)
+        kind="commit"
+        ;;
+      merge:*|"merge "*":"*)
+        kind="merge"
+        ;;
+      "rebase (start):"*)
+        kind="rewriteStart"
+        ;;
+      "rebase (pick):"*|"rebase (reword):"*|"rebase (edit):"*|"rebase (squash):"*|"rebase (fixup):"*)
+        kind="rewrite"
+        ;;
+      "rebase (finish):"*)
+        kind="rewriteFinish"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    set -f
+    metadata_parts=($metadata)
+    set +f
+    [ "${#metadata_parts[@]}" -ge 4 ] || continue
+    old_object_id="${metadata_parts[0]}"
+    new_object_id="${metadata_parts[1]}"
+    epoch="${metadata_parts[${#metadata_parts[@]} - 2]}"
+    case "$old_object_id$new_object_id" in
+      *[!0-9a-fA-F]*)
+        continue
+        ;;
+    esac
+    { [ "${#old_object_id}" -eq 40 ] || [ "${#old_object_id}" -eq 64 ]; } || continue
+    { [ "${#new_object_id}" -eq 40 ] || [ "${#new_object_id}" -eq 64 ]; } || continue
+    case "$epoch" in
+      ""|*[!0-9]*)
+        continue
+        ;;
+    esac
+
+    actor_is_automated=0
+    identity_looks_automated "$metadata" && actor_is_automated=1
+    message="$(printf '%s' "$message" | tr '\t\r\n' '   ')"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$kind" "$old_object_id" "$new_object_id" "$epoch" "$actor_is_automated" "$message" >> "$repo_reflog_file"
+  done < "$reflog_path"
+}
+
+# Activity semantics are intentionally event based rather than reachability
+# based. A completed commit remains activity after a branch deletion, reset, or
+# rebase. Amend replaces the earlier logical event, while rebase/reset/checkout
+# records never create another completion. Events are later grouped by the
+# canonical common Git directory, filtered for automated identities, and
+# deduplicated by object identity inside the bounded observation window.
+append_reflog_events_for_today() {
+  local repository_identity="$1"
+  local display_name="$2"
+  local git_dir="$3"
+  local kind
+  local old_object_id
+  local new_object_id
+  local epoch
+  local actor_is_automated
+  local message
+  local day_identifier
+  local local_hour
+  local local_minute
+  local block_minute
+  local focus_block
+  local message_fingerprint
+  local activity_subject
+  local object_is_automated
+
+  : > "$repo_activity_events_file"
+  parse_reflog_events "$4" || return 1
+
+  while IFS=$'\t' read -r kind old_object_id new_object_id epoch actor_is_automated message; do
+    day_identifier="$(/bin/date -r "$epoch" +%Y-%m-%d 2>/dev/null)" || continue
+    [ "$day_identifier" = "$TODAY" ] || continue
+    local_hour="$(/bin/date -r "$epoch" +%H 2>/dev/null)" || continue
+    local_minute="$(/bin/date -r "$epoch" +%M 2>/dev/null)" || continue
+    block_minute=0
+    [ "$local_minute" -ge 30 ] && block_minute=30
+    focus_block="$(printf '%sT%s:%02d' "$day_identifier" "$local_hour" "$block_minute")"
+    activity_subject="${message#*: }"
+    message_fingerprint="$(printf '%s' "$activity_subject" | /usr/bin/cksum)"
+    message_fingerprint="${message_fingerprint%% *}"
+
+    object_is_automated=0
+    git_commit_is_automated "$git_dir" "$new_object_id" && object_is_automated=1
+    if [ "$actor_is_automated" -eq 1 ] || [ "$object_is_automated" -eq 1 ]; then
+      actor_is_automated=1
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" >> "$repo_activity_events_file"
+
+  done < "$repo_reflog_file"
+}
+
+build_rewrite_candidates() {
+  local git_dir="$1"
+  local old_object_id="$2"
+  local new_object_id="$3"
+  local git_log_exit_code
+  local candidate_object_id
+  local candidate_subject
+  local candidate_fingerprint
+
+  : > "$rewrite_log_file"
+  : > "$rewrite_candidates_file"
+  trap - ERR
+  if GIT_CONFIG_NOSYSTEM=1 \
+     GIT_CONFIG_GLOBAL=/dev/null \
+     GIT_OPTIONAL_LOCKS=0 \
+     "$GIT_BIN" --git-dir="$git_dir" log --reverse --format='%H%x09%s' \
+       "$new_object_id..$old_object_id" > "$rewrite_log_file" 2>/dev/null; then
+    git_log_exit_code=0
+  else
+    git_log_exit_code="$?"
+  fi
+  enable_error_trap
+  [ "$git_log_exit_code" -eq 0 ] || return 1
+
+  while IFS=$'\t' read -r candidate_object_id candidate_subject || [ -n "${candidate_object_id:-}" ]; do
+    case "$candidate_object_id" in
+      ""|*[!0-9a-fA-F]*)
+        continue
+        ;;
+    esac
+    { [ "${#candidate_object_id}" -eq 40 ] || [ "${#candidate_object_id}" -eq 64 ]; } || continue
+    candidate_subject="$(printf '%s' "$candidate_subject" | tr '\t\r\n' '   ')"
+    candidate_fingerprint="$(printf '%s' "$candidate_subject" | /usr/bin/cksum)"
+    candidate_fingerprint="${candidate_fingerprint%% *}"
+    printf '%s\t%s\n' "$candidate_object_id" "$candidate_fingerprint" >> "$rewrite_candidates_file"
+  done < "$rewrite_log_file"
+}
+
+append_repo_activity_events_to_raw() {
+  local repository_identity="$1"
+  local display_name="$2"
+  local reflog_path="$3"
+  local git_dir="$4"
+  local epoch
+  local old_object_id
+  local new_object_id
+  local kind
+  local message_fingerprint
+  local focus_block
+  local actor_is_automated
+  local rewrite_candidate_index=0
+  local rewrite_candidate_line
+  local rewrite_match_line
+  local rewrite_match_index
+  local rewrite_original_oid
+
+  : > "$rewrite_candidates_file"
+  while IFS=$'\t' read -r epoch old_object_id new_object_id kind message_fingerprint focus_block actor_is_automated; do
+    rewrite_original_oid="$EMPTY_CACHE_VALUE"
+    if [ "$kind" = "rewriteStart" ]; then
+      rewrite_candidate_index=0
+      build_rewrite_candidates "$git_dir" "$old_object_id" "$new_object_id" || : > "$rewrite_candidates_file"
+    elif [ "$kind" = "rewrite" ]; then
+      rewrite_candidate_index=$((rewrite_candidate_index + 1))
+      rewrite_candidate_line="$(sed -n "${rewrite_candidate_index}p" "$rewrite_candidates_file")"
+      if [ -n "$rewrite_candidate_line" ]; then
+        rewrite_original_oid="${rewrite_candidate_line%%$'\t'*}"
+        rewrite_match_line="$(awk -F '\t' \
+          -v first="$rewrite_candidate_index" \
+          -v fingerprint="$message_fingerprint" \
+          'NR >= first && $2 == fingerprint { print NR "\t" $1; exit }' \
+          "$rewrite_candidates_file")"
+        if [ -n "$rewrite_match_line" ]; then
+          rewrite_match_index="${rewrite_match_line%%$'\t'*}"
+          rewrite_original_oid="${rewrite_match_line#*$'\t'}"
+          rewrite_candidate_index="$rewrite_match_index"
+        fi
+      fi
+    fi
+
+    activity_event_sequence=$((activity_event_sequence + 1))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$reflog_path" "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" "$activity_event_sequence" "$rewrite_original_oid" >> "$raw_activity_events_file"
+  done < "$repo_activity_events_file"
+}
+
+normalize_activity_events() {
+  : > "$normalized_activity_events_file"
+  [ -s "$raw_activity_events_file" ] || return 0
+
+  LC_ALL=C sort -t $'\t' -k1,1 -k4,4n -k11,11n "$raw_activity_events_file" > "$repo_reflog_file"
+  awk -F '\t' -v window="$DUPLICATE_EVENT_WINDOW_SECONDS" -v empty="$EMPTY_CACHE_VALUE" '
+    function deactivate(event_index, key) {
+      live[event_index] = 0
+      if ((key in active) && active[key] == event_index) {
+        delete active[key]
+      }
+    }
+
+    $10 != 0 && $7 != "rewriteStart" && $7 != "rewrite" && $7 != "rewriteFinish" { next }
+
+    {
+      identity = $1
+      source = $3
+      epoch = $4 + 0
+      old_key = identity SUBSEP $5
+      new_key = identity SUBSEP $6
+      source_key = identity SUBSEP source
+      duplicate_key = identity SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP $8
+
+      if ($7 == "rewriteStart") {
+        rewrite_generation[source_key]++
+        rewrite_active[source_key] = 1
+        next
+      }
+
+      if ($7 == "rewriteFinish") {
+        rewrite_active[source_key] = 0
+        next
+      }
+
+      if ($7 == "rewrite") {
+        if ((source_key in rewrite_active) && rewrite_active[source_key] == 0) {
+          next
+        }
+        if (!(source_key in rewrite_generation) || rewrite_generation[source_key] < 1) {
+          rewrite_generation[source_key] = 1
+          rewrite_active[source_key] = 1
+        }
+        current_generation = source_key SUBSEP rewrite_generation[source_key]
+        rewritten_index = 0
+        if ($12 != empty) {
+          original_object_key = identity SUBSEP $12
+          if ((original_object_key in active) && live[active[original_object_key]]) {
+            rewritten_index = active[original_object_key]
+          }
+        } else {
+          for (source_pass = 1; source_pass <= 2 && rewritten_index == 0; source_pass++) {
+            for (candidate_index = 1; candidate_index <= count; candidate_index++) {
+              if (live[candidate_index] &&
+                  event_identity[candidate_index] == identity &&
+                  (source_pass == 2 || event_source[candidate_index] == source) &&
+                  event_subject[candidate_index] == $8 &&
+                  active[identity SUBSEP event_oid[candidate_index]] == candidate_index &&
+                  event_rewrite_generation[candidate_index] != current_generation) {
+                rewritten_index = candidate_index
+                break
+              }
+            }
+          }
+        }
+        if (rewritten_index != 0) {
+          previous_object_key = identity SUBSEP event_oid[rewritten_index]
+          if ((previous_object_key in active) && active[previous_object_key] == rewritten_index) {
+            delete active[previous_object_key]
+          }
+          event_oid[rewritten_index] = $6
+          event_rewrite_generation[rewritten_index] = current_generation
+          active[new_key] = rewritten_index
+        }
+        next
+      }
+
+      if ((new_key in object_epoch) && epoch >= object_epoch[new_key] && epoch - object_epoch[new_key] <= window) {
+        next
+      }
+      if ((duplicate_key in duplicate_epoch) && epoch >= duplicate_epoch[duplicate_key] && epoch - duplicate_epoch[duplicate_key] <= window) {
+        next
+      }
+      object_epoch[new_key] = epoch
+      duplicate_epoch[duplicate_key] = epoch
+
+      if ($7 == "amend" && (old_key in active)) {
+        previous_index = active[old_key]
+        deactivate(previous_index, old_key)
+      }
+
+      count++
+      event_identity[count] = identity
+      event_display[count] = $2
+      event_source[count] = source
+      event_epoch[count] = epoch
+      event_oid[count] = $6
+      event_kind[count] = $7
+      event_block[count] = $9
+      event_subject[count] = $8
+      live[count] = 1
+      active[new_key] = count
+    }
+
+    END {
+      for (event_index = 1; event_index <= count; event_index++) {
+        if (live[event_index]) {
+          printf "%s\t%s\t%d\t%s\t%s\t%s\n", event_identity[event_index], event_display[event_index], event_epoch[event_index], event_oid[event_index], event_kind[event_index], event_block[event_index]
+        }
+      }
+    }
+  ' "$repo_reflog_file" > "$normalized_activity_events_file"
+}
+
 reset_activity_snapshot() {
   total_count=0
   latest_activity_timestamp=""
@@ -331,11 +795,17 @@ reset_activity_snapshot() {
   cache_hit_count=0
   reflog_unchanged_skip_count=0
   recomputed_repository_count=0
-  invalid_repository_count=0
+  invalid_repository_count="$repository_scan_failure_count"
   recovery_has_missing_reflog=0
+  activity_event_sequence=0
   : > "$focus_block_list_file"
   : > "$new_repo_stats_file"
   : > "$validated_repo_list_file"
+  : > "$repository_identity_file"
+  : > "$repository_records_file"
+  : > "$unique_repository_records_file"
+  : > "$raw_activity_events_file"
+  : > "$normalized_activity_events_file"
 }
 
 emit_refresh_metrics() {
@@ -411,6 +881,7 @@ refresh_repository_list_from_scan() {
 
   if [ "$find_exit_code" -ne 0 ]; then
     repository_scan_failed=1
+    repository_scan_failure_count=$((repository_scan_failure_count + 1))
     emit_runtime_diagnostics_once
     log_error "repository scan encountered inaccessible paths under authorized roots (find exit: $find_exit_code); continuing with readable results"
     emit_find_stderr_sample
@@ -442,9 +913,30 @@ write_repository_cache() {
 
 cache_matches_current_roots() {
   local current_signature_file
+  local cache_mtime
+  local current_epoch
+  local cache_age
   current_signature_file="$(mktemp)"
 
   if [ ! -f "$CACHE_REPO_LIST_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_SIGNATURE_FILE" ]; then
+    rm -f "$current_signature_file"
+    return 1
+  fi
+
+  cache_mtime="$("$STAT_BIN" -f '%m' "$CACHE_REPO_LIST_FILE" 2>/dev/null)" || {
+    rm -f "$current_signature_file"
+    return 1
+  }
+  current_epoch="$(/bin/date +%s)" || {
+    rm -f "$current_signature_file"
+    return 1
+  }
+  if [ "$current_epoch" -lt "$cache_mtime" ]; then
+    rm -f "$current_signature_file"
+    return 1
+  fi
+  cache_age=$((current_epoch - cache_mtime))
+  if [ "$cache_age" -ge "$REPOSITORY_CACHE_MAX_AGE_SECONDS" ]; then
     rm -f "$current_signature_file"
     return 1
   fi
@@ -468,91 +960,241 @@ load_cached_repository_list() {
 }
 
 load_cached_repository_stats() {
-  if [ -f "$CACHE_REPO_STATS_FILE" ]; then
-    cp "$CACHE_REPO_STATS_FILE" "$repo_stats_cache_file"
-  else
+  local expected_checksum
+  local actual_checksum
+
+  : > "$repo_stats_cache_file"
+  [ -f "$CACHE_REPO_STATS_FILE" ] || return 0
+  [ -f "$CACHE_REPO_STATS_CHECKSUM_FILE" ] || return 0
+
+  expected_checksum="$(sed -n '1p' "$CACHE_REPO_STATS_CHECKSUM_FILE")" || return 0
+  [ -n "$expected_checksum" ] || return 0
+  if ! cp "$CACHE_REPO_STATS_FILE" "$repo_stats_cache_file"; then
+    : > "$repo_stats_cache_file"
+    return 0
+  fi
+  actual_checksum="$(/usr/bin/cksum < "$repo_stats_cache_file")" || {
+    : > "$repo_stats_cache_file"
+    return 0
+  }
+  if [ "$actual_checksum" != "$expected_checksum" ]; then
     : > "$repo_stats_cache_file"
   fi
 }
 
 write_repository_stats_cache() {
   local cache_stats_file
+  local cache_checksum_file
+  local cache_checksum
   /bin/mkdir -p "$CACHE_DIR"
   cache_stats_file="$(mktemp "$CACHE_REPO_STATS_FILE.XXXXXX")"
+  cache_checksum_file="$(mktemp "$CACHE_REPO_STATS_CHECKSUM_FILE.XXXXXX")"
   cp "$new_repo_stats_file" "$cache_stats_file"
+  cache_checksum="$(/usr/bin/cksum < "$cache_stats_file")"
+  printf '%s\n' "$cache_checksum" > "$cache_checksum_file"
   mv "$cache_stats_file" "$CACHE_REPO_STATS_FILE"
+  mv "$cache_checksum_file" "$CACHE_REPO_STATS_CHECKSUM_FILE"
 }
 
-read_reflog_mtime() {
+read_reflog_signature() {
   local reflog_path="$1"
+  local stat_signature
+  local content_checksum
   (
     trap - ERR
-    "$STAT_BIN" -f '%m' "$reflog_path"
+    stat_signature="$("$STAT_BIN" -f '%m:%z:%i' "$reflog_path")" || exit 1
+    content_checksum="$(/usr/bin/cksum < "$reflog_path")" || exit 1
+    content_checksum="${content_checksum%% *}"
+    printf '%s:%s\n' "$stat_signature" "$content_checksum"
   )
 }
 
-append_cached_focus_blocks() {
-  local encoded_focus_blocks="$1"
-
-  if [ "$encoded_focus_blocks" = "$EMPTY_CACHE_VALUE" ] || [ -z "$encoded_focus_blocks" ]; then
-    return
-  fi
-
-  printf '%s\n' "$encoded_focus_blocks" | tr ',' '\n' >> "$focus_block_list_file"
-}
-
-write_repository_stats_entry() {
-  local repo_root="$1"
+cached_reflog_events_match() {
+  local repository_identity="$1"
   local git_dir="$2"
   local reflog_path="$3"
   local reflog_mtime="$4"
-  local repo_count="$5"
-  local repo_latest_timestamp="${6:-}"
-  local encoded_focus_blocks="${7:-}"
 
-  case "$repo_root$git_dir$reflog_path$repo_latest_timestamp$encoded_focus_blocks" in
-    *$'\t'*|*$'\n'*|*$'\r'*)
-      return
-      ;;
-  esac
+  awk -F '\t' \
+    -v repository_identity="$repository_identity" \
+    -v git_dir="$git_dir" \
+    -v reflog_path="$reflog_path" \
+    -v today="$TODAY" \
+    -v reflog_mtime="$reflog_mtime" \
+    -v empty="$EMPTY_CACHE_VALUE" '
+      BEGIN { valid = 1 }
+      function is_unsigned(value) {
+        return value != "" && value !~ /[^0-9]/
+      }
+      function is_object_id(value) {
+        return (length(value) == 40 || length(value) == 64) && value !~ /[^0-9a-fA-F]/
+      }
+      function is_focus_block(value, digits) {
+        digits = value
+        gsub(/[-T:]/, "", digits)
+        return length(value) == 16 &&
+          substr(value, 5, 1) == "-" &&
+          substr(value, 8, 1) == "-" &&
+          substr(value, 11, 1) == "T" &&
+          substr(value, 14, 1) == ":" &&
+          length(digits) == 12 && digits !~ /[^0-9]/
+      }
 
-  if [ -z "$repo_latest_timestamp" ]; then
-    repo_latest_timestamp="$EMPTY_CACHE_VALUE"
+      $1 == "v2" &&
+      $2 == repository_identity &&
+      $4 == git_dir &&
+      $5 == reflog_path &&
+      $6 == today &&
+      $7 == reflog_mtime {
+        found = 1
+        if (NF != 14) {
+          valid = 0
+        } else if ($8 == empty) {
+          empty_count++
+          if ($9 != empty || $10 != empty || $11 != empty || $12 != empty || $13 != empty || $14 != empty) {
+            valid = 0
+          }
+        } else {
+          event_count++
+          if (!is_unsigned($8) ||
+                   !is_object_id($9) ||
+                   !is_object_id($10) ||
+                   ($11 != "commit" && $11 != "amend" && $11 != "merge" &&
+                    $11 != "rewriteStart" && $11 != "rewrite" && $11 != "rewriteFinish") ||
+                   !is_unsigned($12) ||
+                   !is_focus_block($13) ||
+                   ($14 != "0" && $14 != "1")) {
+            valid = 0
+          }
+        }
+      }
+      END {
+        if (empty_count > 1 || (empty_count > 0 && event_count > 0)) {
+          valid = 0
+        }
+        exit found && valid != 0 ? 0 : 1
+      }
+    ' "$repo_stats_cache_file"
+}
+
+cached_reflog_entry_exists() {
+  local repository_identity="$1"
+  local git_dir="$2"
+  local reflog_path="$3"
+
+  awk -F '\t' \
+    -v repository_identity="$repository_identity" \
+    -v git_dir="$git_dir" \
+    -v reflog_path="$reflog_path" '
+      $1 == "v2" &&
+      $2 == repository_identity &&
+      $4 == git_dir &&
+      $5 == reflog_path {
+        found = 1
+        exit
+      }
+      END { exit found ? 0 : 1 }
+    ' "$repo_stats_cache_file"
+}
+
+append_cached_reflog_events() {
+  local repository_identity="$1"
+  local display_name="$2"
+  local git_dir="$3"
+  local reflog_path="$4"
+  local reflog_mtime="$5"
+  local schema
+  local cached_identity
+  local cached_display_name
+  local cached_git_dir
+  local cached_reflog_path
+  local cached_day
+  local cached_mtime
+  local epoch
+  local old_object_id
+  local new_object_id
+  local kind
+  local message_fingerprint
+  local focus_block
+  local actor_is_automated
+
+  awk -F '\t' \
+    -v repository_identity="$repository_identity" \
+    -v git_dir="$git_dir" \
+    -v reflog_path="$reflog_path" \
+    -v today="$TODAY" \
+    -v reflog_mtime="$reflog_mtime" '
+      $1 == "v2" &&
+      $2 == repository_identity &&
+      $4 == git_dir &&
+      $5 == reflog_path &&
+      $6 == today &&
+      $7 == reflog_mtime
+    ' "$repo_stats_cache_file" > "$repo_reflog_file"
+
+  : > "$repo_activity_events_file"
+
+  while IFS=$'\t' read -r schema cached_identity cached_display_name cached_git_dir cached_reflog_path cached_day cached_mtime epoch old_object_id new_object_id kind message_fingerprint focus_block actor_is_automated; do
+    [ "$epoch" = "$EMPTY_CACHE_VALUE" ] && continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" >> "$repo_activity_events_file"
+  done < "$repo_reflog_file"
+}
+
+commit_cached_reflog_events() {
+  local cache_row
+  while IFS= read -r cache_row; do
+    printf '%s\n' "$cache_row" >> "$new_repo_stats_file"
+  done < "$repo_reflog_file"
+}
+
+write_reflog_events_to_cache() {
+  local repository_identity="$1"
+  local display_name="$2"
+  local git_dir="$3"
+  local reflog_path="$4"
+  local reflog_mtime="$5"
+  local epoch
+  local old_object_id
+  local new_object_id
+  local kind
+  local message_fingerprint
+  local focus_block
+  local actor_is_automated
+
+  if [ ! -s "$repo_activity_events_file" ]; then
+    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$TODAY" "$reflog_mtime" \
+      "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" >> "$new_repo_stats_file"
+    return
   fi
 
-  if [ -z "$encoded_focus_blocks" ]; then
-    encoded_focus_blocks="$EMPTY_CACHE_VALUE"
-  fi
-
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$repo_root" \
-    "$git_dir" \
-    "$reflog_path" \
-    "$TODAY" \
-    "$reflog_mtime" \
-    "$repo_count" \
-    "$repo_latest_timestamp" \
-    "$encoded_focus_blocks" >> "$new_repo_stats_file"
+  while IFS=$'\t' read -r epoch old_object_id new_object_id kind message_fingerprint focus_block actor_is_automated; do
+    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$TODAY" "$reflog_mtime" \
+      "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" >> "$new_repo_stats_file"
+  done < "$repo_activity_events_file"
 }
 
 process_repository_list() {
   local using_cached_repo_list="$1"
   local repo_root
+  local canonical_repo_root
   local git_dir
+  local common_dir
+  local repository_identity
+  local display_name
   local reflog_path
   local reflog_mtime
-  local repo_count
-  local repo_latest_timestamp
-  local repo_focus_blocks
-  local cached_repo_stats
-  local cached_repo_root
-  local cached_git_dir
-  local cached_reflog_path
-  local cached_day
-  local cached_reflog_mtime
-  local cached_repo_count
-  local cached_repo_latest_timestamp
-  local cached_repo_focus_blocks
+  local verified_reflog_signature
+  local read_verified_signature_exit_code
+  local parse_attempt
+  local stable_reflog_read
+  local event_epoch
+  local event_object_id
+  local event_kind
+  local event_focus_block
+  local recent_repository_identity=""
 
   reset_activity_snapshot
   : > "$validated_repo_list_file"
@@ -567,6 +1209,24 @@ process_repository_list() {
       record_invalid_repository "candidate-missing"
       continue
     fi
+
+    trap - ERR
+    if canonical_repo_root="$(resolve_existing_directory_path "$repo_root")"; then
+      resolve_repo_root_exit_code=0
+    else
+      resolve_repo_root_exit_code="$?"
+    fi
+    enable_error_trap
+    if [ "$resolve_repo_root_exit_code" -ne 0 ]; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository root is no longer available; rebuilding repository cache"
+        return 2
+      fi
+      record_invalid_repository "repository-root-resolution-failed"
+      continue
+    fi
+    repo_root="$canonical_repo_root"
+    current_repository_candidate="$repo_root"
 
     if ! repository_candidate_is_allowed "$repo_root"; then
       continue
@@ -608,7 +1268,33 @@ process_repository_list() {
       continue
     fi
 
-    repository_count=$((repository_count + 1))
+    trap - ERR
+    if common_dir="$(resolve_common_git_dir "$git_dir")"; then
+      resolve_common_dir_exit_code=0
+    else
+      resolve_common_dir_exit_code="$?"
+    fi
+    enable_error_trap
+    if [ "$resolve_common_dir_exit_code" -ne 0 ] || ! path_is_within_authorized_roots "$common_dir"; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository common metadata is no longer available; rebuilding repository cache"
+        return 2
+      fi
+      record_invalid_repository "common-gitdir-resolution-failed"
+      continue
+    fi
+
+    repository_identity="$common_dir"
+    display_name="$(repository_display_name "$repo_root" "$common_dir")"
+    if ! record_field_is_supported "$repository_identity" ||
+       ! record_field_is_supported "$display_name" ||
+       ! record_field_is_supported "$repo_root" ||
+       ! record_field_is_supported "$git_dir"; then
+      record_invalid_repository "unsupported-repository-path-characters"
+      continue
+    fi
+    printf '%s\n' "$repository_identity" >> "$repository_identity_file"
+
     reflog_path="$git_dir/logs/HEAD"
     if [ ! -e "$reflog_path" ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
@@ -632,164 +1318,112 @@ process_repository_list() {
       continue
     fi
 
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$repo_root" "$git_dir" "$reflog_path" >> "$repository_records_file"
+    printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
+  done < "$repo_list_file"
+
+  LC_ALL=C sort -u "$repository_identity_file" > "$repo_reflog_file"
+  repository_count="$(awk 'END { print NR + 0 }' "$repo_reflog_file")"
+  LC_ALL=C sort -t $'\t' -k1,1 -k5,5 -k3,3 "$repository_records_file" |
+    awk -F '\t' '!seen[$1 SUBSEP $5]++' > "$unique_repository_records_file"
+  LC_ALL=C sort -u "$validated_repo_list_file" > "$repo_reflog_file"
+  cp "$repo_reflog_file" "$validated_repo_list_file"
+
+  while IFS=$'\t' read -r repository_identity display_name repo_root git_dir reflog_path; do
+    current_repository_candidate="$repo_root"
     readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
-    repo_count=0
-    repo_latest_timestamp=""
-    repo_focus_blocks=""
     trap - ERR
-    if reflog_mtime="$(read_reflog_mtime "$reflog_path")"; then
-      read_reflog_mtime_exit_code=0
+    if reflog_mtime="$(read_reflog_signature "$reflog_path")"; then
+      read_reflog_signature_exit_code=0
     else
-      read_reflog_mtime_exit_code="$?"
+      read_reflog_signature_exit_code="$?"
     fi
     enable_error_trap
-    if [ "$read_reflog_mtime_exit_code" -ne 0 ]; then
+    if [ "$read_reflog_signature_exit_code" -ne 0 ]; then
       failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
       record_invalid_repository "reflog-mtime-failed"
       log_error "failed to read git reflog metadata for one repository; preserving previous shared data"
       continue
     fi
 
-    cached_repo_stats="$(awk -F '\t' -v repo_root="$repo_root" '$1 == repo_root { print; exit }' "$repo_stats_cache_file")"
-    if [ -n "$cached_repo_stats" ]; then
+    if cached_reflog_entry_exists "$repository_identity" "$git_dir" "$reflog_path"; then
       cache_hit_count=$((cache_hit_count + 1))
-      cached_repo_root="${cached_repo_stats%%$'\t'*}"
-      cached_repo_stats="${cached_repo_stats#*$'\t'}"
-      cached_git_dir="${cached_repo_stats%%$'\t'*}"
-      cached_repo_stats="${cached_repo_stats#*$'\t'}"
-      cached_reflog_path="${cached_repo_stats%%$'\t'*}"
-      cached_repo_stats="${cached_repo_stats#*$'\t'}"
-      cached_day="${cached_repo_stats%%$'\t'*}"
-      cached_repo_stats="${cached_repo_stats#*$'\t'}"
-      cached_reflog_mtime="${cached_repo_stats%%$'\t'*}"
-      cached_repo_stats="${cached_repo_stats#*$'\t'}"
-      cached_repo_count="${cached_repo_stats%%$'\t'*}"
-      cached_repo_stats="${cached_repo_stats#*$'\t'}"
-      cached_repo_latest_timestamp="${cached_repo_stats%%$'\t'*}"
-      cached_repo_focus_blocks="${cached_repo_stats#*$'\t'}"
-
-      if [ "$cached_repo_root" = "$repo_root" ] &&
-         [ "$cached_git_dir" = "$git_dir" ] &&
-         [ "$cached_reflog_path" = "$reflog_path" ] &&
-         [ "$cached_day" = "$TODAY" ] &&
-         [ "$cached_reflog_mtime" = "$reflog_mtime" ]; then
+    fi
+    if cached_reflog_events_match "$repository_identity" "$git_dir" "$reflog_path" "$reflog_mtime"; then
+      append_cached_reflog_events "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$reflog_mtime"
+      trap - ERR
+      if verified_reflog_signature="$(read_reflog_signature "$reflog_path")"; then
+        read_verified_signature_exit_code=0
+      else
+        read_verified_signature_exit_code="$?"
+      fi
+      enable_error_trap
+      if [ "$read_verified_signature_exit_code" -eq 0 ] &&
+         [ "$verified_reflog_signature" = "$reflog_mtime" ]; then
         successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
         reflog_unchanged_skip_count=$((reflog_unchanged_skip_count + 1))
-        repo_count="$cached_repo_count"
-        if [ "$cached_repo_latest_timestamp" != "$EMPTY_CACHE_VALUE" ]; then
-          repo_latest_timestamp="$cached_repo_latest_timestamp"
-        fi
-        append_cached_focus_blocks "$cached_repo_focus_blocks"
-        write_repository_stats_entry "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" "$repo_count" "$repo_latest_timestamp" "$cached_repo_focus_blocks"
-        printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
-        total_count=$((total_count + repo_count))
-
-        if [ -n "$repo_latest_timestamp" ] && { [ -z "$latest_activity_timestamp" ] || [[ "$repo_latest_timestamp" > "$latest_activity_timestamp" ]]; }; then
-          latest_activity_timestamp="$repo_latest_timestamp"
-          recent_project_name="$(basename "$repo_root")"
-        fi
+        commit_cached_reflog_events
+        append_repo_activity_events_to_raw "$repository_identity" "$display_name" "$reflog_path" "$git_dir"
         continue
+      fi
+      if [ "$read_verified_signature_exit_code" -eq 0 ]; then
+        reflog_mtime="$verified_reflog_signature"
       fi
     fi
 
     recomputed_repository_count=$((recomputed_repository_count + 1))
-    : > "$repo_reflog_file"
-    if [ -n "$PERL_BIN" ]; then
-      if ! "$PERL_BIN" -MPOSIX=strftime -e '
-        use strict;
-        use warnings;
-
-        my $today = shift @ARGV;
-        my $count = 0;
-        my $latest_epoch = 0;
-
-        while (my $line = <>) {
-            chomp $line;
-            my ($metadata, $message) = split /\t/, $line, 2;
-            next unless defined $message;
-            next unless $message =~ /^commit( \(.+\))?:|^merge(\s+[^:]*)?:/;
-
-            my @parts = split / /, $metadata;
-            next if @parts < 2;
-
-            my $epoch = $parts[-2];
-            next unless defined $epoch && $epoch =~ /^\d+$/;
-
-            my @local = localtime($epoch);
-            my $day_identifier = sprintf("%04d-%02d-%02d", $local[5] + 1900, $local[4] + 1, $local[3]);
-            next unless $day_identifier eq $today;
-
-            $count++;
-            $latest_epoch = $epoch if $epoch > $latest_epoch;
-
-            my $block_minute = $local[1] >= 30 ? 30 : 0;
-            printf "BLOCK\t%sT%02d:%02d\n", $day_identifier, $local[2], $block_minute;
-        }
-
-        printf "COUNT\t%d\n", $count;
-        if ($latest_epoch > 0) {
-            printf "LATEST\t%s\n", strftime("%Y-%m-%dT%H:%M:%S%z", localtime($latest_epoch));
-        }
-        ' "$TODAY" "$reflog_path" > "$repo_reflog_file"; then
-        failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
-        log_error "failed to parse git reflog for one repository; preserving previous shared data"
-        continue
+    parse_attempt=0
+    stable_reflog_read=0
+    while [ "$parse_attempt" -lt 2 ]; do
+      parse_attempt=$((parse_attempt + 1))
+      if ! append_reflog_events_for_today "$repository_identity" "$display_name" "$git_dir" "$reflog_path"; then
+        break
       fi
-    else
-      : > "$repo_reflog_file"
-      repo_count=0
-      latest_epoch=0
-      while IFS=$'\t' read -r metadata message || [ -n "$metadata" ]; do
-        [[ "$message" =~ ^commit( \(.+\))?:|^merge([[:space:]]+[^:]*)?: ]] || continue
-        metadata_parts=($metadata)
-        [ "${#metadata_parts[@]}" -ge 2 ] || continue
-        epoch="${metadata_parts[${#metadata_parts[@]} - 2]}"
-        [[ "$epoch" =~ ^[0-9]+$ ]] || continue
-        day_identifier="$(/bin/date -r "$epoch" +%Y-%m-%d 2>/dev/null)" || continue
-        [ "$day_identifier" = "$TODAY" ] || continue
-        repo_count=$((repo_count + 1))
-        if [ "$epoch" -gt "$latest_epoch" ]; then
-          latest_epoch="$epoch"
-        fi
-        local_hour="$(/bin/date -r "$epoch" +%H 2>/dev/null)" || continue
-        local_minute="$(/bin/date -r "$epoch" +%M 2>/dev/null)" || continue
-        block_minute=0
-        [ "$local_minute" -ge 30 ] && block_minute=30
-        printf 'BLOCK\t%sT%s:%02d\n' "$day_identifier" "$local_hour" "$block_minute" >> "$repo_reflog_file"
-      done < "$reflog_path"
-      printf 'COUNT\t%d\n' "$repo_count" >> "$repo_reflog_file"
-      if [ "$latest_epoch" -gt 0 ]; then
-        latest_timestamp="$(/bin/date -r "$latest_epoch" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null)" || latest_timestamp=""
-        [ -n "$latest_timestamp" ] && printf 'LATEST\t%s\n' "$latest_timestamp" >> "$repo_reflog_file"
+
+      trap - ERR
+      if verified_reflog_signature="$(read_reflog_signature "$reflog_path")"; then
+        read_verified_signature_exit_code=0
+      else
+        read_verified_signature_exit_code="$?"
       fi
+      enable_error_trap
+      if [ "$read_verified_signature_exit_code" -ne 0 ]; then
+        break
+      fi
+      if [ "$verified_reflog_signature" = "$reflog_mtime" ]; then
+        stable_reflog_read=1
+        break
+      fi
+      reflog_mtime="$verified_reflog_signature"
+    done
+
+    if [ "$stable_reflog_read" -ne 1 ]; then
+      failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
+      record_invalid_repository "reflog-parse-failed"
+      log_error "failed to obtain a stable git reflog read for one repository; continuing with other valid repositories"
+      continue
     fi
     successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
+    append_repo_activity_events_to_raw "$repository_identity" "$display_name" "$reflog_path" "$git_dir"
+    write_reflog_events_to_cache "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$reflog_mtime"
+  done < "$unique_repository_records_file"
 
-    while IFS=$'\t' read -r record_kind record_value; do
-      case "$record_kind" in
-        COUNT)
-          repo_count="$record_value"
-          ;;
-        BLOCK)
-          printf '%s\n' "$record_value" >> "$focus_block_list_file"
-          ;;
-        LATEST)
-          repo_latest_timestamp="$record_value"
-          ;;
-      esac
-    done < "$repo_reflog_file"
+  normalize_activity_events || return 1
+  while IFS=$'\t' read -r repository_identity display_name event_epoch event_object_id event_kind event_focus_block; do
+    total_count=$((total_count + 1))
+    printf '%s\n' "$event_focus_block" >> "$focus_block_list_file"
 
-    repo_focus_blocks="$(awk -F '\t' '$1 == "BLOCK" { print $2 }' "$repo_reflog_file" | sort -u | paste -sd, -)"
-    write_repository_stats_entry "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" "$repo_count" "$repo_latest_timestamp" "$repo_focus_blocks"
-    printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
-
-    total_count=$((total_count + repo_count))
-
-    if [ -n "$repo_latest_timestamp" ] && { [ -z "$latest_activity_timestamp" ] || [[ "$repo_latest_timestamp" > "$latest_activity_timestamp" ]]; }; then
-      latest_activity_timestamp="$repo_latest_timestamp"
-      recent_project_name="$(basename "$repo_root")"
+    # Latest epoch wins; equal epochs use the canonical repository identity so
+    # the recent-project result is independent of find/reflog iteration order.
+    if [ -z "$latest_activity_timestamp" ] ||
+       [ "$event_epoch" -gt "$latest_activity_timestamp" ] ||
+       { [ "$event_epoch" -eq "$latest_activity_timestamp" ] && { [ -z "$recent_repository_identity" ] || [[ "$repository_identity" < "$recent_repository_identity" ]]; }; }; then
+      latest_activity_timestamp="$event_epoch"
+      recent_repository_identity="$repository_identity"
+      recent_project_name="$display_name"
     fi
-  done < "$repo_list_file"
+  done < "$normalized_activity_events_file"
 }
 
 write_plist_string() {
@@ -826,13 +1460,11 @@ read_plist_value() {
   local key="$1"
   local value
 
-  trap - ERR
-  if ! value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP_GROUP_PREFERENCES_PLIST" 2>/dev/null)"; then
-    enable_error_trap
-    return 1
+  if ! value="$(trap - ERR; /usr/libexec/PlistBuddy -c "Print :$key" "$APP_GROUP_PREFERENCES_PLIST" 2>/dev/null)"; then
+    printf '%s\n' "$MISSING_PLIST_VALUE"
+    return 0
   fi
 
-  enable_error_trap
   printf '%s\n' "$value"
 }
 
@@ -983,11 +1615,41 @@ enable_error_trap() {
 trap cleanup EXIT
 enable_error_trap
 
-if ! command -v git >/dev/null 2>&1; then
+if ! command -v "$GIT_BIN" >/dev/null 2>&1; then
   log_error "git executable not found in configured command search path"
   refresh_outcome_override="failed"
   emit_refresh_metrics
   exit 127
+fi
+
+case "$DUPLICATE_EVENT_WINDOW_SECONDS" in
+  ""|*[!0-9]*)
+    log_error "duplicate event window is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+if [ "$DUPLICATE_EVENT_WINDOW_SECONDS" -gt 3600 ]; then
+  log_error "duplicate event window exceeds the supported maximum"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
+fi
+
+case "$REPOSITORY_CACHE_MAX_AGE_SECONDS" in
+  ""|*[!0-9]*)
+    log_error "repository cache maximum age is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+if [ "$REPOSITORY_CACHE_MAX_AGE_SECONDS" -gt 86400 ]; then
+  log_error "repository cache maximum age exceeds the supported maximum"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
 fi
 
 # Avoid here-strings because the signed sandboxed app can reject bash's
@@ -1014,7 +1676,7 @@ while IFS= read -r scan_root; do
 
   printf '%s\n' "$normalized_scan_root" >> "$valid_scan_roots_file"
 done < "$scan_roots_file"
-mv "$valid_scan_roots_file" "$scan_roots_file"
+LC_ALL=C sort -u "$valid_scan_roots_file" > "$scan_roots_file"
 
 if [ ! -s "$scan_roots_file" ]; then
   log_error "no authorized git scan roots supplied; skipping refresh"
@@ -1037,7 +1699,7 @@ if cache_matches_current_roots; then
   cache_was_reused=1
 else
   refresh_repository_list_from_scan
-  if [ "$repository_scan_failed" -eq 1 ]; then
+  if [ "$repository_scan_failed" -eq 1 ] && [ ! -s "$repo_list_file" ]; then
     log_error "repository scan failed; preserving previous shared data"
     refresh_outcome_override="failed"
     emit_refresh_metrics
@@ -1063,11 +1725,11 @@ if [ "${process_result:-0}" -ne 0 ]; then
 
   recovered_repository_list=0
   refresh_repository_list_from_scan
-  if [ "$repository_scan_failed" -eq 0 ] && [ -s "$repo_list_file" ]; then
+  if [ -s "$repo_list_file" ]; then
     recovery_process_result=0
     process_repository_list 0 || recovery_process_result="$?"
     if [ "$recovery_process_result" -eq 0 ] &&
-       [ "$failed_reflog_repo_count" -eq 0 ] &&
+       [ "$successful_reflog_repo_count" -gt 0 ] &&
        [ -s "$validated_repo_list_file" ]; then
       recovered_repository_list=1
       cache_was_reused=0
@@ -1107,12 +1769,17 @@ if [ "$readable_reflog_repo_count" -gt 0 ] && [ "$successful_reflog_repo_count" 
   exit 1
 fi
 
-if [ "$failed_reflog_repo_count" -gt 0 ]; then
+if [ "$failed_reflog_repo_count" -gt 0 ] && [ "$successful_reflog_repo_count" -eq 0 ]; then
   emit_runtime_diagnostics_once
-  log_error "failed to parse one or more readable git reflogs; preserving previous shared data"
+  log_error "failed to parse every readable git reflog; preserving previous shared data"
   refresh_outcome_override="failed"
   emit_refresh_metrics
   exit 1
+fi
+
+if [ "$failed_reflog_repo_count" -gt 0 ]; then
+  emit_runtime_diagnostics_once
+  log_error "partial refresh: one or more git reflogs failed; publishing other valid repositories"
 fi
 
 /bin/mkdir -p "$APP_GROUP_PREFERENCES_DIR"
@@ -1131,7 +1798,9 @@ if [ "$trusted_snapshot_stale" -eq 0 ]; then
   write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
 fi
 if [ "$invalid_repository_count" -eq 0 ]; then
-  write_repository_cache
+  if [ "$cache_was_reused" -eq 0 ]; then
+    write_repository_cache
+  fi
   write_repository_stats_cache
 else
   log_error "partial refresh: retaining previous repository caches"

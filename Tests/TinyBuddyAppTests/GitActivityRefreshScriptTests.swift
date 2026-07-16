@@ -315,7 +315,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.dayIdentifier"] as? String, harness.todayIdentifier)
     }
 
-    func testScriptPreservesPreviousSharedDataWhenAnyReadableReflogFailsToParse() throws {
+    func testScriptPublishesValidRepositoryWhenAnotherReflogIsNotARegularFile() throws {
         let harness = try ScriptHarness()
         let goodRepoURL = try harness.makeRepository(named: "ProjectGood")
         let badRepoURL = try harness.makeRepository(named: "ProjectBad")
@@ -338,18 +338,21 @@ final class GitActivityRefreshScriptTests: XCTestCase {
 
         let result = try harness.run(scanRoots: [harness.scanRootURL])
         let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
 
-        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
         XCTAssertTrue(
-            result.standardError.contains("preserving previous shared data"),
-            "stderr did not mention preserving previous shared data: \(result.standardError)"
+            result.standardError.contains("publishing other valid repositories"),
+            "stderr did not describe partial publication: \(result.standardError)"
         )
-        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 99)
-        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 77)
-        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "PreviousProject")
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+        XCTAssertEqual(metrics["invalid_repository_count"], "1")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectGood")
     }
 
-    func testScriptPreservesPreviousSharedDataWhenRepositoryScanFailsAndRecoversLater() throws {
+    func testScriptPublishesReadableScanResultsWhenRepositoryScanIsPartialAndRecoversLater() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
         let failingFindURL = try harness.makeFailingRecursiveFindProbe()
@@ -370,15 +373,17 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             "TINYBUDDY_FIND_BIN": failingFindURL.path
         ])
         let preservedPlist = try harness.readPreferencesPlist()
+        let partialMetrics = try XCTUnwrap(harness.metrics(from: failedResult.standardOutput))
 
-        XCTAssertEqual(failedResult.exitCode, 1)
+        XCTAssertEqual(failedResult.exitCode, 0, failedResult.standardError)
         XCTAssertTrue(
-            failedResult.standardError.contains("preserving previous shared data"),
+            failedResult.standardError.contains("continuing with readable results"),
             failedResult.standardError
         )
-        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 99)
-        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 77)
-        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "PreviousProject")
+        XCTAssertEqual(partialMetrics["refresh_outcome"], "partial")
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(preservedPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
 
         let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL])
         let recoveredPlist = try harness.readPreferencesPlist()
@@ -476,14 +481,27 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
         ])
         let firstRecursiveScanCount = try harness.recursiveScanInvocationCount(from: findProbe.logURL)
+        let retainedCacheDate = Date(timeIntervalSinceNow: -60)
+        try harness.fileManager.setAttributes(
+            [.modificationDate: retainedCacheDate],
+            ofItemAtPath: harness.repositoryCacheFileURL.path
+        )
 
         _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
             "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
         ])
         let secondRecursiveScanCount = try harness.recursiveScanInvocationCount(from: findProbe.logURL)
+        let cacheAttributes = try harness.fileManager.attributesOfItem(
+            atPath: harness.repositoryCacheFileURL.path
+        )
+        let cacheDateAfterReuse = try XCTUnwrap(cacheAttributes[.modificationDate] as? Date)
 
         XCTAssertEqual(firstRecursiveScanCount, 1)
         XCTAssertEqual(secondRecursiveScanCount, 1)
+        XCTAssertEqual(
+            Int(cacheDateAfterReuse.timeIntervalSince1970),
+            Int(retainedCacheDate.timeIntervalSince1970)
+        )
     }
 
     func testScriptSkipsReflogReparseWhenCachedMtimeDidNotChange() throws {
@@ -509,6 +527,117 @@ final class GitActivityRefreshScriptTests: XCTestCase {
 
         XCTAssertEqual(firstParseCount, 1)
         XCTAssertEqual(secondParseCount, 1)
+    }
+
+    func testScriptInvalidatesCachedEventsWhenReflogChangesWithinTheSameMtimeSecond() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let fixedModificationDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: fixedModificationDate)
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "commit: second")
+            ]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: fixedModificationDate)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(metrics["cache_hit_count"], "1")
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "0")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+    }
+
+    func testScriptInvalidatesCachedEventsForSameSizeSameMtimeInPlaceReflogRewrite() throws {
+        let harness = try ScriptHarness()
+        let alphaURL = try harness.makeRepository(named: "ProjectAlpha")
+        let betaURL = try harness.makeRepository(named: "ProjectBeta")
+        let fixedModificationDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try harness.writeHeadReflog(
+            for: alphaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha")]
+        )
+        try harness.writeHeadReflog(
+            for: betaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 10, message: "commit: beta")]
+        )
+        try harness.setReflogModificationDate(for: alphaURL, to: fixedModificationDate)
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+        XCTAssertEqual(
+            (try harness.readPreferencesPlist())["tinybuddy.gitTodayRecentProject.projectName"] as? String,
+            "ProjectBeta"
+        )
+        let metadataBeforeRewrite = try harness.headReflogMetadata(for: alphaURL)
+
+        try harness.writeHeadReflogInPlace(
+            for: alphaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 11, minute: 10, message: "commit: alpha")]
+        )
+        try harness.setReflogModificationDate(for: alphaURL, to: fixedModificationDate)
+        let metadataAfterRewrite = try harness.headReflogMetadata(for: alphaURL)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(metadataAfterRewrite, metadataBeforeRewrite)
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "1")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+    }
+
+    func testScriptRejectsShapeValidButChecksumMismatchedEventCacheAndRecomputesTheReflog() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+
+        let cache = try String(contentsOf: harness.repositoryStatsCacheFileURL, encoding: .utf8)
+        let corruptCache = cache
+            .split(separator: "\n")
+            .map { line -> String in
+                var fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                if fields.count == 14, fields[0] == "v2" {
+                    fields[7] = "1700000000"
+                }
+                return fields.joined(separator: "\t")
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try corruptCache.write(
+            to: harness.repositoryStatsCacheFileURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+        let repairedCache = try String(contentsOf: harness.repositoryStatsCacheFileURL, encoding: .utf8)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(metrics["cache_hit_count"], "0")
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "0")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+        XCTAssertFalse(repairedCache.contains("\t1700000000\t"))
     }
 
     func testScriptReparsesOnlyRepositoryWhoseReflogMtimeChanged() throws {
@@ -627,6 +756,50 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+    }
+
+    func testScriptDiscoversRepositoryCreatedBelowAnUnchangedFirstLevelDirectoryAfterCacheExpiry() throws {
+        let harness = try ScriptHarness()
+        let organizationURL = harness.scanRootURL.appendingPathComponent("Organization", isDirectory: true)
+        let teamURL = organizationURL.appendingPathComponent("Team", isDirectory: true)
+        try harness.fileManager.createDirectory(at: teamURL, withIntermediateDirectories: true)
+        let firstRepoURL = try harness.makeRepository(atRelativePath: "Organization/Existing")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: firstRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")
+            ]
+        )
+
+        let first = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        XCTAssertEqual(first.exitCode, 0, first.standardError)
+
+        let nestedRepoURL = try harness.makeRepository(atRelativePath: "Organization/Team/Nested")
+        try harness.writeHeadReflog(
+            for: nestedRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: nested")
+            ]
+        )
+        try harness.fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+            ofItemAtPath: harness.repositoryCacheFileURL.path
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "Nested")
     }
 
     func testScriptRebuildsRepositoryCacheWhenCacheIsMissing() throws {
@@ -1167,6 +1340,23 @@ private struct ScriptHarness {
 
     func writeHeadReflog(at reflogURL: URL, lines: [String]) throws {
         try lines.joined(separator: "\n").appending("\n").write(to: reflogURL, atomically: true, encoding: .utf8)
+    }
+
+    func writeHeadReflogInPlace(for repoURL: URL, lines: [String]) throws {
+        let reflogURL = try headReflogURL(for: repoURL)
+        try lines.joined(separator: "\n").appending("\n").write(
+            to: reflogURL,
+            atomically: false,
+            encoding: .utf8
+        )
+    }
+
+    func headReflogMetadata(for repoURL: URL) throws -> String {
+        let attributes = try fileManager.attributesOfItem(atPath: headReflogURL(for: repoURL).path)
+        let modificationDate = try XCTUnwrap(attributes[.modificationDate] as? Date)
+        let size = try XCTUnwrap(attributes[.size] as? NSNumber).uint64Value
+        let inode = try XCTUnwrap(attributes[.systemFileNumber] as? NSNumber).uint64Value
+        return "\(Int(modificationDate.timeIntervalSince1970)):\(size):\(inode)"
     }
 
     func setReflogModificationDate(for repoURL: URL, to date: Date) throws {

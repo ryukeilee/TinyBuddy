@@ -4,6 +4,26 @@ import XCTest
 import Foundation
 
 final class GitActivityRefreshCoordinatorTests: XCTestCase {
+    func testScriptMetricsParserPreservesRefreshOutcome() throws {
+        let metrics = try XCTUnwrap(
+            GitRefreshScriptResultParser.parseMetrics(
+                from: "TINYBUDDY_REFRESH_METRICS\trepository_count=0\trefresh_outcome=skipped\tshared_data_written=0"
+            )
+        )
+
+        XCTAssertEqual(metrics.refreshOutcome, .skipped)
+    }
+
+    func testScriptMetricsParserMapsUnrecognizedRefreshOutcomeToUnknown() throws {
+        let metrics = try XCTUnwrap(
+            GitRefreshScriptResultParser.parseMetrics(
+                from: "TINYBUDDY_REFRESH_METRICS\trepository_count=1\trefresh_outcome=future-value\tshared_data_written=0"
+            )
+        )
+
+        XCTAssertEqual(metrics.refreshOutcome, .unknown)
+    }
+
     func testScriptFailureSummaryClassifiesSandboxAndPathErrorsWithoutEchoingOutput() {
         let summary = GitActivityRefreshCoordinator.scriptFailureSummary(
             terminationStatus: 1,
@@ -408,6 +428,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             GitRefreshScriptMetrics(
                 repositoryCount: 3,
                 invalidRepositoryCount: 1,
+                refreshOutcome: .partial,
                 cacheHitCount: 2,
                 reflogUnchangedSkipCount: 1,
                 recomputedRepositoryCount: 1,
@@ -439,6 +460,107 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.latestHiddenDiagnosticSummary?.recovery,
             TinyBuddySharedSnapshotRecovery.none
         )
+    }
+
+    func testSkippedScriptRefreshIsNotRecordedAsSucceeded() {
+        let harness = makeHarness()
+        let committedActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 2,
+            commitCount: 3,
+            recentProjectName: "Committed"
+        )
+        let initialSnapshot = harness.seedCombinedSnapshot(activity: committedActivity)
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 0,
+                refreshOutcome: .skipped,
+                cacheHitCount: 0,
+                reflogUnchangedSkipCount: 0,
+                recomputedRepositoryCount: 0,
+                sharedDataWritten: false
+            )
+        )
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 0, commitCount: 0, recentProjectName: nil)
+        }
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .skipped)
+        XCTAssertNil(harness.lastRefreshStatus?.diagnostic)
+        XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+    }
+
+    func testFailedScriptOutcomeDoesNotCommitActivitySnapshot() {
+        let harness = makeHarness()
+        let committedActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 1,
+            commitCount: 2,
+            recentProjectName: "Committed"
+        )
+        let initialSnapshot = harness.seedCombinedSnapshot(activity: committedActivity)
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 1,
+                refreshOutcome: .failed,
+                cacheHitCount: 0,
+                reflogUnchangedSkipCount: 0,
+                recomputedRepositoryCount: 1,
+                sharedDataWritten: false
+            )
+        )
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 9, commitCount: 10, recentProjectName: "Uncommitted")
+        }
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .scriptExecutionFailed)
+    }
+
+    func testUnknownScriptOutcomeDoesNotCommitActivitySnapshot() {
+        let harness = makeHarness()
+        let committedActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 1,
+            commitCount: 2,
+            recentProjectName: "Committed"
+        )
+        let initialSnapshot = harness.seedCombinedSnapshot(activity: committedActivity)
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 1,
+                refreshOutcome: .unknown,
+                cacheHitCount: 0,
+                reflogUnchangedSkipCount: 0,
+                recomputedRepositoryCount: 1,
+                sharedDataWritten: false
+            )
+        )
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 9, commitCount: 10, recentProjectName: "Uncommitted")
+        }
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .scriptExecutionFailed)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
     }
 
     func testRefreshFailsWhenUnifiedSnapshotRevisionCannotAdvance() {
@@ -920,37 +1042,65 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
     }
 
-    func testPartialAuthorizationFailureDoesNotPublishPartialResultsAndRecoversAutomatically() {
+    func testPartialAuthorizationFailureScansValidRootsAndRecordsPartialRecovery() {
         let liveRoot = URL(fileURLWithPath: "/Authorized/LiveProject")
-        let recoveredRoot = URL(fileURLWithPath: "/Authorized/RecoveredProject")
         let harness = makeHarness(
             authorizedRoots: [liveRoot],
             authorizationIssue: .authorizationInvalid
         )
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 1, commitCount: 2, recentProjectName: "LiveProject")
+        }
 
-        harness.coordinator.start()
-        harness.waitForNoRefresh()
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
 
-        XCTAssertEqual(harness.scriptRunCount, 0)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
-        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.capturedRootPaths, [liveRoot.path])
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .partial)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialRecovery)
+        XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanPartial)
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+    }
 
-        harness.advanceCurrentDate(by: 6)
-        harness.coordinator.handleDidWake()
-        harness.waitForNoRefresh()
-        XCTAssertEqual(harness.scriptRunCount, 0)
+    func testPartialAuthorizationWithSkippedScriptPreservesCommittedActivity() {
+        let liveRoot = URL(fileURLWithPath: "/Authorized/LiveProject")
+        let harness = makeHarness(
+            authorizedRoots: [liveRoot],
+            authorizationIssue: .authorizationInvalid
+        )
+        let committedActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 2,
+            commitCount: 3,
+            recentProjectName: "Committed"
+        )
+        let initialSnapshot = harness.seedCombinedSnapshot(activity: committedActivity)
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 0,
+                refreshOutcome: .skipped,
+                cacheHitCount: 0,
+                reflogUnchangedSkipCount: 0,
+                recomputedRepositoryCount: 0,
+                sharedDataWritten: false
+            )
+        )
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 0, commitCount: 0, recentProjectName: nil)
+        }
 
-        harness.authorizationIssue = nil
-        harness.authorizedRoots = [liveRoot, recoveredRoot]
-        harness.advanceCurrentDate(by: 294)
         harness.performAndWaitForScriptRunCount(1) {
-            harness.coordinator.handleDidWake()
+            harness.coordinator.handleDidBecomeActive()
         }
         harness.waitForNoRefresh()
 
-        XCTAssertEqual(harness.capturedRootPaths, [liveRoot.path, recoveredRoot.path])
-        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .partial)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialRecovery)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
     }
 
     func testReopenRestoresPeriodicRefreshAfterAuthorizationBecomesAvailable() {
