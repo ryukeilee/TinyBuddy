@@ -8,6 +8,7 @@ WIDGET_BUNDLE_ID="com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension"
 WIDGET_EXTENSION_POINT="com.apple.widgetkit-extension"
 APP_RUNTIME_TIMEOUT="${TINYBUDDY_APP_RUNTIME_TIMEOUT:-15}"
 WIDGET_RUNTIME_TIMEOUT="${TINYBUDDY_WIDGET_RUNTIME_TIMEOUT:-30}"
+SANDBOX_RECOVERY_TIMEOUT="${TINYBUDDY_SANDBOX_RECOVERY_TIMEOUT:-30}"
 BUILD_LOG_MODE="${TINYBUDDY_BUILD_LOG_MODE:-summary}"
 BUILD_FAILURE_TAIL_LINES="${TINYBUDDY_BUILD_FAILURE_TAIL_LINES:-120}"
 XCODEBUILD_BIN="${TINYBUDDY_XCODEBUILD_BIN:-/usr/bin/xcodebuild}"
@@ -38,10 +39,17 @@ DERIVED_DATA_DIR="${TINYBUDDY_DERIVED_DATA_DIR:-$(default_derived_data_dir)}"
 APP_BUNDLE="$DERIVED_DATA_DIR/Build/Products/$BUILD_CONFIGURATION/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 BUNDLE_ID="com.ryukeili.TinyBuddy"
+APP_GROUP_ID="group.com.ryukeili.TinyBuddy"
 INSTALL_DIR="${TINYBUDDY_INSTALL_DIR:-/Applications}"
 INSTALLED_APP="$INSTALL_DIR/$APP_NAME.app"
 APP_PREFERENCES_PLIST="${TINYBUDDY_APP_PREFERENCES_PLIST:-$HOME/Library/Containers/$BUNDLE_ID/Data/Library/Preferences/$BUNDLE_ID.plist}"
+APP_GROUP_PREFERENCES_PLIST="${TINYBUDDY_APP_GROUP_PREFERENCES_PLIST:-$HOME/Library/Group Containers/$APP_GROUP_ID/Library/Preferences/$APP_GROUP_ID.plist}"
 GIT_SCAN_ROOT_BOOKMARK_KEY="tinybuddy.gitScanRoots.bookmarkData"
+GIT_SCAN_ROOT_RECORDS_KEY="tinybuddy.gitScanRoots.records.v2"
+GIT_REFRESH_STATUS_DATE_KEY="tinybuddy.gitRefreshStatus.refreshedAt"
+GIT_REFRESH_STATUS_OUTCOME_KEY="tinybuddy.gitRefreshStatus.outcome"
+GIT_REFRESH_STATUS_AUTHORIZED_ROOT_COUNT_KEY="tinybuddy.gitRefreshStatus.metrics.authorizedRootCount"
+GIT_REFRESH_STATUS_REPOSITORY_COUNT_KEY="tinybuddy.gitRefreshStatus.metrics.repositoryCount"
 RELEASE_TRANSACTION_DIR=""
 RELEASE_STAGED_APP=""
 RELEASE_BACKUP_APP=""
@@ -107,24 +115,45 @@ resolve_saved_git_scan_roots() {
 
   local resolved_roots=""
   if ! resolved_roots="$(
-    /usr/bin/xcrun swift - "$APP_PREFERENCES_PLIST" "$GIT_SCAN_ROOT_BOOKMARK_KEY" <<'SWIFT'
+    /usr/bin/xcrun swift - "$APP_PREFERENCES_PLIST" "$GIT_SCAN_ROOT_RECORDS_KEY" "$GIT_SCAN_ROOT_BOOKMARK_KEY" <<'SWIFT'
 import Foundation
 
 let arguments = CommandLine.arguments
-guard arguments.count >= 3 else {
+guard arguments.count >= 4 else {
     exit(0)
 }
 
 let plistURL = URL(fileURLWithPath: arguments[1])
-let bookmarkKey = arguments[2]
+let recordsKey = arguments[2]
+let legacyBookmarkKey = arguments[3]
 
 guard
     let plistData = try? Data(contentsOf: plistURL),
     let propertyList = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
-    let plistDictionary = propertyList as? [String: Any],
-    let bookmarkDataList = plistDictionary[bookmarkKey] as? [Data]
+    let plistDictionary = propertyList as? [String: Any]
 else {
     exit(0)
+}
+
+let bookmarkDataList: [Data]
+if let recordsValue = plistDictionary[recordsKey] {
+    guard let records = recordsValue as? [[String: Any]] else {
+        exit(0)
+    }
+
+    bookmarkDataList = records.compactMap { record in
+        guard
+            record["id"] as? String != nil,
+            let bookmarkData = record["bookmarkData"] as? Data,
+            record["displayName"] as? String != nil,
+            record["lastKnownPath"] as? String != nil
+        else {
+            return nil
+        }
+        return bookmarkData
+    }
+} else {
+    bookmarkDataList = plistDictionary[legacyBookmarkKey] as? [Data] ?? []
 }
 
 var emittedPaths = Set<String>()
@@ -136,8 +165,7 @@ for bookmarkData in bookmarkDataList {
             options: [],
             relativeTo: nil,
             bookmarkDataIsStale: &isStale
-        ),
-        !isStale
+        )
     else {
         continue
     }
@@ -155,6 +183,138 @@ SWIFT
   fi
 
   printf '%s' "$resolved_roots"
+}
+
+saved_git_scan_root_count() {
+  resolve_saved_git_scan_roots | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }'
+}
+
+saved_git_scan_root_record_count() {
+  if [ ! -f "$APP_PREFERENCES_PLIST" ]; then
+    echo 0
+    return 0
+  fi
+
+  /usr/bin/xcrun swift - "$APP_PREFERENCES_PLIST" "$GIT_SCAN_ROOT_RECORDS_KEY" "$GIT_SCAN_ROOT_BOOKMARK_KEY" <<'SWIFT'
+import Foundation
+
+let arguments = CommandLine.arguments
+guard arguments.count >= 4 else {
+    print(0)
+    exit(0)
+}
+
+let plistURL = URL(fileURLWithPath: arguments[1])
+let recordsKey = arguments[2]
+let legacyBookmarkKey = arguments[3]
+guard
+    let plistData = try? Data(contentsOf: plistURL),
+    let propertyList = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+    let plistDictionary = propertyList as? [String: Any]
+else {
+    print(0)
+    exit(0)
+}
+
+if let recordsValue = plistDictionary[recordsKey] {
+    print((recordsValue as? [Any])?.count ?? 1)
+} else if let legacyValue = plistDictionary[legacyBookmarkKey] {
+    print((legacyValue as? [Any])?.count ?? 1)
+} else {
+    print(0)
+}
+SWIFT
+}
+
+git_refresh_status_value() {
+  local key="$1"
+
+  if [ ! -f "$APP_GROUP_PREFERENCES_PLIST" ]; then
+    return 1
+  fi
+
+  /usr/libexec/PlistBuddy -c "Print :$key" "$APP_GROUP_PREFERENCES_PLIST" 2>/dev/null
+}
+
+git_refresh_status_epoch() {
+  local date_value
+  date_value="$(git_refresh_status_value "$GIT_REFRESH_STATUS_DATE_KEY")" || return $?
+  LC_ALL=C /bin/date -j -f '%a %b %d %T %Z %Y' "$date_value" '+%s' 2>/dev/null
+}
+
+verify_installed_sandbox_bookmark_recovery() {
+  local app_executable="$INSTALLED_APP/Contents/MacOS/$APP_NAME"
+  local saved_record_count="${1:-}"
+  local baseline_refresh_epoch="${2:--1}"
+  local minimum_refresh_epoch="${3:-}"
+  local deadline
+  local refreshed_epoch
+  local authorized_root_count
+  local repository_count
+  local outcome
+
+  if [ -z "$saved_record_count" ]; then
+    saved_record_count="$(saved_git_scan_root_record_count)" || return $?
+  fi
+  case "$saved_record_count" in
+    ''|*[!0-9]*) echo "invalid saved authorization record count" >&2; return 2 ;;
+  esac
+  case "$baseline_refresh_epoch" in
+    -1) ;;
+    ''|*[!0-9]*) echo "invalid sandbox recovery verification baseline" >&2; return 2 ;;
+  esac
+  if [ "$saved_record_count" -eq 0 ]; then
+    echo "sandbox bookmark recovery check skipped: no saved authorized Git roots"
+    return 0
+  fi
+
+  case "$SANDBOX_RECOVERY_TIMEOUT" in
+    ''|*[!0-9]*)
+      echo "TINYBUDDY_SANDBOX_RECOVERY_TIMEOUT must be a non-negative integer" >&2
+      return 2
+      ;;
+  esac
+
+  if [ -z "$minimum_refresh_epoch" ]; then
+    minimum_refresh_epoch="$(/usr/bin/stat -f '%m' "$app_executable")" || return $?
+  fi
+  case "$minimum_refresh_epoch" in
+    ''|*[!0-9]*) echo "invalid sandbox recovery minimum refresh epoch" >&2; return 2 ;;
+  esac
+  deadline=$((SECONDS + SANDBOX_RECOVERY_TIMEOUT))
+  while [ "$SECONDS" -le "$deadline" ]; do
+    refreshed_epoch="$(git_refresh_status_epoch 2>/dev/null || true)"
+    authorized_root_count="$(git_refresh_status_value "$GIT_REFRESH_STATUS_AUTHORIZED_ROOT_COUNT_KEY" 2>/dev/null || true)"
+    repository_count="$(git_refresh_status_value "$GIT_REFRESH_STATUS_REPOSITORY_COUNT_KEY" 2>/dev/null || true)"
+    outcome="$(git_refresh_status_value "$GIT_REFRESH_STATUS_OUTCOME_KEY" 2>/dev/null || true)"
+
+    case "$refreshed_epoch:$authorized_root_count" in
+      *[!0-9:]*|:*|*:)
+        ;;
+      *)
+        if [ "$refreshed_epoch" -ge "$minimum_refresh_epoch" ] \
+          && [ "$refreshed_epoch" -gt "$baseline_refresh_epoch" ] \
+          && [ "$authorized_root_count" -gt 0 ] \
+          && { [ "$outcome" = "succeeded" ] || [ "$outcome" = "partial" ]; }
+        then
+          case "$repository_count" in
+            ''|*[!0-9]*) repository_count="unknown" ;;
+          esac
+          echo "verified sandbox bookmark recovery: authorized_roots=$authorized_root_count repositories=$repository_count outcome=$outcome refreshed_epoch=$refreshed_epoch"
+          return 0
+        fi
+        ;;
+    esac
+
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      break
+    fi
+    sleep 1
+  done
+
+  echo "installed app did not publish a fresh successful or partial Git refresh from saved sandbox bookmarks" >&2
+  echo "saved_authorization_records=$saved_record_count minimum_refresh_epoch=$minimum_refresh_epoch" >&2
+  return 1
 }
 
 SIGNING_ARGS=()
@@ -623,6 +783,10 @@ verify_release_app() {
   local app_executable="$INSTALLED_APP/Contents/MacOS/$APP_NAME"
   local widget_executable
   local fingerprint
+  local saved_record_count
+  local baseline_refresh_epoch="-1"
+  local minimum_refresh_epoch
+  local current_epoch
 
   verify_release_bundle "$INSTALLED_APP" || return $?
   verify_installed_matches_build || return $?
@@ -630,9 +794,37 @@ verify_release_app() {
   installed_appex="$(find_widget_extension "$INSTALLED_APP")"
   widget_executable="$installed_appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
 
+  saved_record_count="$(saved_git_scan_root_record_count)" || return $?
+  case "$saved_record_count" in
+    ''|*[!0-9]*) echo "could not determine saved Git authorization record count" >&2; return 2 ;;
+  esac
+  minimum_refresh_epoch="$(/usr/bin/stat -f '%m' "$app_executable")" || return $?
+  if [ "$saved_record_count" -gt 0 ]; then
+    baseline_refresh_epoch="$(git_refresh_status_epoch 2>/dev/null || true)"
+    case "$baseline_refresh_epoch" in
+      ''|*[!0-9]*) baseline_refresh_epoch="-1" ;;
+    esac
+
+    current_epoch="$(/bin/date '+%s')" || return $?
+    if [ "$baseline_refresh_epoch" -ge "$current_epoch" ]; then
+      sleep 1
+      current_epoch="$(/bin/date '+%s')" || return $?
+    fi
+    if [ "$current_epoch" -gt "$minimum_refresh_epoch" ]; then
+      minimum_refresh_epoch="$current_epoch"
+    fi
+    if [ "$baseline_refresh_epoch" -ge "$minimum_refresh_epoch" ]; then
+      minimum_refresh_epoch=$((baseline_refresh_epoch + 1))
+    fi
+  fi
+
   /usr/bin/open -n "$INSTALLED_APP" || return $?
   wait_for_running_bundle_process "$APP_NAME" "$app_executable" "$rejected_app_pids" "$APP_RUNTIME_TIMEOUT" || return $?
   wait_for_running_bundle_process "$WIDGET_EXTENSION_NAME" "$widget_executable" "$rejected_widget_pids" "$WIDGET_RUNTIME_TIMEOUT" || return $?
+  verify_installed_sandbox_bookmark_recovery \
+    "$saved_record_count" \
+    "$baseline_refresh_epoch" \
+    "$minimum_refresh_epoch" || return $?
   fingerprint="$(release_bundle_fingerprint "$INSTALLED_APP")" || return $?
   echo "verified installed and running release: $INSTALLED_APP ($fingerprint)"
 }
@@ -732,11 +924,9 @@ case "$MODE" in
     check_widget_runtime_source_match fail
     ;;
   release-install|--release-install)
-    run_optional_git_pre_refresh
     install_release_app
     ;;
   release-verify|--release-verify)
-    run_optional_git_pre_refresh
     verify_release_app
     ;;
   *)

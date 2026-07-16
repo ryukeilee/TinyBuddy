@@ -52,8 +52,7 @@ struct PetView: View {
             RefreshDiagnosticsView(
                 diagnostics: viewModel.refreshDiagnostics,
                 hudGold: HUDTheme.hudGold,
-                panelFill: hudPanelFill,
-                authorizationAction: viewModel.requestGitScanAuthorization
+                panelFill: hudPanelFill
             )
 
             HStack(spacing: 8) {
@@ -103,6 +102,20 @@ struct PetView: View {
             }
 
             Spacer(minLength: 8)
+
+            SettingsLink {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(HUDTheme.hudGold.opacity(0.9))
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Color.black.opacity(0.22)))
+                    .overlay(
+                        Circle()
+                            .stroke(HUDTheme.hudGold.opacity(0.42), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("打开设置")
 
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(spacing: 6) {
@@ -223,18 +236,15 @@ private struct RefreshDiagnosticsView: View {
     let diagnostics: PetViewModel.RefreshDiagnostics
     let hudGold: Color
     let panelFill: AnyShapeStyle
-    let authorizationAction: () -> Void
 
     init(
         diagnostics: PetViewModel.RefreshDiagnostics,
         hudGold: Color,
-        panelFill: some ShapeStyle,
-        authorizationAction: @escaping () -> Void
+        panelFill: some ShapeStyle
     ) {
         self.diagnostics = diagnostics
         self.hudGold = hudGold
         self.panelFill = AnyShapeStyle(panelFill)
-        self.authorizationAction = authorizationAction
     }
 
     private var badgeColor: Color {
@@ -303,7 +313,9 @@ private struct RefreshDiagnosticsView: View {
             }
 
             if let actionTitle = diagnostics.actionTitle {
-                Button(actionTitle, action: authorizationAction)
+                SettingsLink {
+                    Text(actionTitle)
+                }
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)

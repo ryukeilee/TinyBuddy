@@ -1230,7 +1230,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
     }
 }
 
-private struct ScriptHarness {
+private final class ScriptHarness {
     let fileManager = FileManager.default
     let rootURL: URL
     let homeURL: URL
@@ -1242,10 +1242,14 @@ private struct ScriptHarness {
     let cacheDirectoryURL: URL
 
     init() throws {
-        rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fixtureIdentifier = UUID().uuidString
+        rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("TinyBuddyScriptTest-\(fixtureIdentifier)", isDirectory: true)
         homeURL = rootURL.appendingPathComponent("home", isDirectory: true)
         scanRootURL = rootURL.appendingPathComponent("scan-root", isDirectory: true)
-        plistURL = rootURL.appendingPathComponent("group.plist")
+        plistURL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("TinyBuddyScriptPreferences-\(fixtureIdentifier)", isDirectory: true)
+            .appendingPathComponent("group.plist")
         cacheDirectoryURL = rootURL.appendingPathComponent("repository-cache", isDirectory: true)
         scriptURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1260,6 +1264,20 @@ private struct ScriptHarness {
 
         try fileManager.createDirectory(at: homeURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: scanRootURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(
+            at: plistURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+    }
+
+    deinit {
+        if fileManager.fileExists(atPath: rootURL.path) {
+            try? fileManager.removeItem(at: rootURL)
+        }
+        let preferencesDirectoryURL = plistURL.deletingLastPathComponent()
+        if fileManager.fileExists(atPath: preferencesDirectoryURL.path) {
+            try? fileManager.removeItem(at: preferencesDirectoryURL)
+        }
     }
 
     var repositoryCacheFileURL: URL {
@@ -1271,7 +1289,8 @@ private struct ScriptHarness {
     }
 
     var snapshotWriteLockURL: URL {
-        rootURL.appendingPathComponent(".tinybuddy-git-snapshot-write.lock", isDirectory: true)
+        plistURL.deletingLastPathComponent()
+            .appendingPathComponent(".tinybuddy-git-snapshot-write.lock", isDirectory: true)
     }
 
     func makeRepository(named name: String) throws -> URL {

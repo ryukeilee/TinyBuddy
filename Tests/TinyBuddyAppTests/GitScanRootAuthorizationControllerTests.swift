@@ -1,75 +1,190 @@
-import AppKit
 import Foundation
 import XCTest
 @testable import TinyBuddy
 
 @MainActor
 final class GitScanRootAuthorizationControllerTests: XCTestCase {
-    func testRequestAuthorizationIfNeededDoesNotPresentPanelWhenAuthorizedRootResolves() throws {
+    func testRequestAuthorizationIfNeededDoesNotPresentPanelWhenSavedAuthorizationIsInvalid() throws {
         let defaults = makeDefaults()
-        var stopAccessCount = 0
-        let rootURL = try makeTemporaryDirectory(named: "TinyBuddyProject")
-        defer {
-            try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent())
-        }
-        let store = makeStore(
-            userDefaults: defaults,
-            resolvedPaths: [rootURL.standardizedFileURL.path],
-            stopAccessAction: {
-                stopAccessCount += 1
+        let store = makeStore(userDefaults: defaults, resolver: { _ in nil })
+        try store.replaceAuthorizedRoots([URL(fileURLWithPath: "/Authorized/StaleProject")])
+        var selectionProviderCallCount = 0
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in
+                selectionProviderCallCount += 1
+                return nil
             }
         )
-        try store.replaceAuthorizedRoots([rootURL])
-
-        var panelProviderCallCount = 0
-        let controller = GitScanRootAuthorizationController(store: store) {
-            panelProviderCallCount += 1
-            return PanelSpyOpenPanel(modalResponse: .cancel)
-        }
 
         controller.requestAuthorizationIfNeeded()
 
-        XCTAssertEqual(panelProviderCallCount, 0)
-        XCTAssertEqual(stopAccessCount, 1)
+        XCTAssertEqual(selectionProviderCallCount, 0)
     }
 
-    func testRequestAuthorizationIfNeededPresentsPanelWhenNoAuthorizedRootResolves() throws {
-        let defaults = makeDefaults()
-        let staleRootURL = URL(fileURLWithPath: "/Authorized/StaleProject")
-        let store = makeStore(userDefaults: defaults, resolvedPaths: [])
-        try store.replaceAuthorizedRoots([staleRootURL])
-
-        var panelProviderCallCount = 0
-        let panel = PanelSpyOpenPanel(modalResponse: .cancel)
-        let controller = GitScanRootAuthorizationController(store: store) {
-            panelProviderCallCount += 1
-            return panel
-        }
+    func testRequestAuthorizationIfNeededPresentsPanelOnlyWhenNeverAuthorized() {
+        let store = makeStore(userDefaults: makeDefaults())
+        var selectionProviderCallCount = 0
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in
+                selectionProviderCallCount += 1
+                return nil
+            }
+        )
 
         controller.requestAuthorizationIfNeeded()
 
-        XCTAssertEqual(panelProviderCallCount, 1)
-        XCTAssertEqual(panel.runModalCallCount, 1)
+        XCTAssertEqual(selectionProviderCallCount, 1)
+    }
+
+    func testRequestAuthorizationCancelReturnsFalseWithoutChangingStore() {
+        let store = makeStore(userDefaults: makeDefaults())
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in nil }
+        )
+
+        XCTAssertFalse(controller.requestAuthorization())
+        XCTAssertFalse(store.hasAuthorizedRoots)
+    }
+
+    func testRequestAuthorizationAddsWithoutReplacingExistingRoot() throws {
+        let defaults = makeDefaults()
+        let existing = URL(fileURLWithPath: "/Authorized/Existing")
+        let added = URL(fileURLWithPath: "/Authorized/Added")
+        let store = makeStore(userDefaults: defaults)
+        try store.replaceAuthorizedRoots([existing])
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in [added] }
+        )
+
+        XCTAssertTrue(controller.requestAuthorization())
+
+        XCTAssertEqual(store.authorizationStatuses().map(\.lastKnownPath), [existing.path, added.path])
+    }
+
+    func testRequestReauthorizationReplacesOneRootWithoutDroppingOthers() throws {
+        let defaults = makeDefaults()
+        let first = URL(fileURLWithPath: "/Authorized/First")
+        let second = URL(fileURLWithPath: "/Authorized/Second")
+        let replacement = URL(fileURLWithPath: "/Authorized/Replacement")
+        let store = makeStore(userDefaults: defaults)
+        try store.replaceAuthorizedRoots([first, second])
+        let firstID = try XCTUnwrap(store.authorizationStatuses().first?.id)
+        var allowsMultipleSelection: Bool?
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { value in
+                allowsMultipleSelection = value
+                return [replacement]
+            }
+        )
+
+        XCTAssertTrue(controller.requestReauthorization(for: firstID))
+
+        let statuses = store.authorizationStatuses()
+        XCTAssertEqual(statuses.map(\.lastKnownPath), [replacement.path, second.path])
+        XCTAssertEqual(statuses.first?.id, firstID)
+        XCTAssertEqual(allowsMultipleSelection, false)
+    }
+
+    func testRemoveOneAndRemoveAllReturnWhetherAuthorizationChanged() throws {
+        let store = makeStore(userDefaults: makeDefaults())
+        try store.replaceAuthorizedRoots([
+            URL(fileURLWithPath: "/Authorized/First"),
+            URL(fileURLWithPath: "/Authorized/Second")
+        ])
+        let firstID = try XCTUnwrap(store.authorizationStatuses().first?.id)
+        let controller = GitScanRootAuthorizationController(store: store)
+
+        XCTAssertTrue(controller.removeAuthorization(id: firstID))
+        XCTAssertFalse(controller.removeAuthorization(id: firstID))
+        XCTAssertTrue(controller.removeAllAuthorizations())
+        XCTAssertFalse(controller.removeAllAuthorizations())
+    }
+
+    func testSettingsViewModelPublishesScopedAuthorizationCommands() {
+        let notificationCenter = NotificationCenter()
+        let store = makeStore(userDefaults: makeDefaults())
+        let viewModel = GitScanRootSettingsViewModel(
+            store: store,
+            notificationCenter: notificationCenter
+        )
+        var received: [(Notification.Name, String?)] = []
+        let names: [Notification.Name] = [
+            .gitScanRootAuthorizationAddRequested,
+            .gitScanRootAuthorizationReauthorizationRequested,
+            .gitScanRootAuthorizationRemovalRequested,
+            .gitScanRootAuthorizationRemoveAllRequested
+        ]
+        let observers = names.map { name in
+            notificationCenter.addObserver(forName: name, object: nil, queue: nil) { notification in
+                received.append((
+                    notification.name,
+                    notification.userInfo?[GitScanRootAuthorizationCommand.authorizationIdentifierKey] as? String
+                ))
+            }
+        }
+        defer { observers.forEach(notificationCenter.removeObserver) }
+
+        viewModel.requestAuthorization()
+        viewModel.requestReauthorization(for: "reauthorize-id")
+        viewModel.removeAuthorization(id: "remove-id")
+        viewModel.removeAllAuthorizations()
+
+        XCTAssertEqual(received.map(\.0), names)
+        XCTAssertEqual(received.map(\.1), [nil, "reauthorize-id", "remove-id", nil])
+    }
+
+    func testSettingsViewModelReloadsRecoveredAuthorizationState() async throws {
+        let notificationCenter = NotificationCenter()
+        let root = URL(fileURLWithPath: "/Authorized/Recovering")
+        var isReadable = false
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: makeDefaults(),
+            bookmarkDataCreator: { Data($0.path.utf8) },
+            scopedRootResolver: { data in
+                guard let path = String(data: data, encoding: .utf8) else { return nil }
+                return ResolvedScopedGitScanRoot(
+                    root: ScopedGitScanRoot(url: URL(fileURLWithPath: path)),
+                    bookmarkDataIsStale: false
+                )
+            },
+            rootUsabilityChecker: { _ in isReadable ? nil : .permissionDenied }
+        )
+        try store.replaceAuthorizedRoots([root])
+        let viewModel = GitScanRootSettingsViewModel(
+            store: store,
+            notificationCenter: notificationCenter
+        )
+        XCTAssertEqual(viewModel.authorizations.first?.state, .unavailable(.permissionDenied))
+
+        isReadable = true
+        notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.authorizations.first?.state, .available)
     }
 
     private func makeStore(
         userDefaults: UserDefaults,
-        resolvedPaths: Set<String>,
-        stopAccessAction: @escaping () -> Void = {}
+        resolver: @escaping GitScanRootAuthorizationStore.ScopedRootResolver = { data in
+            guard let path = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            return ResolvedScopedGitScanRoot(
+                root: ScopedGitScanRoot(url: URL(fileURLWithPath: path)),
+                bookmarkDataIsStale: false
+            )
+        }
     ) -> GitScanRootAuthorizationStore {
         GitScanRootAuthorizationStore(
             userDefaults: userDefaults,
-            bookmarkDataCreator: { url in
-                Data(url.standardizedFileURL.path.utf8)
-            },
-            scopedRootResolver: { bookmarkData -> ScopedGitScanRoot? in
-                guard let path = String(data: bookmarkData, encoding: .utf8),
-                      resolvedPaths.contains(path) else {
-                    return nil
-                }
-
-                return ScopedGitScanRoot(url: URL(fileURLWithPath: path), stopAccessingAction: stopAccessAction)
-            }
+            bookmarkDataCreator: { Data($0.path.utf8) },
+            scopedRootResolver: resolver,
+            rootUsabilityChecker: { _ in nil }
         )
     }
 
@@ -78,33 +193,5 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
-    }
-
-    private func makeTemporaryDirectory(named name: String) throws -> URL {
-        let parent = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let directory = parent.appendingPathComponent(name, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
-    }
-}
-
-private final class PanelSpyOpenPanel: NSOpenPanel {
-    let modalResponse: NSApplication.ModalResponse
-    private(set) var runModalCallCount = 0
-
-    init(modalResponse: NSApplication.ModalResponse) {
-        self.modalResponse = modalResponse
-        super.init(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func runModal() -> NSApplication.ModalResponse {
-        runModalCallCount += 1
-        return modalResponse
     }
 }

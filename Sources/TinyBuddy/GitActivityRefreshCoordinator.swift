@@ -167,6 +167,7 @@ final class GitActivityRefreshCoordinator {
     private var lastRefreshAttemptAt: Date?
     private var lastRefreshFailureAt: Date?
     private var lastWakeRefreshAt: Date?
+    private var pendingAuthorizationRefresh = false
     private var pendingWakeRefreshTrigger: GitTodayActivityRefreshTrigger?
     private var pendingWakeRefreshRequestedAt: Date?
 
@@ -248,6 +249,10 @@ final class GitActivityRefreshCoordinator {
         if isApplicationActive {
             scheduleTimerIfNeeded()
         }
+        if isRefreshing {
+            pendingAuthorizationRefresh = true
+            return
+        }
         refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
     }
 
@@ -272,6 +277,7 @@ final class GitActivityRefreshCoordinator {
         timer = nil
         workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
         workspaceNotificationObservers.removeAll()
+        pendingAuthorizationRefresh = false
         pendingWakeRefreshTrigger = nil
         pendingWakeRefreshRequestedAt = nil
     }
@@ -359,6 +365,13 @@ final class GitActivityRefreshCoordinator {
 
     private func finishRefresh(succeeded: Bool) {
         isRefreshing = false
+
+        if pendingAuthorizationRefresh {
+            pendingAuthorizationRefresh = false
+            if refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
+                return
+            }
+        }
 
         guard isApplicationActive else {
             pendingWakeRefreshTrigger = nil

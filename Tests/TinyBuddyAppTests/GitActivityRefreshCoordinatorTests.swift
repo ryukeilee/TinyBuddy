@@ -213,6 +213,25 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanSkipped)
     }
 
+    func testAllInvalidSavedAuthorizationsPreserveTheLastCommittedActivity() {
+        let harness = makeHarness(authorizedRoots: [], authorizationIssue: .authorizationInvalid)
+        let committedActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 4,
+            commitCount: 7,
+            recentProjectName: "StillAvailable"
+        )
+        let committedSnapshot = harness.seedCombinedSnapshot(activity: committedActivity, revision: 1)
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.combinedSnapshot, committedSnapshot)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationInvalid)
+    }
+
     func testRefreshReportsStructuredDiagnosticWhenScriptIsMissing() {
         let harness = makeHarness(scriptURL: nil)
 
@@ -1065,6 +1084,60 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
     }
 
+    func testRestoredPartialAuthorizationIsImmediatelyReincludedInTheNextRefresh() {
+        let liveRoot = URL(fileURLWithPath: "/Authorized/LiveProject")
+        let restoredRoot = URL(fileURLWithPath: "/Authorized/RestoredProject")
+        let harness = makeHarness(
+            authorizedRoots: [liveRoot],
+            authorizationIssue: .authorizationInvalid
+        )
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.start()
+        }
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .partial)
+
+        harness.authorizationIssue = nil
+        harness.authorizedRoots = [liveRoot, restoredRoot]
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.coordinator.handleAuthorizationChanged()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.capturedRootPaths, [liveRoot.path, restoredRoot.path])
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertNil(harness.lastRefreshStatus?.diagnostic)
+    }
+
+    func testAuthorizationChangeDuringRefreshQueuesImmediateRefreshWithCurrentRoots() {
+        let oldRoot = URL(fileURLWithPath: "/Authorized/OldProject")
+        let currentRoot = URL(fileURLWithPath: "/Authorized/CurrentProject")
+        let harness = makeHarness(authorizedRoots: [oldRoot])
+        let firstRunStarted = expectation(description: "first authorization refresh started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            firstRunStarted.fulfill()
+            releaseFirstRun.wait()
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        harness.authorizedRoots = [currentRoot]
+        harness.coordinator.handleAuthorizationChanged()
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRun.signal()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
+        XCTAssertEqual(harness.stopAccessCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
     func testPartialAuthorizationWithSkippedScriptPreservesCommittedActivity() {
         let liveRoot = URL(fileURLWithPath: "/Authorized/LiveProject")
         let harness = makeHarness(
@@ -1626,7 +1699,8 @@ private final class RefreshHarness {
                 return true
             },
             synchronizeWrites: {
-                defaults.synchronize()
+                _ = defaults.synchronize()
+                return true
             },
             readFailureProvider: { [state] in
                 state.validatedSnapshotReadCount += 1

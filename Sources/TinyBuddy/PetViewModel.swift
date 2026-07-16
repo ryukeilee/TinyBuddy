@@ -562,8 +562,10 @@ final class PetViewModel: ObservableObject {
             return nil
         }
 
-        if diagnosticReason == .authorizationRequired || diagnosticReason == .authorizationInvalid {
-            return "重新授权 Git 目录"
+        if diagnosticReason == .authorizationRequired
+            || diagnosticReason == .authorizationInvalid
+            || diagnosticReason == .partialRecovery {
+            return "管理 Git 目录"
         }
 
         return nil

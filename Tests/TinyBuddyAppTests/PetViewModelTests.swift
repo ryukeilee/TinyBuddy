@@ -423,7 +423,10 @@ final class PetViewModelTests: XCTestCase {
             userDefaults: defaults,
             sharedPreferencesProvider: { nil },
             writeValue: { _, _ in false },
-            synchronizeWrites: { defaults.synchronize() }
+            synchronizeWrites: {
+                _ = defaults.synchronize()
+                return true
+            }
         )
         let viewModel = PetViewModel(
             store: store,
@@ -494,7 +497,7 @@ final class PetViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "等待 Git 目录授权")
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "还没有可用的 Git 目录授权，授权后即可恢复 Git 刷新。")
-        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "重新授权 Git 目录")
+        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "管理 Git 目录")
     }
 
     func testRefreshDiagnosticsMapsInvalidSavedAuthorizationToRecoveryMessage() {
@@ -530,7 +533,39 @@ final class PetViewModelTests: XCTestCase {
             viewModel.refreshDiagnostics.reason,
             "之前授权的 Git 扫描目录已失效，可能已被移动、删除或系统权限失效，请重新授权。"
         )
-        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "重新授权 Git 目录")
+        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "管理 Git 目录")
+    }
+
+    func testRefreshDiagnosticsOffersGitDirectoryManagementForPartialRecovery() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let refreshedAt = makeDate(year: 2026, month: 7, day: 4, hour: 12, minute: 18, second: 19)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { refreshedAt }
+        )
+        refreshStatusStore.save(
+            GitActivityRefreshStatus(
+                refreshedAt: refreshedAt,
+                trigger: .launch,
+                outcome: .partial,
+                diagnostic: GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .authorizationResolution,
+                    reason: .partialRecovery
+                )
+            )
+        )
+
+        let viewModel = PetViewModel(
+            store: DailyStatsStore(userDefaults: defaults),
+            refreshStatusStore: refreshStatusStore,
+            notificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(viewModel.refreshDiagnostics.summary, "Git 活动已部分刷新")
+        XCTAssertEqual(viewModel.refreshDiagnostics.actionTitle, "管理 Git 目录")
     }
 
     func testRequestGitScanAuthorizationPostsRecoveryNotification() {
