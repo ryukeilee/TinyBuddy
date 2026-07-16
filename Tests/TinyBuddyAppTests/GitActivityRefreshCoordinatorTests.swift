@@ -677,6 +677,21 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(observedSnapshot?.activitySnapshot.recentProjectName, "TinyBuddy")
     }
 
+    func testActivityAggregationAndPersistenceRunOffMainThread() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            harness.setActivitySnapshot(focusBlockCount: 3, commitCount: 5, recentProjectName: "Background")
+        }
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 5)
+        XCTAssertEqual(harness.combinedSnapshotWriteWasOnMainThread, false)
+    }
+
     func testRefreshMirrorsValidGitActivityWithoutClearingItWhenRefreshedSnapshotIsUnavailable() {
         withRestoredStandardDefaults(keys: mirroredGitActivityKeys) {
             let harness = makeHarness()
@@ -1135,6 +1150,36 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.scriptRunCount, 2)
         XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
         XCTAssertEqual(harness.stopAccessCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
+    func testAuthorizationChangeCancelsInFlightRefreshBeforeStartingReplacement() {
+        let oldRoot = URL(fileURLWithPath: "/Authorized/OldProject")
+        let currentRoot = URL(fileURLWithPath: "/Authorized/CurrentProject")
+        let harness = makeHarness(authorizedRoots: [oldRoot])
+        let firstRunStarted = expectation(description: "first authorization refresh started")
+        let cancellationReleasedRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            firstRunStarted.fulfill()
+            cancellationReleasedRun.wait()
+            throw CancellationError()
+        }
+        harness.setScriptCancellationHook {
+            cancellationReleasedRun.signal()
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        harness.authorizedRoots = [currentRoot]
+        harness.coordinator.handleAuthorizationChanged()
+        harness.performAndWaitForScriptRunCount(2) {}
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptCancellationCount, 1)
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
         XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
     }
 
@@ -1694,7 +1739,8 @@ private final class RefreshHarness {
         self.combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
             userDefaults: defaults,
             sharedPreferencesProvider: { nil },
-            writeValue: { value, key in
+            writeValue: { [state] value, key in
+                state.combinedSnapshotWriteWasOnMainThread = Thread.isMainThread
                 defaults.set(value, forKey: key)
                 return true
             },
@@ -1772,6 +1818,10 @@ private final class RefreshHarness {
                     metrics: state.scriptMetrics
                 )
             },
+            cancelScript: { [state] in
+                state.scriptCancellationCount += 1
+                state.scriptCancellationHook?()
+            },
             authorizedRootsProvider: { [state] in
                 let roots = state.authorizedRoots.map { url in
                     ScopedGitScanRoot(url: url) {
@@ -1822,6 +1872,7 @@ private final class RefreshHarness {
     var widgetReloadCount: Int { state.widgetReloadCount }
     var capturedRootPaths: [String] { state.capturedRootPaths }
     var stopAccessCount: Int { state.stopAccessCount }
+    var scriptCancellationCount: Int { state.scriptCancellationCount }
     var currentDate: Date { state.currentDate }
     var currentDayIdentifier: String { Self.dayIdentifier(for: currentDate, calendar: calendar) }
     var lastRefreshStatus: GitActivityRefreshStatus? { refreshStatusStore.load() }
@@ -1831,6 +1882,7 @@ private final class RefreshHarness {
         sharedSnapshotDiagnosticRecorder.latestSummary
     }
     var combinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.load() }
+    var combinedSnapshotWriteWasOnMainThread: Bool? { state.combinedSnapshotWriteWasOnMainThread }
     var readOnlyCombinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.loadReadOnly() }
     var statusNotificationCenterForTesting: NotificationCenter { statusNotificationCenter }
     var authorizedRoots: [URL] {
@@ -1852,6 +1904,10 @@ private final class RefreshHarness {
 
     func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
         state.scriptRunnerHook = hook
+    }
+
+    func setScriptCancellationHook(_ hook: @escaping () -> Void) {
+        state.scriptCancellationHook = hook
     }
 
     func setWidgetReloaderHook(_ hook: @escaping () throws -> Void) {
@@ -2079,6 +2135,7 @@ private final class RefreshHarness {
         var authorizationIssue: GitScanRootAccessIssue?
         var capturedRootPaths: [String] = []
         var scriptRunCount = 0
+        var scriptCancellationCount = 0
         var widgetReloadCount = 0
         var stopAccessCount = 0
         var expectedWidgetReloadCount = 0
@@ -2086,12 +2143,14 @@ private final class RefreshHarness {
         var onWidgetReload: ((Int) -> Void)?
         var onScriptRun: ((Int) -> Void)?
         var scriptRunnerHook: ((Int) throws -> Void)?
+        var scriptCancellationHook: (() -> Void)?
         var widgetReloaderHook: (() throws -> Void)?
         var scriptMetrics: GitRefreshScriptMetrics?
         var validatedSnapshotReadCount = 0
         var validatedSnapshotReadFailures: [Int: TinyBuddySharedSnapshotReason] = [:]
         var statusHistory: [GitActivityRefreshStatus] = []
         var diagnosticEventIdentifiers: [String] = []
+        var combinedSnapshotWriteWasOnMainThread: Bool?
 
         init(currentDate: Date) {
             self.currentDate = currentDate

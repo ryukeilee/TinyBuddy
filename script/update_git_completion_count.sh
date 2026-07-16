@@ -17,7 +17,7 @@ SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
 TODAY="${TINYBUDDY_TODAY:-$(date +%F)}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 # Signed-runtime dependency boundary: Bash 3.2 plus date, find, stat, mktemp,
-# awk, sed, sort, cmp, cp, mv, rm, mkdir, rmdir, sleep, tr, paste, basename,
+# awk, sed, sort, cmp, cp, mv, rm, mkdir, rmdir, test, sleep, tr, paste, basename,
 # base64, cksum, defaults, plutil, PlistBuddy, git, and optional perl. The
 # script also requires its inherited temporary directory, authorized scan
 # roots, and the app-group preferences container.
@@ -27,6 +27,9 @@ GIT_BIN="${TINYBUDDY_GIT_BIN:-git}"
 PERL_BIN="${TINYBUDDY_PERL_BIN:-}"
 DUPLICATE_EVENT_WINDOW_SECONDS="${TINYBUDDY_DUPLICATE_EVENT_WINDOW_SECONDS:-120}"
 REPOSITORY_CACHE_MAX_AGE_SECONDS="${TINYBUDDY_GIT_REPOSITORY_CACHE_MAX_AGE_SECONDS:-300}"
+SCAN_ROOT_TIMEOUT_SECONDS="${TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS:-15}"
+REPOSITORY_READ_TIMEOUT_SECONDS="${TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS:-5}"
+REPOSITORY_PARSE_TIMEOUT_SECONDS="${TINYBUDDY_GIT_REPOSITORY_PARSE_TIMEOUT_SECONDS:-30}"
 CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-repository-cache}"
 CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
 CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
@@ -101,6 +104,7 @@ repository_count=0
 cache_hit_count=0
 reflog_unchanged_skip_count=0
 recomputed_repository_count=0
+retained_repository_count=0
 repository_scan_failed=0
 repository_scan_failure_count=0
 invalid_repository_count=0
@@ -125,6 +129,33 @@ record_invalid_repository() {
 
 log_error() {
   echo "TinyBuddy refresh script: $*" >&2
+}
+
+run_command_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  local command_pid
+  local command_status=0
+  local poll_count=0
+  local poll_limit=$((timeout_seconds * 100))
+
+  "$@" &
+  command_pid=$!
+
+  while kill -0 "$command_pid" 2>/dev/null; do
+    if [ "$poll_count" -ge "$poll_limit" ]; then
+      kill -TERM "$command_pid" 2>/dev/null || true
+      sleep 0.1
+      kill -KILL "$command_pid" 2>/dev/null || true
+      wait "$command_pid" 2>/dev/null || true
+      return 124
+    fi
+    poll_count=$((poll_count + 1))
+    sleep 0.01
+  done
+
+  wait "$command_pid" || command_status=$?
+  return "$command_status"
 }
 
 cleanup() {
@@ -165,7 +196,7 @@ normalized_scan_root_path() {
   local path="$1"
   local resolved_path="$path"
 
-  if [ -d "$path" ]; then
+  if run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" /bin/test -d "$path"; then
     resolved_path="$(cd "$path" 2>/dev/null && pwd -P)" || resolved_path="$path"
   fi
 
@@ -411,6 +442,7 @@ git_commit_is_automated() {
       GIT_CONFIG_NOSYSTEM=1 \
       GIT_CONFIG_GLOBAL=/dev/null \
       GIT_OPTIONAL_LOCKS=0 \
+      GIT_NO_LAZY_FETCH=1 \
       "$GIT_BIN" --git-dir="$git_dir" show -s --format='%an <%ae> %cn <%ce>' "$object_id" 2>/dev/null
     )"; then
     git_identity_exit_code=0
@@ -432,11 +464,12 @@ parse_reflog_events() {
   local new_object_id
   local epoch
   local actor_is_automated
+  local parse_deadline=$((SECONDS + REPOSITORY_PARSE_TIMEOUT_SECONDS))
 
   : > "$repo_reflog_file"
 
   if [ -n "$PERL_BIN" ]; then
-    "$PERL_BIN" -e '
+    run_command_with_timeout "$REPOSITORY_PARSE_TIMEOUT_SECONDS" "$PERL_BIN" -e '
       use strict;
       use warnings;
 
@@ -480,6 +513,7 @@ parse_reflog_events() {
   fi
 
   while IFS=$'\t' read -r metadata message || [ -n "${metadata:-}" ]; do
+    [ "$SECONDS" -lt "$parse_deadline" ] || return 124
     case "$message" in
       "commit (amend):"*)
         kind="amend"
@@ -556,11 +590,13 @@ append_reflog_events_for_today() {
   local message_fingerprint
   local activity_subject
   local object_is_automated
+  local parse_deadline=$((SECONDS + REPOSITORY_PARSE_TIMEOUT_SECONDS))
 
   : > "$repo_activity_events_file"
   parse_reflog_events "$4" || return 1
 
   while IFS=$'\t' read -r kind old_object_id new_object_id epoch actor_is_automated message; do
+    [ "$SECONDS" -lt "$parse_deadline" ] || return 124
     day_identifier="$(/bin/date -r "$epoch" +%Y-%m-%d 2>/dev/null)" || continue
     [ "$day_identifier" = "$TODAY" ] || continue
     local_hour="$(/bin/date -r "$epoch" +%H 2>/dev/null)" || continue
@@ -596,7 +632,8 @@ build_rewrite_candidates() {
   : > "$rewrite_log_file"
   : > "$rewrite_candidates_file"
   trap - ERR
-  if GIT_CONFIG_NOSYSTEM=1 \
+  if run_command_with_timeout "$REPOSITORY_PARSE_TIMEOUT_SECONDS" env \
+     GIT_CONFIG_NOSYSTEM=1 \
      GIT_CONFIG_GLOBAL=/dev/null \
      GIT_OPTIONAL_LOCKS=0 \
      "$GIT_BIN" --git-dir="$git_dir" log --reverse --format='%H%x09%s' \
@@ -795,6 +832,7 @@ reset_activity_snapshot() {
   cache_hit_count=0
   reflog_unchanged_skip_count=0
   recomputed_repository_count=0
+  retained_repository_count=0
   invalid_repository_count="$repository_scan_failure_count"
   recovery_has_missing_reflog=0
   activity_event_sequence=0
@@ -817,7 +855,7 @@ emit_refresh_metrics() {
     refresh_outcome="partial"
   fi
 
-  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tshared_data_written=%s\n' \
+  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tretained_repository_count=%s\tshared_data_written=%s\n' \
     "$authorized_root_count" \
     "$repository_count" \
     "$invalid_repository_count" \
@@ -825,24 +863,40 @@ emit_refresh_metrics() {
     "$cache_hit_count" \
     "$reflog_unchanged_skip_count" \
     "$recomputed_repository_count" \
+    "$retained_repository_count" \
     "$shared_data_rewritten"
 }
 
 build_scan_root_signature() {
   local signature_file="$1"
   local scan_root
+  local root_signature
+  local root_entries_file
 
   : > "$signature_file"
 
   while IFS= read -r scan_root; do
-    if [ ! -d "$scan_root" ]; then
+    if ! run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" /bin/test -d "$scan_root"; then
       printf 'ROOT\t%s\tmissing\n' "$scan_root" >> "$signature_file"
       continue
     fi
 
-    "$STAT_BIN" -f 'ROOT\t%N\t%z\t%m\t%i' "$scan_root" >> "$signature_file"
-    "$FIND_BIN" "$scan_root" -mindepth 1 -maxdepth 1 -exec "$STAT_BIN" -f 'ENTRY\t%N\t%z\t%m\t%i' {} \; \
-      2>> "$find_stderr_file" | LC_ALL=C sort >> "$signature_file"
+    if ! root_signature="$(run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" \
+      "$STAT_BIN" -f 'ROOT\t%N\t%z\t%m\t%i' "$scan_root")"; then
+      printf 'ROOT\t%s\ttimeout-or-error\n' "$scan_root" >> "$signature_file"
+      continue
+    fi
+    printf '%s\n' "$root_signature" >> "$signature_file"
+    root_entries_file="$(mktemp)"
+    if run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" \
+      "$FIND_BIN" "$scan_root" -mindepth 1 -maxdepth 1 \
+      -exec "$STAT_BIN" -f 'ENTRY\t%N\t%z\t%m\t%i' {} \; \
+      > "$root_entries_file" 2>> "$find_stderr_file"; then
+      LC_ALL=C sort "$root_entries_file" >> "$signature_file"
+    else
+      printf 'ENTRIES\t%s\ttimeout-or-error\n' "$scan_root" >> "$signature_file"
+    fi
+    rm -f "$root_entries_file"
   done < "$scan_roots_file"
 }
 
@@ -854,12 +908,14 @@ refresh_repository_list_from_scan() {
   : > "$repo_scan_file"
 
   while IFS= read -r scan_root; do
-    if [ ! -d "$scan_root" ]; then
+    if ! run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" /bin/test -d "$scan_root"; then
       log_error "authorized git scan root is not a readable directory; skipping one root"
+      repository_scan_failed=1
+      repository_scan_failure_count=$((repository_scan_failure_count + 1))
       continue
     fi
 
-    "$FIND_BIN" "$scan_root" \
+    run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" "$FIND_BIN" "$scan_root" \
       \( \
         -path "$USER_HOME/Library" -o \
         -path "$USER_HOME/.Trash" -o \
@@ -1002,8 +1058,10 @@ read_reflog_signature() {
   local content_checksum
   (
     trap - ERR
-    stat_signature="$("$STAT_BIN" -f '%m:%z:%i' "$reflog_path")" || exit 1
-    content_checksum="$(/usr/bin/cksum < "$reflog_path")" || exit 1
+    stat_signature="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+      "$STAT_BIN" -f '%m:%z:%i' "$reflog_path")" || exit $?
+    content_checksum="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+      /usr/bin/cksum "$reflog_path")" || exit $?
     content_checksum="${content_checksum%% *}"
     printf '%s:%s\n' "$stat_signature" "$content_checksum"
   )
@@ -1146,6 +1204,38 @@ commit_cached_reflog_events() {
   while IFS= read -r cache_row; do
     printf '%s\n' "$cache_row" >> "$new_repo_stats_file"
   done < "$repo_reflog_file"
+}
+
+retain_last_valid_cached_reflog_events() {
+  local repository_identity="$1"
+  local display_name="$2"
+  local git_dir="$3"
+  local reflog_path="$4"
+  local cached_signature
+
+  cached_signature="$(awk -F '\t' \
+    -v repository_identity="$repository_identity" \
+    -v git_dir="$git_dir" \
+    -v reflog_path="$reflog_path" \
+    -v today="$TODAY" '
+      $1 == "v2" &&
+      $2 == repository_identity &&
+      $4 == git_dir &&
+      $5 == reflog_path &&
+      $6 == today {
+        print $7
+        exit
+      }
+    ' "$repo_stats_cache_file")"
+
+  [ -n "$cached_signature" ] || return 1
+  cached_reflog_events_match \
+    "$repository_identity" "$git_dir" "$reflog_path" "$cached_signature" || return 1
+  append_cached_reflog_events \
+    "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$cached_signature"
+  commit_cached_reflog_events
+  append_repo_activity_events_to_raw "$repository_identity" "$display_name" "$reflog_path" "$git_dir"
+  retained_repository_count=$((retained_repository_count + 1))
 }
 
 write_reflog_events_to_cache() {
@@ -1343,7 +1433,11 @@ process_repository_list() {
     if [ "$read_reflog_signature_exit_code" -ne 0 ]; then
       failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
       record_invalid_repository "reflog-mtime-failed"
-      log_error "failed to read git reflog metadata for one repository; preserving previous shared data"
+      if retain_last_valid_cached_reflog_events "$repository_identity" "$display_name" "$git_dir" "$reflog_path"; then
+        log_error "failed to read git reflog metadata for one repository; retained its last valid result"
+      else
+        log_error "failed to read git reflog metadata for one repository; no valid cached result was available"
+      fi
       continue
     fi
 
@@ -1401,7 +1495,11 @@ process_repository_list() {
     if [ "$stable_reflog_read" -ne 1 ]; then
       failed_reflog_repo_count=$((failed_reflog_repo_count + 1))
       record_invalid_repository "reflog-parse-failed"
-      log_error "failed to obtain a stable git reflog read for one repository; continuing with other valid repositories"
+      if retain_last_valid_cached_reflog_events "$repository_identity" "$display_name" "$git_dir" "$reflog_path"; then
+        log_error "failed to obtain a stable git reflog read for one repository; retained its last valid result"
+      else
+        log_error "failed to obtain a stable git reflog read for one repository; continuing without that repository"
+      fi
       continue
     fi
     successful_reflog_repo_count=$((successful_reflog_repo_count + 1))
@@ -1647,6 +1745,23 @@ case "$REPOSITORY_CACHE_MAX_AGE_SECONDS" in
 esac
 if [ "$REPOSITORY_CACHE_MAX_AGE_SECONDS" -gt 86400 ]; then
   log_error "repository cache maximum age exceeds the supported maximum"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
+fi
+
+case "$SCAN_ROOT_TIMEOUT_SECONDS:$REPOSITORY_READ_TIMEOUT_SECONDS:$REPOSITORY_PARSE_TIMEOUT_SECONDS" in
+  *[!0-9:]*|:*|*:|*::* )
+    log_error "git scan timeout configuration is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+if [ "$SCAN_ROOT_TIMEOUT_SECONDS" -lt 1 ] || [ "$SCAN_ROOT_TIMEOUT_SECONDS" -gt 300 ] ||
+   [ "$REPOSITORY_READ_TIMEOUT_SECONDS" -lt 1 ] || [ "$REPOSITORY_READ_TIMEOUT_SECONDS" -gt 60 ] ||
+   [ "$REPOSITORY_PARSE_TIMEOUT_SECONDS" -lt 1 ] || [ "$REPOSITORY_PARSE_TIMEOUT_SECONDS" -gt 300 ]; then
+  log_error "git scan timeout configuration is outside the supported range"
   refresh_outcome_override="failed"
   emit_refresh_metrics
   exit 64

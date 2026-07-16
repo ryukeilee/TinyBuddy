@@ -107,6 +107,16 @@ The launch script attempts to refresh Git-derived counters before starting the a
 
 When at least one authorization is already saved, `release-install` and `release-verify` also require a fresh successful or partial Git refresh produced by the installed Sandbox app. The verification output reports only sanitized counts and status; it never prints saved repository paths.
 
+The refresh keeps a content-validated per-reflog fingerprint cache. Unchanged repositories reuse their last parsed events; a temporarily slow or unreadable repository reuses its last valid same-day result while other repositories continue. Root enumeration and reflog fingerprint reads have bounded timeouts, refresh execution has a hard upper bound, and an authorization change cancels the superseded process before starting its replacement.
+
+Run the repeatable Git stress benchmark with:
+
+```bash
+./script/benchmark_git_refresh.sh
+```
+
+It creates disposable repositories outside the worktree, verifies aggregate accuracy, compares first and incremental refresh latency, samples CPU and RSS, and checks cancellation convergence. Repository/event counts and gates can be adjusted with the `TINYBUDDY_BENCHMARK_*` environment variables declared at the top of the script.
+
 ## Signing Notes
 
 Unsigned Debug builds use local `CODE_SIGNING_ALLOWED=NO` output under `.build/xcode`. Signed builds use automatic provisioning updates and write derived data to a temporary system location by default. Release install and release verify modes require `TINYBUDDY_SIGNING_MODE=signed`.
@@ -116,6 +126,7 @@ Unsigned Debug builds use local `CODE_SIGNING_ALLOWED=NO` output under `.build/x
 Use the smallest check that proves your change:
 
 - `swift test` for shared logic, stores, view models, and script-facing behavior covered by XCTest
+- `./script/benchmark_git_refresh.sh` for repeatable large-repository Git refresh performance and cancellation gates
 - `./script/build_and_run.sh --verify` for app startup and widget/runtime consistency
 - `./script/build_and_run.sh release-verify` for installed signed app and widget registration
 

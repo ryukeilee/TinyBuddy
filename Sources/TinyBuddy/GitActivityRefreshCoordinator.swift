@@ -29,6 +29,7 @@ struct GitRefreshScriptMetrics: Equatable {
     let cacheHitCount: Int?
     let reflogUnchangedSkipCount: Int?
     let recomputedRepositoryCount: Int?
+    let retainedRepositoryCount: Int?
     let sharedDataWritten: Bool?
 
     init(
@@ -38,6 +39,7 @@ struct GitRefreshScriptMetrics: Equatable {
         cacheHitCount: Int?,
         reflogUnchangedSkipCount: Int?,
         recomputedRepositoryCount: Int?,
+        retainedRepositoryCount: Int? = nil,
         sharedDataWritten: Bool?
     ) {
         self.repositoryCount = repositoryCount
@@ -46,6 +48,7 @@ struct GitRefreshScriptMetrics: Equatable {
         self.cacheHitCount = cacheHitCount
         self.reflogUnchangedSkipCount = reflogUnchangedSkipCount
         self.recomputedRepositoryCount = recomputedRepositoryCount
+        self.retainedRepositoryCount = retainedRepositoryCount
         self.sharedDataWritten = sharedDataWritten
     }
 }
@@ -86,6 +89,7 @@ struct GitRefreshScriptResultParser {
             cacheHitCount: values["cache_hit_count"].flatMap(Int.init),
             reflogUnchangedSkipCount: values["reflog_unchanged_skip_count"].flatMap(Int.init),
             recomputedRepositoryCount: values["recomputed_repository_count"].flatMap(Int.init),
+            retainedRepositoryCount: values["retained_repository_count"].flatMap(Int.init),
             sharedDataWritten: values["shared_data_written"].flatMap { value in
                 switch value {
                 case "1":
@@ -106,6 +110,46 @@ struct GitRefreshScriptResultParser {
             .map(String.init)
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private final class GitRefreshScriptExecutionController {
+    private let lock = NSLock()
+    private weak var process: Process?
+    private var cancellationRequested = false
+
+    func register(_ process: Process) {
+        lock.lock()
+        self.process = process
+        cancellationRequested = false
+        lock.unlock()
+    }
+
+    func shouldStart(_ process: Process) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return self.process === process && !cancellationRequested
+    }
+
+    func clear(_ process: Process) {
+        lock.lock()
+        if self.process === process {
+            self.process = nil
+            cancellationRequested = false
+        }
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let process = self.process
+        cancellationRequested = process != nil
+        lock.unlock()
+
+        guard let process, process.isRunning else {
+            return
+        }
+        process.terminate()
     }
 }
 
@@ -140,6 +184,11 @@ final class GitActivityRefreshCoordinator {
         }
     }
 
+    private enum ActivityCommitPreparation {
+        case failed(GitActivityRefreshDiagnostic)
+        case prepared(didPublishSnapshot: Bool, didChangeWidgetActivity: Bool)
+    }
+
     private let activityStore: GitTodayActivityStore
     private let dailyStatsStore: DailyStatsStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
@@ -147,6 +196,7 @@ final class GitActivityRefreshCoordinator {
     private let widgetReloader: () throws -> Void
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private let scriptRunner: ScriptRunner
+    private let cancelScript: () -> Void
     private let scriptURLProvider: ScriptURLProvider
     private let authorizedRootsProvider: AuthorizedRootsProvider
     private let dateProvider: () -> Date
@@ -183,7 +233,8 @@ final class GitActivityRefreshCoordinator {
             WidgetCenter.shared.reloadAllTimelines()
         },
         scriptURLProvider: @escaping ScriptURLProvider = GitActivityRefreshCoordinator.locateRefreshScript,
-        scriptRunner: @escaping ScriptRunner = GitActivityRefreshCoordinator.runScript(at:scanningRoots:),
+        scriptRunner: ScriptRunner? = nil,
+        cancelScript: @escaping () -> Void = {},
         authorizedRootsProvider: AuthorizedRootsProvider? = nil,
         dateProvider: @escaping () -> Date = Date.init,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
@@ -201,7 +252,20 @@ final class GitActivityRefreshCoordinator {
         self.widgetReloader = widgetReloader
         self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
         self.scriptURLProvider = scriptURLProvider
-        self.scriptRunner = scriptRunner
+        if let scriptRunner {
+            self.scriptRunner = scriptRunner
+            self.cancelScript = cancelScript
+        } else {
+            let executionController = GitRefreshScriptExecutionController()
+            self.scriptRunner = { scriptURL, rootURLs in
+                try GitActivityRefreshCoordinator.runScript(
+                    at: scriptURL,
+                    scanningRoots: rootURLs,
+                    executionController: executionController
+                )
+            }
+            self.cancelScript = executionController.cancel
+        }
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
         self.dateProvider = dateProvider
         self.workspaceNotificationCenter = workspaceNotificationCenter
@@ -251,6 +315,7 @@ final class GitActivityRefreshCoordinator {
         }
         if isRefreshing {
             pendingAuthorizationRefresh = true
+            cancelScript()
             return
         }
         refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
@@ -280,6 +345,7 @@ final class GitActivityRefreshCoordinator {
         pendingAuthorizationRefresh = false
         pendingWakeRefreshTrigger = nil
         pendingWakeRefreshRequestedAt = nil
+        cancelScript()
     }
 
     deinit {
@@ -491,19 +557,39 @@ final class GitActivityRefreshCoordinator {
         let scriptRunner = self.scriptRunner
 
         refreshQueue.async { [weak self] in
+            var didStopAccessingRoots = false
             defer {
-                scopedRoots.forEach { $0.stopAccessing() }
+                if !didStopAccessingRoots {
+                    scopedRoots.forEach { $0.stopAccessing() }
+                }
             }
 
             do {
                 let scriptResult = try scriptRunner(scriptURL, authorizedRootURLs)
+                scopedRoots.forEach { $0.stopAccessing() }
+                didStopAccessingRoots = true
+                guard let self else {
+                    return
+                }
+                let lifecycleIsCurrent = DispatchQueue.main.sync {
+                    self.lifecycleGeneration == lifecycleGeneration
+                }
+                guard lifecycleIsCurrent else {
+                    return
+                }
+                let scriptOutcome = scriptResult.metrics?.refreshOutcome
+                let commitPreparation: ActivityCommitPreparation?
+                if scriptOutcome == .failed || scriptOutcome == .unknown || scriptOutcome == .skipped {
+                    commitPreparation = nil
+                } else {
+                    commitPreparation = self.prepareActivityCommit(refreshedAt: now)
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let self,
                           self.lifecycleGeneration == lifecycleGeneration else {
                         return
                     }
 
-                    let scriptOutcome = scriptResult.metrics?.refreshOutcome
                     if scriptOutcome == .failed || scriptOutcome == .unknown {
                         let diagnostic = GitActivityRefreshDiagnostic(
                             source: .gitActivityRefresh,
@@ -559,15 +645,13 @@ final class GitActivityRefreshCoordinator {
                         return
                     }
 
-                    let currentActivityRead = self.activityStore.loadTodaySnapshotRead()
-                    let currentSnapshot = currentActivityRead.snapshot
-                    guard currentSnapshot.focusBlockCount != nil,
-                          currentSnapshot.commitCount != nil else {
-                        let diagnostic = GitActivityRefreshDiagnostic(
-                            source: .gitActivityRefresh,
-                            stage: .activitySnapshotLoad,
-                            reason: .refreshedActivityUnavailable
-                        )
+                    guard let commitPreparation else {
+                        return
+                    }
+                    let didPublishCommittedSnapshot: Bool
+                    let didChangePublishedWidgetActivity: Bool
+                    switch commitPreparation {
+                    case .failed(let diagnostic):
                         self.lastRefreshFailureAt = now
                         self.recordRefreshStatus(
                             refreshedAt: now,
@@ -585,150 +669,12 @@ final class GitActivityRefreshCoordinator {
                         )
                         self.finishRefresh(succeeded: false)
                         return
+                    case .prepared(let didPublishSnapshot, let didChangeWidgetActivity):
+                        didPublishCommittedSnapshot = didPublishSnapshot
+                        didChangePublishedWidgetActivity = didChangeWidgetActivity
                     }
-
-                    let fallbackSnapshot = self.dailyStatsStore.loadSnapshot()
-                    let expectedDayIdentifier = fallbackSnapshot.stats.dayIdentifier
-                    let previouslyCommittedRead = self.combinedSnapshotStore.readValidated(
-                        expectedDayIdentifier: expectedDayIdentifier
-                    )
-                    previouslyCommittedRead.observation.map(self.sharedSnapshotDiagnosticRecorder.record)
-                    if let observation = previouslyCommittedRead.observation,
-                       observation.reason == .versionIncompatible
-                        || observation.reason == .appGroupUnavailable
-                        || observation.reason == .sandboxReadDenied {
-                        let diagnostic = GitActivityRefreshDiagnostic(
-                            source: .gitActivityRefresh,
-                            stage: .combinedSnapshotCommit,
-                            reason: .combinedSnapshotCommitFailed
-                        )
-                        self.lastRefreshFailureAt = now
-                        self.recordRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: .failed,
-                            diagnostic: diagnostic,
-                            metrics: self.makeMetrics(
-                                startedAt: now,
-                                finishedAt: self.dateProvider(),
-                                authorizedRootCount: authorizedRootURLs.count,
-                                scriptMetrics: scriptResult.metrics,
-                                widgetReloaded: false,
-                                diagnostic: diagnostic
-                            )
-                        )
-                        self.finishRefresh(succeeded: false)
-                        return
-                    }
-                    let recoverableReadFault: TinyBuddySharedSnapshotObservation?
-                    if let observation = previouslyCommittedRead.observation,
-                       previouslyCommittedRead.snapshot == nil,
-                       observation.reason == .snapshotCorrupt || observation.reason == .staleData {
-                        recoverableReadFault = observation
-                    } else {
-                        recoverableReadFault = nil
-                    }
-                    let previouslyCommittedSnapshot = previouslyCommittedRead.snapshot
-                    let previouslyPublishedActivity = previouslyCommittedSnapshot?.activitySnapshot
-                    let combinedUpdate = self.combinedSnapshotStore.updateActivitySlice(
-                        currentSnapshot,
-                        activityRevision: currentActivityRead.trustedRevision,
-                        fallbackSnapshot: fallbackSnapshot
-                    )
-                    let didReachCommittedCheckpoint: Bool
-                    switch combinedUpdate.outcome {
-                    case .saved:
-                        didReachCommittedCheckpoint = combinedUpdate.didPersist
-                    case .alreadyCurrent:
-                        didReachCommittedCheckpoint = true
-                    case .rejectedStaleActivity,
-                         .rejectedInvalidActivityRevision,
-                         .versionIncompatible,
-                         .revisionExhausted,
-                         .persistenceFailed:
-                        didReachCommittedCheckpoint = false
-                    }
-
-                    guard didReachCommittedCheckpoint else {
-                        combinedUpdate.observation.map(self.sharedSnapshotDiagnosticRecorder.record)
-                        let diagnostic = GitActivityRefreshDiagnostic(
-                            source: .gitActivityRefresh,
-                            stage: .combinedSnapshotCommit,
-                            reason: .combinedSnapshotCommitFailed
-                        )
-                        self.lastRefreshFailureAt = now
-                        self.recordRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: .failed,
-                            diagnostic: diagnostic,
-                            metrics: self.makeMetrics(
-                                startedAt: now,
-                                finishedAt: self.dateProvider(),
-                                authorizedRootCount: authorizedRootURLs.count,
-                                scriptMetrics: scriptResult.metrics,
-                                widgetReloaded: false,
-                                diagnostic: diagnostic
-                            )
-                        )
-                        self.finishRefresh(succeeded: false)
-                        return
-                    }
-
-                    let committedReadAfterUpdate = self.combinedSnapshotStore.readValidated(
-                        expectedDayIdentifier: expectedDayIdentifier
-                    )
-                    committedReadAfterUpdate.observation.map(self.sharedSnapshotDiagnosticRecorder.record)
-                    guard let committedSnapshotAfterUpdate = committedReadAfterUpdate.snapshot else {
-                        if committedReadAfterUpdate.observation == nil {
-                            self.sharedSnapshotDiagnosticRecorder.record(
-                                phase: .snapshotWrite,
-                                reason: .persistenceFailed,
-                                recovery: .stopped
-                            )
-                        }
-                        let diagnostic = GitActivityRefreshDiagnostic(
-                            source: .gitActivityRefresh,
-                            stage: .combinedSnapshotCommit,
-                            reason: .combinedSnapshotCommitFailed
-                        )
-                        self.lastRefreshFailureAt = now
-                        self.recordRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: .failed,
-                            diagnostic: diagnostic,
-                            metrics: self.makeMetrics(
-                                startedAt: now,
-                                finishedAt: self.dateProvider(),
-                                authorizedRootCount: authorizedRootURLs.count,
-                                scriptMetrics: scriptResult.metrics,
-                                widgetReloaded: false,
-                                diagnostic: diagnostic
-                            )
-                        )
-                        self.finishRefresh(succeeded: false)
-                        return
-                    }
-                    if let recoverableReadFault {
-                        self.sharedSnapshotDiagnosticRecorder.record(
-                            phase: .snapshotRead,
-                            reason: recoverableReadFault.reason,
-                            recovery: combinedUpdate.didPersist ? .rebuilt : .rereadSucceeded,
-                            attemptCount: recoverableReadFault.attemptCount + 1
-                        )
-                    }
-                    let publishedActivityAfterUpdate = committedSnapshotAfterUpdate.activitySnapshot
-                    let didPublishCommittedSnapshot = previouslyCommittedSnapshot
-                        != committedSnapshotAfterUpdate
-                    let didChangePublishedWidgetActivity = PublishedWidgetActivity(previouslyPublishedActivity)
-                        != PublishedWidgetActivity(publishedActivityAfterUpdate)
 
                     if didPublishCommittedSnapshot {
-                        self.mirrorActivitySnapshotToStandardDefaults(
-                            currentSnapshot,
-                            refreshedAt: now
-                        )
                         self.statusNotificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
                     }
                     let shouldReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
@@ -824,6 +770,108 @@ final class GitActivityRefreshCoordinator {
         }
 
         return true
+    }
+
+    private func prepareActivityCommit(refreshedAt: Date) -> ActivityCommitPreparation {
+        let currentActivityRead = activityStore.loadTodaySnapshotRead()
+        let currentSnapshot = currentActivityRead.snapshot
+        guard currentSnapshot.focusBlockCount != nil,
+              currentSnapshot.commitCount != nil else {
+            return .failed(
+                GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .activitySnapshotLoad,
+                    reason: .refreshedActivityUnavailable
+                )
+            )
+        }
+
+        let fallbackSnapshot = dailyStatsStore.loadSnapshot()
+        let expectedDayIdentifier = fallbackSnapshot.stats.dayIdentifier
+        let previouslyCommittedRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        previouslyCommittedRead.observation.map(sharedSnapshotDiagnosticRecorder.record)
+        if let observation = previouslyCommittedRead.observation,
+           observation.reason == .versionIncompatible
+            || observation.reason == .appGroupUnavailable
+            || observation.reason == .sandboxReadDenied {
+            return .failed(combinedSnapshotCommitDiagnostic())
+        }
+
+        let recoverableReadFault: TinyBuddySharedSnapshotObservation?
+        if let observation = previouslyCommittedRead.observation,
+           previouslyCommittedRead.snapshot == nil,
+           observation.reason == .snapshotCorrupt || observation.reason == .staleData {
+            recoverableReadFault = observation
+        } else {
+            recoverableReadFault = nil
+        }
+        let previouslyCommittedSnapshot = previouslyCommittedRead.snapshot
+        let previouslyPublishedActivity = previouslyCommittedSnapshot?.activitySnapshot
+        let combinedUpdate = combinedSnapshotStore.updateActivitySlice(
+            currentSnapshot,
+            activityRevision: currentActivityRead.trustedRevision,
+            fallbackSnapshot: fallbackSnapshot
+        )
+        let didReachCommittedCheckpoint: Bool
+        switch combinedUpdate.outcome {
+        case .saved:
+            didReachCommittedCheckpoint = combinedUpdate.didPersist
+        case .alreadyCurrent:
+            didReachCommittedCheckpoint = true
+        case .rejectedStaleActivity,
+             .rejectedInvalidActivityRevision,
+             .versionIncompatible,
+             .revisionExhausted,
+             .persistenceFailed:
+            didReachCommittedCheckpoint = false
+        }
+        guard didReachCommittedCheckpoint else {
+            combinedUpdate.observation.map(sharedSnapshotDiagnosticRecorder.record)
+            return .failed(combinedSnapshotCommitDiagnostic())
+        }
+
+        let committedReadAfterUpdate = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        committedReadAfterUpdate.observation.map(sharedSnapshotDiagnosticRecorder.record)
+        guard let committedSnapshotAfterUpdate = committedReadAfterUpdate.snapshot else {
+            if committedReadAfterUpdate.observation == nil {
+                sharedSnapshotDiagnosticRecorder.record(
+                    phase: .snapshotWrite,
+                    reason: .persistenceFailed,
+                    recovery: .stopped
+                )
+            }
+            return .failed(combinedSnapshotCommitDiagnostic())
+        }
+        if let recoverableReadFault {
+            sharedSnapshotDiagnosticRecorder.record(
+                phase: .snapshotRead,
+                reason: recoverableReadFault.reason,
+                recovery: combinedUpdate.didPersist ? .rebuilt : .rereadSucceeded,
+                attemptCount: recoverableReadFault.attemptCount + 1
+            )
+        }
+
+        let didPublishCommittedSnapshot = previouslyCommittedSnapshot != committedSnapshotAfterUpdate
+        if didPublishCommittedSnapshot {
+            mirrorActivitySnapshotToStandardDefaults(currentSnapshot, refreshedAt: refreshedAt)
+        }
+        return .prepared(
+            didPublishSnapshot: didPublishCommittedSnapshot,
+            didChangeWidgetActivity: PublishedWidgetActivity(previouslyPublishedActivity)
+                != PublishedWidgetActivity(committedSnapshotAfterUpdate.activitySnapshot)
+        )
+    }
+
+    private func combinedSnapshotCommitDiagnostic() -> GitActivityRefreshDiagnostic {
+        GitActivityRefreshDiagnostic(
+            source: .gitActivityRefresh,
+            stage: .combinedSnapshotCommit,
+            reason: .combinedSnapshotCommitFailed
+        )
     }
 
     private func shouldRefresh(at now: Date) -> Bool {
@@ -983,8 +1031,14 @@ final class GitActivityRefreshCoordinator {
         return fallbackURL
     }
 
-    private static func runScript(at scriptURL: URL, scanningRoots rootURLs: [URL]) throws -> GitRefreshScriptResult {
+    private static func runScript(
+        at scriptURL: URL,
+        scanningRoots rootURLs: [URL],
+        executionController: GitRefreshScriptExecutionController
+    ) throws -> GitRefreshScriptResult {
         let process = Process()
+        executionController.register(process)
+        defer { executionController.clear(process) }
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = scriptProcessArguments()
         process.currentDirectoryURL = scriptURL.deletingLastPathComponent()
@@ -1028,11 +1082,25 @@ final class GitActivityRefreshCoordinator {
         process.standardError = standardErrorHandle
         let standardInputPipe = Pipe()
         process.standardInput = standardInputPipe
+        let processExited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            processExited.signal()
+        }
 
+        guard executionController.shouldStart(process) else {
+            throw CancellationError()
+        }
         try process.run()
         standardInputPipe.fileHandleForWriting.write(try Data(contentsOf: scriptURL))
         try standardInputPipe.fileHandleForWriting.close()
-        process.waitUntilExit()
+        let didTimeOut = processExited.wait(timeout: .now() + 120) == .timedOut
+        if didTimeOut {
+            process.terminate()
+            if processExited.wait(timeout: .now() + 2) == .timedOut {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+                processExited.wait()
+            }
+        }
         try standardOutputHandle.close()
         try standardErrorHandle.close()
 
@@ -1048,9 +1116,9 @@ final class GitActivityRefreshCoordinator {
         let metrics = GitRefreshScriptResultParser.parseMetrics(from: standardOutput)
         let visibleOutput = GitRefreshScriptResultParser.outputWithoutMetricsLine(standardOutput)
 
-        guard process.terminationStatus == 0 else {
+        guard !didTimeOut, process.terminationStatus == 0 else {
             throw GitRefreshScriptExecutionError(
-                terminationStatus: process.terminationStatus,
+                terminationStatus: didTimeOut ? 124 : process.terminationStatus,
                 standardOutput: visibleOutput,
                 standardError: standardError,
                 metrics: metrics

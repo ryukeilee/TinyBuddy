@@ -352,6 +352,183 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectGood")
     }
 
+    func testScriptRetainsLastValidRepositoryResultWhenCurrentReflogMetadataReadFails() throws {
+        let harness = try ScriptHarness()
+        let stableRepoURL = try harness.makeRepository(named: "ProjectStable")
+        let failingRepoURL = try harness.makeRepository(named: "ProjectTemporarilyUnavailable")
+        try harness.writeHeadReflog(
+            for: stableRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: stable")]
+        )
+        try harness.writeHeadReflog(
+            for: failingRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 10, message: "commit: retained")]
+        )
+
+        let firstResult = try harness.run(scanRoots: [harness.scanRootURL])
+        XCTAssertEqual(firstResult.exitCode, 0, firstResult.standardError)
+        let failingStatURL = try harness.makeStatProbeFailingHeadReflog(for: failingRepoURL)
+
+        let partialResult = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_STAT_BIN": failingStatURL.path]
+        )
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: partialResult.standardOutput))
+
+        XCTAssertEqual(partialResult.exitCode, 0, partialResult.standardError)
+        XCTAssertTrue(partialResult.standardError.contains("retained its last valid result"))
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+        XCTAssertEqual(metrics["retained_repository_count"], "1")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(
+            plist["tinybuddy.gitTodayRecentProject.projectName"] as? String,
+            "ProjectTemporarilyUnavailable"
+        )
+    }
+
+    func testScriptTimesOutSlowRepositoryMetadataAndRetainsItsLastValidResult() throws {
+        let harness = try ScriptHarness()
+        let stableRepoURL = try harness.makeRepository(named: "ProjectStable")
+        let slowRepoURL = try harness.makeRepository(named: "ProjectSlow")
+        try harness.writeHeadReflog(
+            for: stableRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: stable")]
+        )
+        try harness.writeHeadReflog(
+            for: slowRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 10, message: "commit: slow")]
+        )
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+        let slowStatURL = try harness.makeStatProbeFailingHeadReflog(
+            for: slowRepoURL,
+            delaySeconds: 10
+        )
+
+        let startedAt = Date()
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: [
+                "TINYBUDDY_STAT_BIN": slowStatURL.path,
+                "TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS": "1"
+            ]
+        )
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertLessThan(elapsed, 4)
+        XCTAssertEqual(metrics["retained_repository_count"], "1")
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+    }
+
+    func testScriptTimesOutSlowRepositoryParsingAndRetainsItsLastValidResult() throws {
+        let harness = try ScriptHarness()
+        let stableRepoURL = try harness.makeRepository(named: "ProjectStable")
+        let slowRepoURL = try harness.makeRepository(named: "ProjectSlowParse")
+        try harness.writeHeadReflog(
+            for: stableRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: stable")]
+        )
+        try harness.writeHeadReflog(
+            for: slowRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 10, message: "commit: cached")]
+        )
+        _ = try harness.run(scanRoots: [harness.scanRootURL])
+        try harness.writeHeadReflog(
+            for: slowRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 10, message: "commit: cached"),
+                harness.reflogLine(daysOffset: 0, hour: 11, minute: 10, message: "commit: new")
+            ]
+        )
+        let slowPerlURL = try harness.makeSlowPerlProbe()
+
+        let startedAt = Date()
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: [
+                "TINYBUDDY_PERL_BIN": slowPerlURL.path,
+                "TINYBUDDY_GIT_REPOSITORY_PARSE_TIMEOUT_SECONDS": "1"
+            ]
+        )
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertLessThan(elapsed, 4)
+        XCTAssertEqual(metrics["retained_repository_count"], "1")
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+    }
+
+    func testScriptReusesFingerprintsAcrossManyUnchangedRepositories() throws {
+        let harness = try ScriptHarness()
+        let repositoryCount = 20
+        for index in 0..<repositoryCount {
+            let repoURL = try harness.makeRepository(named: String(format: "Project-%03d", index))
+            try harness.writeHeadReflog(
+                for: repoURL,
+                lines: [
+                    harness.reflogLine(
+                        daysOffset: 0,
+                        hour: 9 + index / 6,
+                        minute: (index % 6) * 10,
+                        message: "commit: repository-\(index)"
+                    )
+                ]
+            )
+        }
+
+        let firstResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let firstMetrics = try XCTUnwrap(harness.metrics(from: firstResult.standardOutput))
+        XCTAssertEqual(firstResult.exitCode, 0, firstResult.standardError)
+        XCTAssertEqual(firstMetrics["recomputed_repository_count"], "20")
+
+        let incrementalResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let incrementalMetrics = try XCTUnwrap(harness.metrics(from: incrementalResult.standardOutput))
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(incrementalResult.exitCode, 0, incrementalResult.standardError)
+        XCTAssertEqual(incrementalMetrics["repository_count"], "20")
+        XCTAssertEqual(incrementalMetrics["cache_hit_count"], "20")
+        XCTAssertEqual(incrementalMetrics["reflog_unchanged_skip_count"], "20")
+        XCTAssertEqual(incrementalMetrics["recomputed_repository_count"], "0")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, repositoryCount)
+    }
+
+    func testScriptProcessesLargeReflogHistoryWithoutLosingEvents() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectWithLargeHistory")
+        let eventCount = 600
+        let lines = (0..<eventCount).map { index in
+            harness.reflogLine(
+                daysOffset: 0,
+                hour: index / 60,
+                minute: index % 60,
+                message: "commit: history-\(index)"
+            )
+            .replacingOccurrences(
+                of: "1111111111111111111111111111111111111111",
+                with: String(format: "%040x", index + 1)
+            )
+        }
+        try harness.writeHeadReflog(for: repoURL, lines: lines)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, eventCount)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 20)
+    }
+
     func testScriptPublishesReadableScanResultsWhenRepositoryScanIsPartialAndRecoversLater() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -1429,6 +1606,26 @@ private final class ScriptHarness {
         return scriptURL
     }
 
+    func makeStatProbeFailingHeadReflog(for repoURL: URL, delaySeconds: Int = 0) throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("failing-stat-probe.sh")
+        let repositoryName = repoURL.lastPathComponent
+        let failureCommand = delaySeconds > 0
+            ? "exec /bin/sleep \(delaySeconds)"
+            : "exit 1"
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          case "$argument" in
+            */\(repositoryName)/.git/logs/HEAD) \(failureCommand) ;;
+          esac
+        done
+        exec /usr/bin/stat "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
     func makePerlProbe() throws -> PerlProbe {
         let scriptURL = rootURL.appendingPathComponent("perl-probe.sh")
         let logURL = rootURL.appendingPathComponent("perl-probe.log")
@@ -1440,6 +1637,17 @@ private final class ScriptHarness {
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         return PerlProbe(scriptURL: scriptURL, logURL: logURL)
+    }
+
+    func makeSlowPerlProbe() throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("slow-perl-probe.sh")
+        let script = """
+        #!/bin/bash
+        exec /bin/sleep 30
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
     }
 
     func recursiveScanInvocationCount(from logURL: URL) throws -> Int {
