@@ -3,6 +3,8 @@ import TinyBuddyCore
 import WidgetKit
 import OSLog
 
+private typealias HUDTheme = TinyBuddyHUDTheme
+
 struct TinyBuddyEntry: TimelineEntry {
     let date: Date
     let snapshot: TinyBuddySnapshot
@@ -134,35 +136,58 @@ struct TinyBuddyWidgetView: View {
     }
 
     private var smallBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Text(presentation.expression)
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(statusColor.opacity(0.22)))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 7) {
+                TinyBuddyArcReactorCore(showsLabel: false)
+                    .scaleEffect(0.58)
+                    .frame(width: 56, height: 56)
+                    .overlay {
+                        Text(presentation.expression)
+                            .font(.system(size: 8, weight: .heavy, design: .rounded))
+                            .foregroundStyle(HUDTheme.darkMetal.opacity(0.82))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("TinyBuddy")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    Text(presentation.statusTitle)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("TINYBUDDY")
+                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                        .foregroundStyle(HUDTheme.hudGold.opacity(0.92))
+                    Text("HUD CORE")
+                        .font(.system(size: 9, weight: .heavy, design: .rounded))
+                        .foregroundStyle(HUDTheme.warmWhite)
+                        .lineLimit(1)
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(statusAccent)
+                            .frame(width: 6, height: 6)
+                            .shadow(color: statusAccent.opacity(0.8), radius: 4)
+
+                        Text(presentation.statusTitle)
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                            .foregroundStyle(statusAccent)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
                 }
+                .layoutPriority(1)
             }
 
-            HStack(spacing: 8) {
-                metric(title: "今日专注", value: presentation.focusCount)
-                metric(title: "今日完成", value: presentation.completionCount)
+            HStack(spacing: 6) {
+                hudMetric(title: "今日专注", value: presentation.focusCount)
+                hudMetric(title: "今日完成", value: presentation.completionCount)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .containerBackground(for: .widget) {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.97, green: 0.97, blue: 0.93),
-                    Color(red: 0.82, green: 0.91, blue: 0.95)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+            TinyBuddyHUDBackground(
+                blueGlowCenter: UnitPoint(x: 0.34, y: 0.36),
+                redGlowRadius: 168,
+                blueGlowRadius: 84,
+                redGlowOpacity: 0.44,
+                blueGlowOpacity: 0.15,
+                scanLineCount: 3
             )
         }
     }
@@ -177,10 +202,10 @@ struct TinyBuddyWidgetView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("TINYBUDDY")
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(hudGold.opacity(0.88))
+                            .foregroundStyle(HUDTheme.hudGold.opacity(0.88))
                         Text("COMPANION HUD")
                             .font(.system(size: 11, weight: .heavy, design: .rounded))
-                            .foregroundStyle(Color(red: 1.0, green: 0.93, blue: 0.77))
+                            .foregroundStyle(HUDTheme.warmWhite)
                             .lineLimit(1)
                             .minimumScaleFactor(0.78)
                     }
@@ -189,9 +214,9 @@ struct TinyBuddyWidgetView: View {
                     Spacer(minLength: 4)
 
                     Circle()
-                        .fill(mediumStatusAccent)
+                        .fill(statusAccent)
                         .frame(width: 7, height: 7)
-                        .shadow(color: mediumStatusAccent.opacity(0.8), radius: 5)
+                        .shadow(color: statusAccent.opacity(0.8), radius: 5)
                 }
 
                 HStack(spacing: 8) {
@@ -218,142 +243,34 @@ struct TinyBuddyWidgetView: View {
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
                 .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
-                .background(hudPanelFill)
+                .background(HUDTheme.panelFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(mediumStatusAccent.opacity(0.42), lineWidth: 1)
+                        .stroke(statusAccent.opacity(0.42), lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .containerBackground(for: .widget) {
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.05, green: 0.005, blue: 0.012),
-                        Color(red: 0.17, green: 0.018, blue: 0.035),
-                        Color(red: 0.015, green: 0.012, blue: 0.016)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-
-                RadialGradient(
-                    colors: [
-                        reactorRed.opacity(0.40),
-                        emberRed.opacity(0.18),
-                        .clear
-                    ],
-                    center: .bottomTrailing,
-                    startRadius: 8,
-                    endRadius: 220
-                )
-
-                RadialGradient(
-                    colors: [
-                        energyBlueWhite.opacity(0.12),
-                        .clear
-                    ],
-                    center: UnitPoint(x: 0.26, y: 0.48),
-                    startRadius: 2,
-                    endRadius: 104
-                )
-
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.05),
-                        Color(red: 0.95, green: 0.42, blue: 0.24).opacity(0.03),
-                        Color.black.opacity(0.22)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .blendMode(.softLight)
-
-                ForEach(0..<4, id: \.self) { index in
-                    Rectangle()
-                        .fill(index.isMultiple(of: 2) ? hudGold.opacity(0.05) : reactorRed.opacity(0.06))
-                        .frame(height: 0.7)
-                        .offset(y: CGFloat(index) * 28 - 42)
-                }
-            }
+            TinyBuddyHUDBackground(
+                blueGlowCenter: UnitPoint(x: 0.26, y: 0.48),
+                redGlowRadius: 220,
+                blueGlowRadius: 104,
+                scanLineCount: 4
+            )
         }
     }
 
-    private var statusColor: Color {
-        switch presentation.displayState {
-        case .idle:
-            return Color(red: 0.98, green: 0.77, blue: 0.42)
-        case .focusing:
-            return Color(red: 0.43, green: 0.75, blue: 0.91)
-        case .completed, .active:
-            return Color(red: 0.47, green: 0.82, blue: 0.57)
-        }
-    }
-
-    private var energyBlueWhite: Color {
-        Color(red: 0.72, green: 0.96, blue: 1.0)
-    }
-
-    private var hudGold: Color {
-        Color(red: 0.94, green: 0.70, blue: 0.36)
-    }
-
-    private var reactorRed: Color {
-        Color(red: 0.78, green: 0.06, blue: 0.06)
-    }
-
-    private var emberRed: Color {
-        Color(red: 0.34, green: 0.015, blue: 0.025)
-    }
-
-    private var darkMetal: Color {
-        Color(red: 0.035, green: 0.032, blue: 0.036)
-    }
-
-    private var mediumStatusAccent: Color {
-        switch presentation.displayState {
-        case .idle:
-            return hudGold
-        case .focusing:
-            return energyBlueWhite
-        case .completed, .active:
-            return Color(red: 0.98, green: 0.86, blue: 0.54)
-        }
-    }
-
-    private var hudPanelFill: some ShapeStyle {
-        LinearGradient(
-            colors: [
-                Color.white.opacity(0.075),
-                Color(red: 0.25, green: 0.025, blue: 0.035).opacity(0.42),
-                Color.black.opacity(0.20)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    private func metric(title: String, value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("\(value)")
-                .font(.system(size: 19, weight: .bold, design: .rounded))
-                .monospacedDigit()
-            Text(title)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    private var statusAccent: Color {
+        HUDTheme.statusAccent(for: presentation.displayState)
     }
 
     private func hudMetric(title: String, value: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                .foregroundStyle(hudGold.opacity(0.78))
+                .foregroundStyle(HUDTheme.hudGold.opacity(0.78))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Text("\(value)")
@@ -366,20 +283,10 @@ struct TinyBuddyWidgetView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
-        .background(hudPanelFill)
+        .background(HUDTheme.panelFill)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            hudGold.opacity(0.38),
-                            reactorRed.opacity(0.34)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
+                .stroke(HUDTheme.metricBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -390,7 +297,7 @@ struct TinyBuddyWidgetView: View {
 
             Text(presentation.statusTitle)
                 .font(.system(size: 12, weight: .heavy, design: .rounded))
-                .foregroundStyle(mediumStatusAccent)
+                .foregroundStyle(statusAccent)
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
 
@@ -403,7 +310,7 @@ struct TinyBuddyWidgetView: View {
     ) -> some View {
         Text(text)
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundStyle(hudGold.opacity(0.82))
+            .foregroundStyle(HUDTheme.hudGold.opacity(0.82))
     }
 }
 

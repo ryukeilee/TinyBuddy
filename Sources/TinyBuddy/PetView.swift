@@ -1,47 +1,31 @@
 import SwiftUI
 import TinyBuddyCore
 
+private typealias HUDTheme = TinyBuddyHUDTheme
+
 @MainActor
 struct PetView: View {
     @StateObject private var viewModel: PetViewModel
 
     private let fixedWidth: CGFloat = 284
     private let hudHeight: CGFloat = 520
-    private let hudGold = Color(red: 0.94, green: 0.70, blue: 0.36)
-    private let reactorRed = Color(red: 0.78, green: 0.06, blue: 0.06)
-    private let emberRed = Color(red: 0.34, green: 0.015, blue: 0.025)
-    private let energyBlueWhite = Color(red: 0.72, green: 0.96, blue: 1.0)
+
     init(viewModel: PetViewModel? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel ?? PetViewModel())
     }
 
     private var statusAccent: Color {
-        switch viewModel.displayState {
-        case .idle:
-            return hudGold
-        case .focusing:
-            return energyBlueWhite
-        case .completed, .active:
-            return Color(red: 0.98, green: 0.86, blue: 0.54)
-        }
+        HUDTheme.statusAccent(for: viewModel.hudPresentation.displayState)
     }
 
     private var hudPanelFill: some ShapeStyle {
-        LinearGradient(
-            colors: [
-                Color.white.opacity(0.08),
-                Color(red: 0.25, green: 0.025, blue: 0.035).opacity(0.42),
-                Color.black.opacity(0.26)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+        HUDTheme.panelFill
     }
 
     var body: some View {
         VStack(spacing: 14) {
             Capsule()
-                .fill(hudGold.opacity(0.45))
+                .fill(HUDTheme.hudGold.opacity(0.45))
                 .frame(width: 48, height: 5)
                 .padding(.top, 4)
 
@@ -52,22 +36,22 @@ struct PetView: View {
                 CounterView(
                     title: "今日专注",
                     value: viewModel.hudPresentation.focusCount,
-                    accent: energyBlueWhite,
-                    hudGold: hudGold,
+                    accent: HUDTheme.energyBlueWhite,
+                    hudGold: HUDTheme.hudGold,
                     hudPanelFill: hudPanelFill
                 )
                 CounterView(
                     title: "今日完成",
                     value: viewModel.hudPresentation.completionCount,
                     accent: statusAccent,
-                    hudGold: hudGold,
+                    hudGold: HUDTheme.hudGold,
                     hudPanelFill: hudPanelFill
                 )
             }
 
             RefreshDiagnosticsView(
                 diagnostics: viewModel.refreshDiagnostics,
-                hudGold: hudGold,
+                hudGold: HUDTheme.hudGold,
                 panelFill: hudPanelFill,
                 authorizationAction: viewModel.requestGitScanAuthorization
             )
@@ -87,7 +71,7 @@ struct PetView: View {
                         StatusButtonStyle(
                             isSelected: viewModel.selectedStatus == status,
                             accent: accentColor(for: status),
-                            hudGold: hudGold
+                            hudGold: HUDTheme.hudGold
                         )
                     )
                 }
@@ -110,10 +94,10 @@ struct PetView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("TINYBUDDY")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(hudGold.opacity(0.92))
+                    .foregroundStyle(HUDTheme.hudGold.opacity(0.92))
                 Text("COMPANION HUD")
                     .font(.system(size: 18, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color(red: 1.0, green: 0.93, blue: 0.77))
+                    .foregroundStyle(HUDTheme.warmWhite)
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
             }
@@ -128,7 +112,7 @@ struct PetView: View {
                         .shadow(color: statusAccent.opacity(0.8), radius: 5)
                     Text("STATUS")
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(hudGold.opacity(0.82))
+                        .foregroundStyle(HUDTheme.hudGold.opacity(0.82))
                 }
 
                 Text(viewModel.hudPresentation.statusTitle)
@@ -182,90 +166,32 @@ struct PetView: View {
     }
 
     private var hudBackground: some View {
-        RoundedRectangle(cornerRadius: 22, style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.05, green: 0.005, blue: 0.012),
-                        Color(red: 0.17, green: 0.018, blue: 0.035),
-                        Color(red: 0.015, green: 0.012, blue: 0.016)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                reactorRed.opacity(0.34),
-                                emberRed.opacity(0.16),
-                                .clear
-                            ],
-                            center: .center,
-                            startRadius: 2,
-                            endRadius: 170
-                        )
-                    )
-                    .frame(width: 220, height: 220)
-                    .offset(x: 70, y: 84)
-            }
-            .overlay(alignment: .topLeading) {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                energyBlueWhite.opacity(0.16),
-                                .clear
-                            ],
-                            center: .center,
-                            startRadius: 2,
-                            endRadius: 90
-                        )
-                    )
-                    .frame(width: 120, height: 120)
-                    .offset(x: -24, y: -20)
-            }
+        TinyBuddyHUDBackground(
+            redGlowCenter: .bottomTrailing,
+            blueGlowCenter: .topLeading,
+            redGlowRadius: 260,
+            blueGlowRadius: 140,
+            redGlowOpacity: 0.34,
+            blueGlowOpacity: 0.16,
+            scanLineCount: 5
+        )
             .shadow(color: .black.opacity(0.38), radius: 20, x: 0, y: 12)
     }
 
     private var hudChrome: some View {
         RoundedRectangle(cornerRadius: 22, style: .continuous)
-            .stroke(
-                LinearGradient(
-                    colors: [
-                        hudGold.opacity(0.62),
-                        reactorRed.opacity(0.56),
-                        Color.white.opacity(0.20)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                lineWidth: 1
-            )
+            .stroke(HUDTheme.chromeBorder, lineWidth: 1)
             .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
                     .padding(4)
-            }
-            .overlay {
-                VStack(spacing: 24) {
-                    ForEach(0..<5, id: \.self) { _ in
-                        Rectangle()
-                            .fill(hudGold.opacity(0.07))
-                            .frame(height: 0.7)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 12)
             }
     }
 
     private func hudLabel(_ title: String) -> some View {
         Text(title)
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundStyle(hudGold.opacity(0.78))
+            .foregroundStyle(HUDTheme.hudGold.opacity(0.78))
     }
 
     private var heroMessage: String {
@@ -284,9 +210,9 @@ struct PetView: View {
     private func accentColor(for status: PetStatus) -> Color {
         switch status {
         case .idle:
-            return hudGold
+            return HUDTheme.hudGold
         case .focusing:
-            return energyBlueWhite
+            return HUDTheme.energyBlueWhite
         case .completedOnce:
             return Color(red: 0.47, green: 0.82, blue: 0.57)
         }
