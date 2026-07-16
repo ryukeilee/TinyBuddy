@@ -215,7 +215,10 @@ final class SharedSnapshotObservationTests: XCTestCase {
                 defaults.set(value, forKey: key)
                 return true
             },
-            synchronizeWrites: { defaults.synchronize() }
+            synchronizeWrites: {
+                _ = defaults.synchronize()
+                return true
+            }
         )
 
         XCTAssertNil(store.load())

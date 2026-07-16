@@ -30,6 +30,7 @@
 		9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */; };
 		A77EA72FF1DED02AEE21F604 /* GitActivityRefreshStatusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DDCB1D3B981C8D2317455D9 /* GitActivityRefreshStatusStore.swift */; };
 		C3753687BCDB329534ED24B5 /* TinyBuddyArcReactorCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F621E187E17E0739A05B14B2 /* TinyBuddyArcReactorCore.swift */; };
+		C415A6F3BCB98704AA243B06 /* GitScanRootSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68DBD0EB8C2D4CC70BFA8594 /* GitScanRootSettingsView.swift */; };
 		C7B9D2FC67BFC83DB7191326 /* TinyBuddySharedSnapshotDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F47EAEACDF2D02524E542DEB /* TinyBuddySharedSnapshotDiagnostics.swift */; };
 		CF008D49FBAE8C9D0ACA7811 /* TinyBuddyHUDTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EC84F073149D17E2CC8AEA5 /* TinyBuddyHUDTheme.swift */; };
 		CFBBB584FCAF298FBB95DE04 /* TinyBuddyAppGroupPreferencesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8583569262F912DC0B518C8E /* TinyBuddyAppGroupPreferencesStore.swift */; };
@@ -93,6 +94,7 @@
 		5EC84F073149D17E2CC8AEA5 /* TinyBuddyHUDTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyHUDTheme.swift; sourceTree = "<group>"; };
 		673CA65B4E84452DA7E7E398 /* PetStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetStatus.swift; sourceTree = "<group>"; };
 		6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libTinyBuddyCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		68DBD0EB8C2D4CC70BFA8594 /* GitScanRootSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitScanRootSettingsView.swift; sourceTree = "<group>"; };
 		7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStatsStore.swift; sourceTree = "<group>"; };
 		7DDCB1D3B981C8D2317455D9 /* GitActivityRefreshStatusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitActivityRefreshStatusStore.swift; sourceTree = "<group>"; };
 		7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetView.swift; sourceTree = "<group>"; };
@@ -248,6 +250,7 @@
 			children = (
 				FEA309302E10538A5325BABB /* GitActivityRefreshCoordinator.swift */,
 				2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */,
+				68DBD0EB8C2D4CC70BFA8594 /* GitScanRootSettingsView.swift */,
 				CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */,
 				7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */,
 				C509A181592B4E3F45448EBE /* PetViewModel.swift */,
@@ -449,6 +452,7 @@
 			files = (
 				5B71B2D72982DC8F5D4300D3 /* GitActivityRefreshCoordinator.swift in Sources */,
 				F6D2B174FF12EA89BA853BFD /* GitScanRootAuthorizationStore.swift in Sources */,
+				C415A6F3BCB98704AA243B06 /* GitScanRootSettingsView.swift in Sources */,
 				7A711448682D280C4087C212 /* HUDWindowPositionController.swift in Sources */,
 				7234061598DF198403D751B3 /* PetView.swift in Sources */,
 				0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */,

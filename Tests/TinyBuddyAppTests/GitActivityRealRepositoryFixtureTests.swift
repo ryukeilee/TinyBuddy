@@ -33,13 +33,13 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
         let first = try fixture.runScript(
             scanRoots: [fixture.scanRootURL, symlinkRoot, fixture.scanRootURL]
         )
+        XCTAssertEqual(first.exitCode, 0, first.standardError)
         let firstPlist = try fixture.readPreferencesPlist()
         let firstMetrics = try XCTUnwrap(fixture.metrics(from: first.standardOutput))
         let firstSnapshot = try XCTUnwrap(
             firstPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
         )
 
-        XCTAssertEqual(first.exitCode, 0, first.standardError)
         XCTAssertEqual(firstMetrics["authorized_root_count"], "1")
         XCTAssertEqual(firstMetrics["repository_count"], "1")
         XCTAssertEqual(firstPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
@@ -386,11 +386,17 @@ private final class RealGitFixture {
     let scriptURL: URL
 
     init() throws {
+        let fixtureIdentifier = UUID().uuidString
         rootURL = fileManager.temporaryDirectory
-            .appendingPathComponent("TinyBuddyRealGit-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("TinyBuddyRealGit-\(fixtureIdentifier)", isDirectory: true)
         homeURL = rootURL.appendingPathComponent("home", isDirectory: true)
         scanRootURL = rootURL.appendingPathComponent("scan-root", isDirectory: true)
-        preferencesDirectoryURL = rootURL.appendingPathComponent("preferences", isDirectory: true)
+        // `defaults` can write the real App Group container in production but
+        // rejects arbitrary path domains under `/var/folders` in this test
+        // environment. Keep Git fixtures there (so they are not `/tmp` noise)
+        // and isolate only the mock preferences domain under `/private/tmp`.
+        preferencesDirectoryURL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("TinyBuddyRealGitPreferences-\(fixtureIdentifier)", isDirectory: true)
         plistURL = preferencesDirectoryURL.appendingPathComponent("group.plist")
         cacheDirectoryURL = rootURL.appendingPathComponent("repository-cache", isDirectory: true)
         scriptURL = URL(fileURLWithPath: #filePath)
@@ -402,10 +408,17 @@ private final class RealGitFixture {
         try fileManager.createDirectory(at: homeURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: scanRootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: preferencesDirectoryURL, withIntermediateDirectories: true)
+        let emptyPreferences = try PropertyListSerialization.data(
+            fromPropertyList: [String: Any](),
+            format: .xml,
+            options: 0
+        )
+        try emptyPreferences.write(to: plistURL, options: .atomic)
     }
 
     deinit {
         try? fileManager.removeItem(at: rootURL)
+        try? fileManager.removeItem(at: preferencesDirectoryURL)
     }
 
     func makeRepository(named name: String) throws -> URL {

@@ -234,7 +234,13 @@ public final class TinyBuddyCombinedSnapshotStore {
                 return true
             },
             synchronizeWrites: {
-                userDefaults.synchronize()
+                // `UserDefaults.synchronize()` can report false on current
+                // macOS even when the value is immediately readable. The
+                // transactional writer verifies every staged value and commit
+                // marker by reading it back, so use that stronger check as the
+                // success criterion while still requesting a flush here.
+                _ = userDefaults.synchronize()
+                return true
             },
             readFailureProvider: { nil }
         )

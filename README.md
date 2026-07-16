@@ -101,7 +101,11 @@ Verify the installed signed app and widget registration:
 
 ## Git Activity Refresh
 
-The launch script attempts to refresh Git-derived counters before starting the app. It first checks `TINYBUDDY_GIT_SCAN_ROOTS` or `TINYBUDDY_GIT_SCAN_ROOT`, then falls back to previously authorized scan roots saved by the app. If no valid roots are available, the app still launches and the script reports that the Git pre-refresh step was skipped.
+Authorize one or more repository parent directories from TinyBuddy's Settings window. TinyBuddy stores a read-only, app-scoped security-scoped bookmark for each directory and restores those grants after relaunches and upgrades. Each saved directory has its own availability status plus reauthorize and remove actions. A moved or stale bookmark is refreshed in place when macOS can resolve it; an unavailable, unmounted, revoked, or corrupt entry is paused without discarding activity from the other valid directories.
+
+The launch script attempts to refresh Git-derived counters before starting the app. It first checks `TINYBUDDY_GIT_SCAN_ROOTS` or `TINYBUDDY_GIT_SCAN_ROOT`, then falls back to the app's saved authorization records (including one-time migration of the legacy bookmark list). If no valid roots are available, the app still launches and the script reports that the Git pre-refresh step was skipped.
+
+When at least one authorization is already saved, `release-install` and `release-verify` also require a fresh successful or partial Git refresh produced by the installed Sandbox app. The verification output reports only sanitized counts and status; it never prints saved repository paths.
 
 ## Signing Notes
 

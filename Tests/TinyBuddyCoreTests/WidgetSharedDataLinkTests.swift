@@ -111,7 +111,10 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 defaults.set(value, forKey: key)
                 return true
             },
-            synchronizeWrites: { defaults.synchronize() }
+            synchronizeWrites: {
+                _ = defaults.synchronize()
+                return true
+            }
         )
 
         XCTAssertEqual(interruptedStore.load(), legacySnapshot)
@@ -483,7 +486,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 return true
             },
             synchronizeWrites: {
-                defaults.synchronize()
+                _ = defaults.synchronize()
+                return true
             }
         )
 
@@ -547,7 +551,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 if synchronizationCount == 3 {
                     return false
                 }
-                return defaults.synchronize()
+                _ = defaults.synchronize()
+                return true
             }
         )
 
@@ -618,7 +623,10 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 defaults.set(value, forKey: key)
                 return true
             },
-            synchronizeWrites: { defaults.synchronize() }
+            synchronizeWrites: {
+                _ = defaults.synchronize()
+                return true
+            }
         )
 
         let failed = failingStore.updatePetSlice(changed, fallbackActivitySnapshot: nil)
@@ -662,7 +670,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 if synchronizationCount == 4 {
                     return false
                 }
-                return defaults.synchronize()
+                _ = defaults.synchronize()
+                return true
             }
         )
 
@@ -703,7 +712,10 @@ final class WidgetSharedDataLinkTests: XCTestCase {
                 defaults.set(value, forKey: key)
                 return true
             },
-            synchronizeWrites: { defaults.synchronize() }
+            synchronizeWrites: {
+                _ = defaults.synchronize()
+                return true
+            }
         )
         let result = primaryOnlyStore.updatePetSlice(
             TinyBuddySnapshot(
@@ -764,7 +776,10 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             userDefaults: defaults,
             sharedPreferencesProvider: { nil },
             writeValue: { _, _ in false },
-            synchronizeWrites: { defaults.synchronize() }
+            synchronizeWrites: {
+                _ = defaults.synchronize()
+                return true
+            }
         )
 
         XCTAssertEqual(failingRepairStore.load(), initial)
