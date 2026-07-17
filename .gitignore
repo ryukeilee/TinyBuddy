@@ -55,5 +55,7 @@ temp/
 Thumbs.db
 .idea/
 .vscode/
+**/xcuserdata/
+*.xcuserstate
 *.swp
 *.swo

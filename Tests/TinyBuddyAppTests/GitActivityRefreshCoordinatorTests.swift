@@ -441,6 +441,25 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
     }
 
+    func testSharedDataWriteReloadsWidgetWhenPresentationIsUnchanged() {
+        let harness = makeHarness()
+        harness.setScriptMetrics(unchangedScriptMetrics)
+        harness.performAndWaitForRefresh {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+
+        harness.advanceCurrentDate(by: 61)
+        harness.setScriptMetrics(changedScriptMetrics)
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.coordinator.handleManualRefresh()
+        }
+
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.sharedDataWritten, true)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, true)
+    }
+
     func testPartialScriptRefreshPropagatesWarningWithoutFalseSuccess() {
         let harness = makeHarness()
         harness.setScriptMetrics(

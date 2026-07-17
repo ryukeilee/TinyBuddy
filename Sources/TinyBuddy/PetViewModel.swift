@@ -1,7 +1,27 @@
 import AppKit
 import Foundation
+import OSLog
 import WidgetKit
 import TinyBuddyCore
+
+struct TinyBuddyHUDSnapshotConsumption: Equatable {
+    let schemaVersion: Int
+    let revision: Int64
+    let dayIdentifier: String
+}
+
+private enum TinyBuddySharedSnapshotTelemetry {
+    private static let logger = Logger(
+        subsystem: "local.tinybuddy",
+        category: "SharedSnapshot"
+    )
+
+    static func recordHUDConsumption(_ consumption: TinyBuddyHUDSnapshotConsumption) {
+        logger.info(
+            "HUD consumed schema=\(consumption.schemaVersion, privacy: .public) revision=\(consumption.revision, privacy: .public) day=\(consumption.dayIdentifier, privacy: .public)"
+        )
+    }
+}
 
 @MainActor
 final class PetViewModel: ObservableObject {
@@ -9,6 +29,25 @@ final class PetViewModel: ObservableObject {
         let snapshot: TinyBuddySnapshot
         let activitySnapshot: GitTodayActivitySnapshot
         let didPersist: Bool
+        let committedSnapshot: TinyBuddyCombinedSnapshot?
+
+        init(committedSnapshot: TinyBuddyCombinedSnapshot, didPersist: Bool) {
+            snapshot = committedSnapshot.snapshot
+            activitySnapshot = committedSnapshot.activitySnapshot
+            self.didPersist = didPersist
+            self.committedSnapshot = committedSnapshot
+        }
+
+        init(
+            snapshot: TinyBuddySnapshot,
+            activitySnapshot: GitTodayActivitySnapshot,
+            didPersist: Bool
+        ) {
+            self.snapshot = snapshot
+            self.activitySnapshot = activitySnapshot
+            self.didPersist = didPersist
+            committedSnapshot = nil
+        }
     }
 
     enum DisplayState: Equatable {
@@ -66,6 +105,7 @@ final class PetViewModel: ObservableObject {
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let widgetReloader: () throws -> Void
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
+    private let hudSnapshotConsumptionRecorder: (TinyBuddyHUDSnapshotConsumption) -> Void
     private var rebuiltSnapshotFaultIdentifiers: Set<String>
     private var latestRefreshStatus: GitActivityRefreshStatus?
     private var latestActivitySnapshot: GitTodayActivitySnapshot
@@ -84,7 +124,9 @@ final class PetViewModel: ObservableObject {
         widgetReloader: @escaping () throws -> Void = {
             WidgetCenter.shared.reloadAllTimelines()
         },
-        sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared
+        sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared,
+        hudSnapshotConsumptionRecorder: @escaping (TinyBuddyHUDSnapshotConsumption) -> Void =
+            TinyBuddySharedSnapshotTelemetry.recordHUDConsumption
     ) {
         self.onboardingStore = onboardingStore
         self.store = store
@@ -141,6 +183,7 @@ final class PetViewModel: ObservableObject {
         self.timeEnvironment = timeEnvironment
         self.widgetReloader = widgetReloader
         self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
+        self.hudSnapshotConsumptionRecorder = hudSnapshotConsumptionRecorder
         self.rebuiltSnapshotFaultIdentifiers = rebuiltSnapshotFaultIdentifiers
         self.latestRefreshStatus = latestRefreshStatus
         self.latestActivitySnapshot = activitySnapshot
@@ -159,6 +202,11 @@ final class PetViewModel: ObservableObject {
             onboardingCompleted: onboardingStore.isCompleted
         )
         self.hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
+        recordHUDConsumptionIfMatching(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot,
+            committedSnapshot: combinedHUDState.committedSnapshot
+        )
         if combinedHUDState.didPersist
             && (hadSameDayCommittedSnapshot || widgetPresentationBeforePublication != hudPresentation) {
             reloadWidgetIfPossible()
@@ -341,7 +389,8 @@ final class PetViewModel: ObservableObject {
         )
         _ = applyHUDState(
             snapshot: combinedHUDState.snapshot,
-            activitySnapshot: combinedHUDState.activitySnapshot
+            activitySnapshot: combinedHUDState.activitySnapshot,
+            committedSnapshot: combinedHUDState.committedSnapshot
         )
         if combinedHUDState.didPersist {
             reloadWidgetIfPossible()
@@ -393,7 +442,8 @@ final class PetViewModel: ObservableObject {
         let activitySnapshot = combinedHUDState.activitySnapshot
         let didChange = applyHUDState(
             snapshot: snapshot,
-            activitySnapshot: activitySnapshot
+            activitySnapshot: activitySnapshot,
+            committedSnapshot: combinedHUDState.committedSnapshot
         )
         hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
         return didChange && combinedHUDState.didPersist
@@ -425,14 +475,19 @@ final class PetViewModel: ObservableObject {
                 recentProjectName: nil
             )
         }
-        _ = applyHUDState(snapshot: snapshot, activitySnapshot: activitySnapshot)
+        _ = applyHUDState(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot,
+            committedSnapshot: combinedRead.snapshot
+        )
         hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
     }
 
     @discardableResult
     private func applyHUDState(
         snapshot: TinyBuddySnapshot,
-        activitySnapshot: GitTodayActivitySnapshot
+        activitySnapshot: GitTodayActivitySnapshot,
+        committedSnapshot: TinyBuddyCombinedSnapshot? = nil
     ) -> Bool {
         let hudPresentation = Self.makeHUDPresentation(
             snapshot: snapshot,
@@ -445,7 +500,43 @@ final class PetViewModel: ObservableObject {
         displayState = Self.makeDisplayState(from: hudPresentation)
         latestActivitySnapshot = activitySnapshot
         updateGitActivityExperience()
+        recordHUDConsumptionIfMatching(
+            snapshot: snapshot,
+            activitySnapshot: activitySnapshot,
+            committedSnapshot: committedSnapshot
+        )
         return didChange
+    }
+
+    private func recordHUDConsumptionIfMatching(
+        snapshot: TinyBuddySnapshot,
+        activitySnapshot: GitTodayActivitySnapshot,
+        committedSnapshot: TinyBuddyCombinedSnapshot?
+    ) {
+        guard let committedSnapshot,
+              committedSnapshot.dayIdentifier == snapshot.stats.dayIdentifier,
+              committedSnapshot.snapshot == snapshot,
+              committedSnapshot.activitySnapshot == activitySnapshot,
+              status == committedSnapshot.snapshot.status,
+              stats == committedSnapshot.snapshot.stats,
+              latestActivitySnapshot == committedSnapshot.activitySnapshot else {
+            return
+        }
+
+        let committedPresentation = Self.makeHUDPresentation(
+            snapshot: committedSnapshot.snapshot,
+            activitySnapshot: committedSnapshot.activitySnapshot
+        )
+        guard hudPresentation == committedPresentation,
+              displayState == Self.makeDisplayState(from: committedPresentation) else {
+            return
+        }
+
+        hudSnapshotConsumptionRecorder(TinyBuddyHUDSnapshotConsumption(
+            schemaVersion: TinyBuddyCombinedSnapshotStore.currentSchemaVersion,
+            revision: committedSnapshot.revision,
+            dayIdentifier: committedSnapshot.dayIdentifier
+        ))
     }
 
     private func updateGitActivityExperience() {
@@ -501,8 +592,7 @@ final class PetViewModel: ObservableObject {
                             recovery: .stopped
                         )
                         return CombinedHUDState(
-                            snapshot: recoveredSnapshot.snapshot,
-                            activitySnapshot: recoveredSnapshot.activitySnapshot,
+                            committedSnapshot: recoveredSnapshot,
                             didPersist: false
                         )
                     }
@@ -518,8 +608,7 @@ final class PetViewModel: ObservableObject {
                             recovery: .stopped
                         )
                         return CombinedHUDState(
-                            snapshot: recoveredSnapshot.snapshot,
-                            activitySnapshot: recoveredSnapshot.activitySnapshot,
+                            committedSnapshot: recoveredSnapshot,
                             didPersist: false
                         )
                     }
@@ -531,14 +620,12 @@ final class PetViewModel: ObservableObject {
                     )
                     rebuiltSnapshotFaultIdentifiers.remove(faultBudgetIdentifier)
                     return CombinedHUDState(
-                        snapshot: repairedSnapshot.snapshot,
-                        activitySnapshot: repairedSnapshot.activitySnapshot,
+                        committedSnapshot: repairedSnapshot,
                         didPersist: true
                     )
                 }
                 return CombinedHUDState(
-                    snapshot: recoveredSnapshot.snapshot,
-                    activitySnapshot: recoveredSnapshot.activitySnapshot,
+                    committedSnapshot: recoveredSnapshot,
                     didPersist: false
                 )
             }
@@ -579,8 +666,7 @@ final class PetViewModel: ObservableObject {
             }
             rebuiltSnapshotFaultIdentifiers.remove(faultBudgetIdentifier)
             return CombinedHUDState(
-                snapshot: rebuiltSnapshot.snapshot,
-                activitySnapshot: rebuiltSnapshot.activitySnapshot,
+                committedSnapshot: rebuiltSnapshot,
                 didPersist: true
             )
         }
@@ -595,8 +681,7 @@ final class PetViewModel: ObservableObject {
         guard combinedUpdate.didPersist || combinedUpdate.outcome == .alreadyCurrent else {
             if let retainedSnapshot = validatedRead.snapshot {
                 return CombinedHUDState(
-                    snapshot: retainedSnapshot.snapshot,
-                    activitySnapshot: retainedSnapshot.activitySnapshot,
+                    committedSnapshot: retainedSnapshot,
                     didPersist: false
                 )
             }
@@ -611,8 +696,7 @@ final class PetViewModel: ObservableObject {
         }
 
         return CombinedHUDState(
-            snapshot: combinedSnapshot.snapshot,
-            activitySnapshot: combinedSnapshot.activitySnapshot,
+            committedSnapshot: combinedSnapshot,
             didPersist: combinedUpdate.didPersist
         )
     }

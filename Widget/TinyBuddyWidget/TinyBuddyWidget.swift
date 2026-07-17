@@ -101,6 +101,9 @@ struct TinyBuddyProvider: TimelineProvider {
             )
         }
         if let combinedSnapshot = combinedRead.snapshot {
+            Self.logger.notice(
+                "snapshot consumed schema=\(TinyBuddyCombinedSnapshotStore.currentSchemaVersion, privacy: .public) revision=\(combinedSnapshot.revision, privacy: .public) day=\(combinedSnapshot.dayIdentifier, privacy: .public)"
+            )
             return TinyBuddyEntry(
                 date: date,
                 snapshot: combinedSnapshot.snapshot,

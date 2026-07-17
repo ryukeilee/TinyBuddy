@@ -1808,7 +1808,7 @@ final class GitActivityRefreshCoordinator {
             activitySnapshot: activitySnapshot
         )
         var didReloadForStateChange = false
-        if nextWidgetContent != lastWidgetContent {
+        if nextWidgetContent != lastWidgetContent || metrics?.sharedDataWritten == true {
             didReloadForStateChange = reloadWidgetForStateChange()
             if didReloadForStateChange {
                 didReloadWidgetDuringCurrentRefresh = true

@@ -1,9 +1,44 @@
 import AppKit
+import OSLog
 import SwiftUI
 import TinyBuddyCore
 import WidgetKit
 
 private let tinyBuddyHUDWindowIdentifier = NSUserInterfaceItemIdentifier("TinyBuddy.HUDWindow")
+private let tinyBuddyHUDLogger = Logger(subsystem: "local.tinybuddy", category: "HUD")
+
+@MainActor
+private func publishTinyBuddyHUDReadyWhenVisible(
+    _ window: NSWindow,
+    remainingAttempts: Int = 150
+) {
+    let targetSize = NSSize(width: 284, height: 520)
+    let isTargetSize = abs(window.contentLayoutRect.width - targetSize.width) < 0.5
+        && abs(window.contentLayoutRect.height - targetSize.height) < 0.5
+    let isSemanticallyVisible = window.isVisible
+        && !window.isMiniaturized
+        && window.screen != nil
+        && window.alphaValue > 0
+
+    if window.identifier == tinyBuddyHUDWindowIdentifier,
+       isTargetSize,
+       isSemanticallyVisible {
+        tinyBuddyHUDLogger.notice(
+            "HUD ready identifier=TinyBuddy.HUDWindow width=284 height=520"
+        )
+        return
+    }
+
+    guard remainingAttempts > 0 else {
+        return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        publishTinyBuddyHUDReadyWhenVisible(
+            window,
+            remainingAttempts: remainingAttempts - 1
+        )
+    }
+}
 
 @main
 struct TinyBuddyApp: App {
@@ -240,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         application.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        publishTinyBuddyHUDReadyWhenVisible(window)
         notificationCenter.post(name: .tinyBuddyHUDWindowDidConfigure, object: window)
     }
 
@@ -252,7 +288,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         return window.isVisible
             && !window.isMiniaturized
-            && (window.occlusionState.contains(.visible) || window.isKeyWindow)
+            && window.screen != nil
+            && window.alphaValue > 0
     }
 }
 
@@ -279,6 +316,7 @@ struct WindowConfigurator: NSViewRepresentable {
             return
         }
 
+        let isFirstConfiguration = window.identifier != tinyBuddyHUDWindowIdentifier
         window.title = "TinyBuddy"
         window.identifier = tinyBuddyHUDWindowIdentifier
         window.level = .floating
@@ -303,5 +341,8 @@ struct WindowConfigurator: NSViewRepresentable {
             name: .tinyBuddyHUDWindowDidConfigure,
             object: window
         )
+        if isFirstConfiguration {
+            publishTinyBuddyHUDReadyWhenVisible(window)
+        }
     }
 }

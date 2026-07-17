@@ -8,12 +8,20 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "TinyBuddy", targets: ["TinyBuddy"])
+        .executable(name: "TinyBuddy", targets: ["TinyBuddy"]),
+        .executable(
+            name: "TinyBuddyReleaseVerifier",
+            targets: ["TinyBuddyReleaseVerifier"]
+        )
     ],
     targets: [
         .target(name: "TinyBuddyCore"),
         .executableTarget(
             name: "TinyBuddy",
+            dependencies: ["TinyBuddyCore"]
+        ),
+        .executableTarget(
+            name: "TinyBuddyReleaseVerifier",
             dependencies: ["TinyBuddyCore"]
         ),
         .testTarget(
