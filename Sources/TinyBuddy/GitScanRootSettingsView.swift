@@ -7,6 +7,9 @@ extension Notification.Name {
     static let gitScanRootAuthorizationReauthorizationRequested = Notification.Name(
         "TinyBuddy.gitScanRootAuthorizationReauthorizationRequested"
     )
+    static let gitScanRootAuthorizationRepairRequested = Notification.Name(
+        "TinyBuddy.gitScanRootAuthorizationRepairRequested"
+    )
     static let gitScanRootAuthorizationRemovalRequested = Notification.Name(
         "TinyBuddy.gitScanRootAuthorizationRemovalRequested"
     )

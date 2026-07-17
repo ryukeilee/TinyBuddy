@@ -592,6 +592,73 @@ final class PetViewModelTests: XCTestCase {
         wait(for: [expectation], timeout: 1.0)
     }
 
+    func testAuthorizationFailureCanTransitionThroughLoadingAndDirectReauthorization() async {
+        let defaults = makeDefaults()
+        let onboardingDefaults = makeDefaults()
+        let onboardingStore = TinyBuddyOnboardingStore(
+            userDefaults: onboardingDefaults,
+            sharedDefaults: defaults
+        )
+        onboardingStore.markCompleted()
+        let notificationCenter = NotificationCenter()
+        let refreshStatusStore = GitActivityRefreshStatusStore(userDefaults: defaults)
+        let invalidStatus = GitActivityRefreshStatus(
+            refreshedAt: Date(),
+            trigger: .launch,
+            outcome: .failed,
+            diagnostic: GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .authorizationResolution,
+                reason: .authorizationInvalid
+            )
+        )
+        refreshStatusStore.save(invalidStatus)
+        let statsStore = DailyStatsStore(userDefaults: defaults)
+        let combinedSnapshotStore = statsStore.makeCombinedSnapshotStore()
+        _ = combinedSnapshotStore.updateActivitySlice(
+            GitTodayActivitySnapshot(focusBlockCount: 0, commitCount: 0, recentProjectName: nil),
+            fallbackSnapshot: statsStore.loadSnapshot()
+        )
+        let viewModel = PetViewModel(
+            onboardingStore: onboardingStore,
+            store: statsStore,
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: refreshStatusStore,
+            notificationCenter: notificationCenter
+        )
+        XCTAssertEqual(viewModel.gitActivityExperience.state, .authorizationInvalid)
+
+        var repairRequestCount = 0
+        let observer = notificationCenter.addObserver(
+            forName: .gitScanRootAuthorizationRepairRequested,
+            object: nil,
+            queue: nil
+        ) { _ in
+            repairRequestCount += 1
+        }
+        defer { notificationCenter.removeObserver(observer) }
+        viewModel.performGitActivityAction()
+        XCTAssertEqual(repairRequestCount, 1)
+
+        notificationCenter.post(name: .gitActivityRefreshDidStart, object: nil)
+        await Task.yield()
+        XCTAssertEqual(viewModel.gitActivityExperience.state, .loading)
+
+        let recoveredStatus = GitActivityRefreshStatus(
+            refreshedAt: Date(),
+            trigger: .reopen,
+            outcome: .succeeded,
+            metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
+        )
+        notificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: recoveredStatus)
+        await Task.yield()
+        XCTAssertTrue(
+            viewModel.gitActivityExperience.state == .noActivity
+                || viewModel.gitActivityExperience.state == .ready
+        )
+        XCTAssertNotEqual(viewModel.gitActivityExperience.action, .reauthorize)
+    }
+
     func testRecreatedViewModelRestoresUserSelectionAndDailyCounts() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
@@ -742,7 +809,7 @@ final class PetViewModelTests: XCTestCase {
             widgetReloader: { widgetReloadCount += 1 }
         )
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 4)
+        XCTAssertEqual(viewModel.notificationObserverCount, 6)
 
         for _ in 0..<25 {
             notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
@@ -750,7 +817,7 @@ final class PetViewModelTests: XCTestCase {
         await Task.yield()
         await Task.yield()
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 4)
+        XCTAssertEqual(viewModel.notificationObserverCount, 6)
         XCTAssertEqual(widgetReloadCount, 0)
     }
 
@@ -1136,7 +1203,7 @@ final class PetViewModelTests: XCTestCase {
         )
         await Task.yield()
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 4)
+        XCTAssertEqual(viewModel.notificationObserverCount, 6)
         XCTAssertEqual(
             viewModel.hiddenSnapshotDiagnosticSummary?.identifier,
             "tinybuddy.sharedSnapshot.gitScan.gitScanFailed"

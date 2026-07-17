@@ -9,11 +9,13 @@ struct TinyBuddyEntry: TimelineEntry {
     let date: Date
     let snapshot: TinyBuddySnapshot
     let activitySnapshot: GitTodayActivitySnapshot
+    let refreshStatus: GitActivityRefreshStatus?
 }
 
 struct TinyBuddyProvider: TimelineProvider {
     private let store = DailyStatsStore()
     private let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(repairOnLoad: false)
+    private let refreshStatusStore = GitActivityRefreshStatusStore()
     private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
@@ -27,6 +29,12 @@ struct TinyBuddyProvider: TimelineProvider {
                 focusBlockCount: 0,
                 commitCount: 0,
                 recentProjectName: "TinyBuddy"
+            ),
+            refreshStatus: GitActivityRefreshStatus(
+                refreshedAt: Date(),
+                trigger: .launch,
+                outcome: .succeeded,
+                metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
             )
         )
     }
@@ -43,6 +51,7 @@ struct TinyBuddyProvider: TimelineProvider {
 
     private func makeEntry(for date: Date) -> TinyBuddyEntry {
         let expectedDayIdentifier = Self.dayIdentifier(for: date)
+        let refreshStatus = refreshStatusStore.load()
         let combinedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
         )
@@ -55,7 +64,8 @@ struct TinyBuddyProvider: TimelineProvider {
             return TinyBuddyEntry(
                 date: date,
                 snapshot: combinedSnapshot.snapshot,
-                activitySnapshot: combinedSnapshot.activitySnapshot
+                activitySnapshot: combinedSnapshot.activitySnapshot,
+                refreshStatus: refreshStatus
             )
         }
 
@@ -64,14 +74,16 @@ struct TinyBuddyProvider: TimelineProvider {
             return TinyBuddyEntry(
                 date: date,
                 snapshot: store.loadSnapshot(),
-                activitySnapshot: neutralActivitySnapshot
+                activitySnapshot: neutralActivitySnapshot,
+                refreshStatus: refreshStatus
             )
         }
 
         return TinyBuddyEntry(
             date: date,
             snapshot: neutralSnapshot(dayIdentifier: expectedDayIdentifier),
-            activitySnapshot: neutralActivitySnapshot
+            activitySnapshot: neutralActivitySnapshot,
+            refreshStatus: refreshStatus
         )
     }
 
@@ -113,6 +125,13 @@ struct TinyBuddyWidgetView: View {
         )
     }
 
+    private var gitActivityState: GitActivityExperienceState {
+        GitActivityExperienceState(
+            refreshStatus: entry.refreshStatus,
+            activitySnapshot: entry.activitySnapshot
+        )
+    }
+
     private var recentProjectName: String {
         let trimmedName = entry.activitySnapshot.recentProjectName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -126,12 +145,86 @@ struct TinyBuddyWidgetView: View {
 
     var body: some View {
         Group {
-            switch family {
-            case .systemMedium:
-                mediumBody
-            default:
-                smallBody
+            if gitActivityState.showsActivityMetrics {
+                switch family {
+                case .systemMedium:
+                    mediumBody
+                default:
+                    smallBody
+                }
+            } else {
+                stateBody
             }
+        }
+    }
+
+    private var stateBody: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: stateContent.systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(stateAccent)
+                Text("GIT ACTIVITY")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(HUDTheme.hudGold.opacity(0.88))
+            }
+
+            Text(stateContent.title)
+                .font(.system(size: family == .systemMedium ? 16 : 13, weight: .heavy, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+
+            Text(stateContent.message)
+                .font(.system(size: family == .systemMedium ? 11 : 9, weight: .medium, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .lineLimit(family == .systemMedium ? 3 : 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(12)
+        .containerBackground(for: .widget) {
+            TinyBuddyHUDBackground(
+                blueGlowCenter: .topLeading,
+                redGlowRadius: 190,
+                blueGlowRadius: 90,
+                scanLineCount: 3
+            )
+        }
+    }
+
+    private var stateContent: (title: String, message: String, systemImage: String) {
+        switch gitActivityState {
+        case .loading:
+            return ("正在加载 Git 活动", "扫描完成后会自动更新。", "arrow.triangle.2.circlepath")
+        case .authorizationRequired:
+            return ("需要仓库目录授权", "打开 TinyBuddy 选择仓库目录。", "folder.badge.questionmark")
+        case .authorizationInvalid:
+            return ("仓库授权已失效", "打开 TinyBuddy 直接重新授权。", "lock.trianglebadge.exclamationmark")
+        case .noRepositories:
+            return ("未发现 Git 仓库", "已授权目录中没有可识别的仓库。", "folder.badge.minus")
+        case .noActivity:
+            return ("今日暂无 Git 活动", "仓库读取正常，今天还没有活动。", "moon.zzz")
+        case .failed:
+            return ("仓库读取失败", "打开 TinyBuddy 重试扫描。", "exclamationmark.triangle")
+        case .partial:
+            if entry.refreshStatus?.diagnostic?.reason == .partialAuthorizationRecovery {
+                return ("部分目录授权已失效", "可用仓库已更新；打开 TinyBuddy 重新授权。", "lock.trianglebadge.exclamationmark")
+            }
+            return ("部分仓库读取失败", "可用仓库已更新。", "exclamationmark.circle")
+        case .ready:
+            return ("Git 活动已更新", "", "checkmark.circle")
+        }
+    }
+
+    private var stateAccent: Color {
+        switch gitActivityState {
+        case .loading:
+            return HUDTheme.energyBlueWhite
+        case .failed:
+            return Color(red: 0.84, green: 0.34, blue: 0.29)
+        case .noActivity:
+            return HUDTheme.hudGold
+        default:
+            return Color(red: 0.89, green: 0.66, blue: 0.23)
         }
     }
 
@@ -394,7 +487,13 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                     completionCount: completionCount
                 )
             ),
-            activitySnapshot: activitySnapshot
+            activitySnapshot: activitySnapshot,
+            refreshStatus: GitActivityRefreshStatus(
+                refreshedAt: Date(),
+                trigger: .launch,
+                outcome: .succeeded,
+                metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
+            )
         )
     }
 }

@@ -495,6 +495,7 @@ final class GitScanRootAuthorizationController {
     typealias AuthorizationSelectionProvider = @MainActor (_ allowsMultipleSelection: Bool) -> [URL]?
 
     private let store: GitScanRootAuthorizationStore
+    private let onboardingStore: TinyBuddyOnboardingStore
     private let panelProvider: @MainActor () -> NSOpenPanel
     private let selectedURLsProvider: @MainActor (NSOpenPanel) -> [URL]
     private let panelConfigurator: @MainActor (NSOpenPanel, Bool) -> Void
@@ -502,12 +503,14 @@ final class GitScanRootAuthorizationController {
 
     init(
         store: GitScanRootAuthorizationStore,
+        onboardingStore: TinyBuddyOnboardingStore = TinyBuddyOnboardingStore(),
         panelProvider: @escaping @MainActor () -> NSOpenPanel = { NSOpenPanel() },
         selectedURLsProvider: @escaping @MainActor (NSOpenPanel) -> [URL] = { $0.urls },
         panelConfigurator: (@MainActor (NSOpenPanel, Bool) -> Void)? = nil,
         authorizationSelectionProvider: AuthorizationSelectionProvider? = nil
     ) {
         self.store = store
+        self.onboardingStore = onboardingStore
         self.panelProvider = panelProvider
         self.selectedURLsProvider = selectedURLsProvider
         self.panelConfigurator = panelConfigurator ?? { panel, allowsMultipleSelection in
@@ -516,16 +519,11 @@ final class GitScanRootAuthorizationController {
         self.authorizationSelectionProvider = authorizationSelectionProvider
     }
 
-    func requestAuthorizationIfNeeded() {
-        guard !store.hasAuthorizedRoots else {
-            return
-        }
-        _ = requestAuthorization()
-    }
-
     @discardableResult
     func requestAuthorization() -> Bool {
-        guard let urls = requestedURLs(allowsMultipleSelection: true) else {
+        let urls = requestedURLs(allowsMultipleSelection: true)
+        onboardingStore.markCompleted()
+        guard let urls else {
             return false
         }
 
@@ -544,7 +542,10 @@ final class GitScanRootAuthorizationController {
         }
 
         do {
-            return try store.replaceAuthorizedRoot(id: id, with: url)
+            _ = try store.replaceAuthorizedRoot(id: id, with: url)
+            // A fresh user selection restores the security scope even when the
+            // serialized bookmark happens to compare equal. Always rescan.
+            return true
         } catch {
             NSLog("TinyBuddy: failed to refresh Git scan root authorization (details redacted)")
             return false
@@ -554,6 +555,20 @@ final class GitScanRootAuthorizationController {
     @discardableResult
     func requestReauthorization(for id: String) -> Bool {
         reauthorizeAuthorizedRoot(id: id)
+    }
+
+    @discardableResult
+    func requestReauthorizationForFirstUnavailableRoot() -> Bool {
+        guard let authorization = store.authorizationStatuses().first(where: {
+            if case .unavailable = $0.state {
+                return true
+            }
+            return false
+        }) else {
+            return requestAuthorization()
+        }
+
+        return requestReauthorization(for: authorization.id)
     }
 
     @discardableResult

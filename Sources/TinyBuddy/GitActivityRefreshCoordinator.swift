@@ -6,6 +6,8 @@ import Darwin
 
 extension Notification.Name {
     static let gitActivityRefreshStatusDidChange = Notification.Name("TinyBuddy.gitActivityRefreshStatusDidChange")
+    static let gitActivityRefreshDidStart = Notification.Name("TinyBuddy.gitActivityRefreshDidStart")
+    static let gitActivityRefreshRequested = Notification.Name("TinyBuddy.gitActivityRefreshRequested")
     static let gitActivitySnapshotDidChange = Notification.Name("TinyBuddy.gitActivitySnapshotDidChange")
     static let gitScanRootAuthorizationRequested = Notification.Name("TinyBuddy.gitScanRootAuthorizationRequested")
 }
@@ -218,6 +220,9 @@ final class GitActivityRefreshCoordinator {
     private var lastRefreshFailureAt: Date?
     private var lastWakeRefreshAt: Date?
     private var pendingAuthorizationRefresh = false
+    private var forceWidgetReloadAfterCurrentRefresh = false
+    private var didReloadWidgetDuringCurrentRefresh = false
+    private var lastWidgetExperienceState: GitActivityExperienceState
     private var pendingWakeRefreshTrigger: GitTodayActivityRefreshTrigger?
     private var pendingWakeRefreshRequestedAt: Date?
 
@@ -272,6 +277,10 @@ final class GitActivityRefreshCoordinator {
         self.statusNotificationCenter = statusNotificationCenter
         self.diagnosticRecorder = diagnosticRecorder
         self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
+        self.lastWidgetExperienceState = GitActivityExperienceState(
+            refreshStatus: refreshStatusStore.load(),
+            activitySnapshot: activityStore.loadTodaySnapshot()
+        )
     }
 
     func start(isApplicationActive: Bool = true) {
@@ -318,7 +327,30 @@ final class GitActivityRefreshCoordinator {
             cancelScript()
             return
         }
-        refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
+        didReloadWidgetDuringCurrentRefresh = false
+        forceWidgetReloadAfterCurrentRefresh = true
+        if !refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
+            if !didReloadWidgetDuringCurrentRefresh {
+                reloadWidgetForStateChange()
+            }
+            didReloadWidgetDuringCurrentRefresh = false
+            forceWidgetReloadAfterCurrentRefresh = false
+        }
+    }
+
+    func handleManualRefresh() {
+        if isRefreshing {
+            return
+        }
+        didReloadWidgetDuringCurrentRefresh = false
+        forceWidgetReloadAfterCurrentRefresh = true
+        if !refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
+            if !didReloadWidgetDuringCurrentRefresh {
+                reloadWidgetForStateChange()
+            }
+            didReloadWidgetDuringCurrentRefresh = false
+            forceWidgetReloadAfterCurrentRefresh = false
+        }
     }
 
     func handleDidWake() {
@@ -343,6 +375,8 @@ final class GitActivityRefreshCoordinator {
         workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
         workspaceNotificationObservers.removeAll()
         pendingAuthorizationRefresh = false
+        forceWidgetReloadAfterCurrentRefresh = false
+        didReloadWidgetDuringCurrentRefresh = false
         pendingWakeRefreshTrigger = nil
         pendingWakeRefreshRequestedAt = nil
         cancelScript()
@@ -432,11 +466,20 @@ final class GitActivityRefreshCoordinator {
     private func finishRefresh(succeeded: Bool) {
         isRefreshing = false
 
+        if forceWidgetReloadAfterCurrentRefresh && !didReloadWidgetDuringCurrentRefresh {
+            reloadWidgetForStateChange()
+        }
+        forceWidgetReloadAfterCurrentRefresh = false
+        didReloadWidgetDuringCurrentRefresh = false
+
         if pendingAuthorizationRefresh {
             pendingAuthorizationRefresh = false
+            forceWidgetReloadAfterCurrentRefresh = true
             if refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
                 return
             }
+            reloadWidgetForStateChange()
+            forceWidgetReloadAfterCurrentRefresh = false
         }
 
         guard isApplicationActive else {
@@ -552,6 +595,8 @@ final class GitActivityRefreshCoordinator {
         }
 
         isRefreshing = true
+        didReloadWidgetDuringCurrentRefresh = false
+        statusNotificationCenter.post(name: .gitActivityRefreshDidStart, object: nil)
         lastRefreshAttemptAt = now
         let lifecycleGeneration = self.lifecycleGeneration
         let scriptRunner = self.scriptRunner
@@ -620,10 +665,8 @@ final class GitActivityRefreshCoordinator {
                         || (scriptOutcome == nil && (scriptResult.metrics?.invalidRepositoryCount ?? 0) > 0)
                     if scriptOutcome == .skipped {
                         let diagnostic = hasPartialRecovery
-                            ? GitActivityRefreshDiagnostic(
-                                source: .gitActivityRefresh,
-                                stage: .scriptExecution,
-                                reason: .partialRecovery
+                            ? self.partialRecoveryDiagnostic(
+                                hasInvalidAuthorization: accessResult.issue == .authorizationInvalid
                             )
                             : nil
                         self.recordRefreshStatus(
@@ -677,15 +720,47 @@ final class GitActivityRefreshCoordinator {
                     if didPublishCommittedSnapshot {
                         self.statusNotificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
                     }
+                    let refreshOutcome: GitActivityRefreshOutcome
+                    if hasPartialRecovery {
+                        refreshOutcome = .partial
+                    } else {
+                        refreshOutcome = .succeeded
+                    }
+                    let diagnostic = hasPartialRecovery
+                        ? self.partialRecoveryDiagnostic(
+                            hasInvalidAuthorization: accessResult.issue == .authorizationInvalid
+                        )
+                        : nil
+
+                    let baseMetrics = self.makeMetrics(
+                        startedAt: now,
+                        finishedAt: self.dateProvider(),
+                        authorizedRootCount: authorizedRootURLs.count,
+                        scriptMetrics: scriptResult.metrics,
+                        widgetReloaded: false,
+                        diagnostic: nil
+                    )
+                    let nextExperienceState = GitActivityExperienceState(
+                        refreshStatus: GitActivityRefreshStatus(
+                            refreshedAt: now,
+                            trigger: trigger,
+                            outcome: refreshOutcome,
+                            diagnostic: diagnostic,
+                            metrics: baseMetrics
+                        ),
+                        activitySnapshot: self.activityStore.loadTodaySnapshot()
+                    )
+                    let stateWillChange = nextExperienceState != self.lastWidgetExperienceState
                     let shouldReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
                         for: trigger,
                         didChange: didChangePublishedWidgetActivity
                     )
                     var didReloadWidget = false
-                    if shouldReloadWidget {
+                    if shouldReloadWidget && !stateWillChange {
                         do {
                             try self.widgetReloader()
                             didReloadWidget = true
+                            self.didReloadWidgetDuringCurrentRefresh = true
                         } catch {
                             self.sharedSnapshotDiagnosticRecorder.record(
                                 phase: .timelineReload,
@@ -695,32 +770,14 @@ final class GitActivityRefreshCoordinator {
                         }
                     }
 
-                    let refreshOutcome: GitActivityRefreshOutcome
-                    if hasPartialRecovery {
-                        refreshOutcome = .partial
-                    } else {
-                        refreshOutcome = .succeeded
-                    }
-                    let diagnostic = hasPartialRecovery
-                        ? GitActivityRefreshDiagnostic(
-                            source: .gitActivityRefresh,
-                            stage: .scriptExecution,
-                            reason: .partialRecovery
-                        )
-                        : nil
-
                     self.recordRefreshStatus(
                         refreshedAt: now,
                         trigger: trigger,
                         outcome: refreshOutcome,
                         diagnostic: diagnostic,
-                        metrics: self.makeMetrics(
-                            startedAt: now,
-                            finishedAt: self.dateProvider(),
-                            authorizedRootCount: authorizedRootURLs.count,
-                            scriptMetrics: scriptResult.metrics,
-                            widgetReloaded: didReloadWidget,
-                            diagnostic: nil
+                        metrics: self.metricsByRecordingWidgetReload(
+                            baseMetrics,
+                            didReload: didReloadWidget
                         )
                     )
                     self.lastRefreshFailureAt = nil
@@ -901,15 +958,80 @@ final class GitActivityRefreshCoordinator {
             diagnosticRecorder(diagnostic, trigger)
             recordSharedSnapshotObservation(for: diagnostic)
         }
-        let status = GitActivityRefreshStatus(
+        let preliminaryStatus = GitActivityRefreshStatus(
             refreshedAt: refreshedAt,
             trigger: trigger,
             outcome: outcome,
             diagnostic: diagnostic,
             metrics: metrics
         )
-        refreshStatusStore.save(status)
+        // Persist the new state before asking WidgetKit to read it. This keeps
+        // Timeline reloads from racing against the previous refresh status.
+        refreshStatusStore.save(preliminaryStatus)
+
+        let nextWidgetExperienceState = GitActivityExperienceState(
+            refreshStatus: preliminaryStatus,
+            activitySnapshot: activityStore.loadTodaySnapshot()
+        )
+        var didReloadForStateChange = false
+        if nextWidgetExperienceState != lastWidgetExperienceState {
+            didReloadForStateChange = reloadWidgetForStateChange()
+            if didReloadForStateChange {
+                didReloadWidgetDuringCurrentRefresh = true
+            }
+        }
+        lastWidgetExperienceState = nextWidgetExperienceState
+
+        let finalMetrics = metrics.map {
+            metricsByRecordingWidgetReload(
+                $0,
+                didReload: didReloadForStateChange
+            )
+        }
+        let status = GitActivityRefreshStatus(
+            refreshedAt: refreshedAt,
+            trigger: trigger,
+            outcome: outcome,
+            diagnostic: diagnostic,
+            metrics: finalMetrics
+        )
+        if status != preliminaryStatus {
+            refreshStatusStore.save(status)
+        }
         statusNotificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: status)
+    }
+
+    @discardableResult
+    private func reloadWidgetForStateChange() -> Bool {
+        do {
+            try widgetReloader()
+            return true
+        } catch {
+            sharedSnapshotDiagnosticRecorder.record(
+                phase: .timelineReload,
+                reason: .timelineReloadFailed,
+                recovery: .stopped
+            )
+            return false
+        }
+    }
+
+    private func metricsByRecordingWidgetReload(
+        _ metrics: GitActivityRefreshMetrics,
+        didReload: Bool
+    ) -> GitActivityRefreshMetrics {
+        GitActivityRefreshMetrics(
+            durationMilliseconds: metrics.durationMilliseconds,
+            authorizedRootCount: metrics.authorizedRootCount,
+            repositoryCount: metrics.repositoryCount,
+            cacheHitCount: metrics.cacheHitCount,
+            reflogUnchangedSkipCount: metrics.reflogUnchangedSkipCount,
+            recomputedRepositoryCount: metrics.recomputedRepositoryCount,
+            invalidRepositoryCount: metrics.invalidRepositoryCount,
+            sharedDataWritten: metrics.sharedDataWritten,
+            widgetReloaded: didReload || metrics.widgetReloaded == true,
+            reason: metrics.reason
+        )
     }
 
     private func recordSharedSnapshotObservation(
@@ -922,7 +1044,7 @@ final class GitActivityRefreshCoordinator {
                 reason: .gitScanSkipped,
                 recovery: .stopped
             )
-        case .partialRecovery:
+        case .partialAuthorizationRecovery, .partialRecovery:
             sharedSnapshotDiagnosticRecorder.record(
                 phase: .gitScan,
                 reason: .gitScanPartial,
@@ -979,6 +1101,16 @@ final class GitActivityRefreshCoordinator {
                 reason: .authorizationRequired
             )
         }
+    }
+
+    private func partialRecoveryDiagnostic(
+        hasInvalidAuthorization: Bool
+    ) -> GitActivityRefreshDiagnostic {
+        GitActivityRefreshDiagnostic(
+            source: .gitActivityRefresh,
+            stage: hasInvalidAuthorization ? .authorizationResolution : .scriptExecution,
+            reason: hasInvalidAuthorization ? .partialAuthorizationRecovery : .partialRecovery
+        )
     }
 
     private func mirrorActivitySnapshotToStandardDefaults(

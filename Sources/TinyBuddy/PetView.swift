@@ -32,28 +32,46 @@ struct PetView: View {
             header
             heroPanel
 
-            HStack(spacing: 8) {
-                CounterView(
-                    title: "今日专注",
-                    value: viewModel.hudPresentation.focusCount,
-                    accent: HUDTheme.energyBlueWhite,
+            if viewModel.gitActivityExperience.state.showsActivityMetrics {
+                HStack(spacing: 8) {
+                    CounterView(
+                        title: "今日专注",
+                        value: viewModel.hudPresentation.focusCount,
+                        accent: HUDTheme.energyBlueWhite,
+                        hudGold: HUDTheme.hudGold,
+                        hudPanelFill: hudPanelFill
+                    )
+                    CounterView(
+                        title: "今日完成",
+                        value: viewModel.hudPresentation.completionCount,
+                        accent: statusAccent,
+                        hudGold: HUDTheme.hudGold,
+                        hudPanelFill: hudPanelFill
+                    )
+                }
+
+                if viewModel.gitActivityExperience.state == .partial {
+                    GitActivityExperienceView(
+                        presentation: viewModel.gitActivityExperience,
+                        hudGold: HUDTheme.hudGold,
+                        panelFill: hudPanelFill,
+                        action: viewModel.performGitActivityAction
+                    )
+                } else {
+                    RefreshDiagnosticsView(
+                        diagnostics: viewModel.refreshDiagnostics,
+                        hudGold: HUDTheme.hudGold,
+                        panelFill: hudPanelFill
+                    )
+                }
+            } else {
+                GitActivityExperienceView(
+                    presentation: viewModel.gitActivityExperience,
                     hudGold: HUDTheme.hudGold,
-                    hudPanelFill: hudPanelFill
-                )
-                CounterView(
-                    title: "今日完成",
-                    value: viewModel.hudPresentation.completionCount,
-                    accent: statusAccent,
-                    hudGold: HUDTheme.hudGold,
-                    hudPanelFill: hudPanelFill
+                    panelFill: hudPanelFill,
+                    action: viewModel.performGitActivityAction
                 )
             }
-
-            RefreshDiagnosticsView(
-                diagnostics: viewModel.refreshDiagnostics,
-                hudGold: HUDTheme.hudGold,
-                panelFill: hudPanelFill
-            )
 
             HStack(spacing: 8) {
                 ForEach(PetStatus.allCases) { status in
@@ -229,6 +247,93 @@ struct PetView: View {
         case .completedOnce:
             return Color(red: 0.47, green: 0.82, blue: 0.57)
         }
+    }
+}
+
+private struct GitActivityExperienceView: View {
+    let presentation: GitActivityExperiencePresentation
+    let hudGold: Color
+    let panelFill: AnyShapeStyle
+    let action: () -> Void
+
+    init(
+        presentation: GitActivityExperiencePresentation,
+        hudGold: Color,
+        panelFill: some ShapeStyle,
+        action: @escaping () -> Void
+    ) {
+        self.presentation = presentation
+        self.hudGold = hudGold
+        self.panelFill = AnyShapeStyle(panelFill)
+        self.action = action
+    }
+
+    private var accent: Color {
+        switch presentation.state {
+        case .loading:
+            return HUDTheme.energyBlueWhite
+        case .authorizationRequired, .authorizationInvalid, .noRepositories, .partial:
+            return Color(red: 0.89, green: 0.66, blue: 0.23)
+        case .failed:
+            return Color(red: 0.84, green: 0.34, blue: 0.29)
+        case .noActivity:
+            return hudGold
+        case .ready:
+            return Color(red: 0.31, green: 0.68, blue: 0.44)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if presentation.state == .loading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(accent)
+                } else {
+                    Image(systemName: presentation.systemImage)
+                        .foregroundStyle(accent)
+                }
+
+                Text("GIT ACTIVITY")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(hudGold.opacity(0.78))
+            }
+
+            Text(presentation.title)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+
+            Text(presentation.message)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(4)
+
+            if let actionTitle = presentation.actionTitle {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Capsule(style: .continuous).fill(accent.opacity(0.35)))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(accent.opacity(0.75), lineWidth: 1)
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(panelFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(accent.opacity(0.48), lineWidth: 1)
+        )
     }
 }
 

@@ -45,6 +45,7 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var hudPresentation: TinyBuddyWidgetPresentation
     @Published private(set) var displayState: DisplayState
     @Published private(set) var refreshDiagnostics: RefreshDiagnostics
+    @Published private(set) var gitActivityExperience: GitActivityExperiencePresentation
     @Published private(set) var hiddenSnapshotDiagnosticSummary: TinyBuddyHiddenSnapshotDiagnosticSummary?
 
     var selectedStatus: PetStatus {
@@ -55,6 +56,7 @@ final class PetViewModel: ObservableObject {
         observers.count
     }
 
+    private let onboardingStore: TinyBuddyOnboardingStore
     private let store: DailyStatsStore
     private let session: PetSession
     private let activityStore: GitTodayActivityStore
@@ -65,9 +67,12 @@ final class PetViewModel: ObservableObject {
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private var rebuiltSnapshotFaultIdentifiers: Set<String>
     private var latestRefreshStatus: GitActivityRefreshStatus?
+    private var latestActivitySnapshot: GitTodayActivitySnapshot
+    private var isGitActivityRefreshing = false
     private var observers: [NSObjectProtocol] = []
 
     init(
+        onboardingStore: TinyBuddyOnboardingStore = TinyBuddyOnboardingStore(),
         store: DailyStatsStore = DailyStatsStore(),
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
         combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
@@ -78,6 +83,7 @@ final class PetViewModel: ObservableObject {
         },
         sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared
     ) {
+        self.onboardingStore = onboardingStore
         self.store = store
         let session = PetSession(store: store)
         let combinedSnapshotStore = combinedSnapshotStore ?? store.makeCombinedSnapshotStore()
@@ -133,11 +139,18 @@ final class PetViewModel: ObservableObject {
         self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
         self.rebuiltSnapshotFaultIdentifiers = rebuiltSnapshotFaultIdentifiers
         self.latestRefreshStatus = latestRefreshStatus
+        self.latestActivitySnapshot = activitySnapshot
         self.status = snapshot.status
         self.stats = snapshot.stats
         self.hudPresentation = hudPresentation
         self.displayState = Self.makeDisplayState(from: hudPresentation)
         self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
+        self.gitActivityExperience = GitActivityExperiencePresentation.make(
+            refreshStatus: latestRefreshStatus,
+            activitySnapshot: activitySnapshot,
+            isRefreshing: false,
+            onboardingCompleted: onboardingStore.isCompleted
+        )
         self.hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
         if combinedHUDState.didPersist
             && (hadSameDayCommittedSnapshot || widgetPresentationBeforePublication != hudPresentation) {
@@ -155,11 +168,34 @@ final class PetViewModel: ObservableObject {
 
                 let status = notification.object as? GitActivityRefreshStatus
                     ?? self.refreshStatusStore.load()
+                self.isGitActivityRefreshing = false
                 self.latestRefreshStatus = status
                 self.refreshDiagnostics = Self.makeRefreshDiagnostics(
                     from: status
                 )
                 self.reloadCommittedHUDState()
+            }
+        })
+        observers.append(notificationCenter.addObserver(
+            forName: .gitActivityRefreshDidStart,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+                self.isGitActivityRefreshing = true
+                self.updateGitActivityExperience()
+            }
+        })
+        observers.append(notificationCenter.addObserver(
+            forName: .gitScanRootAuthorizationsDidChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateGitActivityExperience()
             }
         })
         observers.append(notificationCenter.addObserver(
@@ -206,6 +242,21 @@ final class PetViewModel: ObservableObject {
         notificationCenter.post(name: .gitScanRootAuthorizationRequested, object: nil)
     }
 
+    func performGitActivityAction() {
+        guard let action = gitActivityExperience.action else {
+            return
+        }
+
+        switch action {
+        case .chooseDirectories, .addDirectory:
+            notificationCenter.post(name: .gitScanRootAuthorizationRequested, object: nil)
+        case .reauthorize:
+            notificationCenter.post(name: .gitScanRootAuthorizationRepairRequested, object: nil)
+        case .rescan:
+            notificationCenter.post(name: .gitActivityRefreshRequested, object: nil)
+        }
+    }
+
     deinit {
         for observer in observers {
             notificationCenter.removeObserver(observer)
@@ -214,6 +265,7 @@ final class PetViewModel: ObservableObject {
     }
 
     private func restorePersistedState() {
+        isGitActivityRefreshing = false
         latestRefreshStatus = refreshStatusStore.load()
         refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
         if reloadHUDState() {
@@ -312,7 +364,18 @@ final class PetViewModel: ObservableObject {
         stats = snapshot.stats
         self.hudPresentation = hudPresentation
         displayState = Self.makeDisplayState(from: hudPresentation)
+        latestActivitySnapshot = activitySnapshot
+        updateGitActivityExperience()
         return didChange
+    }
+
+    private func updateGitActivityExperience() {
+        gitActivityExperience = GitActivityExperiencePresentation.make(
+            refreshStatus: latestRefreshStatus,
+            activitySnapshot: latestActivitySnapshot,
+            isRefreshing: isGitActivityRefreshing,
+            onboardingCompleted: onboardingStore.isCompleted
+        )
     }
 
     private static func makeHUDPresentation(
@@ -536,6 +599,8 @@ final class PetViewModel: ObservableObject {
                 return "Git 刷新执行失败，请稍后再试。"
             case .refreshedActivityUnavailable:
                 return "Git 刷新完成，但暂时无法恢复活动快照。"
+            case .partialAuthorizationRecovery:
+                return "部分 Git 目录授权已失效；可用仓库已刷新，请直接重新授权失效目录。"
             case .partialRecovery:
                 return "部分 Git 仓库已刷新；有失效 worktree 被跳过，请检查授权目录中的仓库。"
             case .combinedSnapshotCommitFailed:
@@ -564,6 +629,7 @@ final class PetViewModel: ObservableObject {
 
         if diagnosticReason == .authorizationRequired
             || diagnosticReason == .authorizationInvalid
+            || diagnosticReason == .partialAuthorizationRecovery
             || diagnosticReason == .partialRecovery {
             return "管理 Git 目录"
         }
@@ -581,6 +647,10 @@ final class PetViewModel: ObservableObject {
 
         if diagnosticReason == .authorizationRequired {
             return "等待 Git 目录授权"
+        }
+
+        if diagnosticReason == .partialAuthorizationRecovery {
+            return "部分 Git 目录授权已失效"
         }
 
         if diagnosticReason == .partialRecovery {

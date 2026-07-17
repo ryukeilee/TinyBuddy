@@ -27,12 +27,19 @@ case "$MODE" in
 esac
 
 default_derived_data_dir() {
-  if [ "$SIGNING_MODE" = "signed" ]; then
-    local temp_root="${TMPDIR:-/tmp}"
-    printf '%s\n' "${temp_root%/}/TinyBuddyDerivedData"
-  else
-    printf '%s\n' "$ROOT_DIR/.build/xcode"
-  fi
+  local temp_root="${TMPDIR:-/tmp}"
+
+  case "$SIGNING_MODE" in
+    signed)
+      printf '%s\n' "${temp_root%/}/TinyBuddyDerivedData"
+      ;;
+    local)
+      printf '%s\n' "${temp_root%/}/TinyBuddyLocalDerivedData"
+      ;;
+    *)
+      printf '%s\n' "$ROOT_DIR/.build/xcode"
+      ;;
+  esac
 }
 
 DERIVED_DATA_DIR="${TINYBUDDY_DERIVED_DATA_DIR:-$(default_derived_data_dir)}"
@@ -322,20 +329,23 @@ case "$SIGNING_MODE" in
   signed)
     SIGNING_ARGS=(-allowProvisioningUpdates)
     ;;
+  local)
+    SIGNING_ARGS=(CODE_SIGNING_ALLOWED=NO)
+    ;;
   unsigned)
     SIGNING_ARGS=(CODE_SIGNING_ALLOWED=NO)
     ;;
   *)
     echo "unsupported TINYBUDDY_SIGNING_MODE: $SIGNING_MODE" >&2
-    echo "use 'unsigned' or 'signed'" >&2
+    echo "use 'unsigned', 'local', or 'signed'" >&2
     exit 2
     ;;
 esac
 
 case "$MODE" in
   release-install|--release-install|release-verify|--release-verify)
-    if [ "$SIGNING_MODE" != "signed" ]; then
-      echo "$MODE requires TINYBUDDY_SIGNING_MODE=signed" >&2
+    if [ "$SIGNING_MODE" != "signed" ] && [ "$SIGNING_MODE" != "local" ]; then
+      echo "$MODE requires TINYBUDDY_SIGNING_MODE=signed or local" >&2
       exit 2
     fi
     ;;
@@ -409,6 +419,45 @@ run_xcode_build() {
 }
 
 run_xcode_build
+
+sign_local_release_bundle() {
+  local identity="${TINYBUDDY_LOCAL_CODE_SIGN_IDENTITY:-}"
+  local appex="$APP_BUNDLE/Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex"
+
+  if [ "$SIGNING_MODE" != "local" ]; then
+    return 0
+  fi
+
+  if [ -z "$identity" ]; then
+    echo "TINYBUDDY_LOCAL_CODE_SIGN_IDENTITY is required for local signing" >&2
+    return 2
+  fi
+
+  if [ ! -d "$appex" ]; then
+    appex="$APP_BUNDLE/Contents/Extensions/$WIDGET_EXTENSION_NAME.appex"
+  fi
+  if [ ! -d "$appex" ]; then
+    echo "missing $WIDGET_EXTENSION_NAME.appex in $APP_BUNDLE" >&2
+    return 1
+  fi
+
+  /usr/bin/codesign \
+    --force \
+    --sign "$identity" \
+    --timestamp=none \
+    --entitlements "$ROOT_DIR/Resources/TinyBuddyWidget/TinyBuddyWidget.entitlements" \
+    "$appex"
+  /usr/bin/codesign \
+    --force \
+    --sign "$identity" \
+    --timestamp=none \
+    --entitlements "$ROOT_DIR/Resources/TinyBuddyApp/TinyBuddy.entitlements" \
+    "$APP_BUNDLE"
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+  echo "locally signed release bundle: $APP_BUNDLE"
+}
+
+sign_local_release_bundle
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
@@ -656,6 +705,23 @@ wait_for_process_exit() {
   return 1
 }
 
+terminate_release_process() {
+  local process_name="$1"
+  local timeout="$2"
+  local graceful_deadline=$((SECONDS + 3))
+
+  pkill -x "$process_name" >/dev/null 2>&1 || true
+  while [ "$SECONDS" -lt "$graceful_deadline" ]; do
+    if [ -z "$(process_ids "$process_name")" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  pkill -KILL -x "$process_name" >/dev/null 2>&1 || true
+  wait_for_process_exit "$process_name" "$timeout"
+}
+
 wait_for_running_bundle_process() {
   local process_name="$1"
   local expected_executable="$2"
@@ -710,10 +776,8 @@ capture_release_runtime() {
 }
 
 stop_release_runtime() {
-  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
-  pkill -x "$WIDGET_EXTENSION_NAME" >/dev/null 2>&1 || true
-  wait_for_process_exit "$APP_NAME" "$APP_RUNTIME_TIMEOUT" || return $?
-  wait_for_process_exit "$WIDGET_EXTENSION_NAME" "$WIDGET_RUNTIME_TIMEOUT" || return $?
+  terminate_release_process "$APP_NAME" "$APP_RUNTIME_TIMEOUT" || return $?
+  terminate_release_process "$WIDGET_EXTENSION_NAME" "$WIDGET_RUNTIME_TIMEOUT" || return $?
 }
 
 restore_release_runtime() {

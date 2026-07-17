@@ -25,6 +25,7 @@ public enum GitActivityRefreshDiagnosticReason: String, Equatable, Sendable {
     case authorizationInvalid
     case scriptExecutionFailed
     case refreshedActivityUnavailable
+    case partialAuthorizationRecovery
     case partialRecovery
     case combinedSnapshotCommitFailed
 }
@@ -98,6 +99,14 @@ public struct GitActivityRefreshDiagnostic: Equatable, Sendable {
                 source: .gitActivityRefresh,
                 stage: .combinedSnapshotCommit,
                 reason: .combinedSnapshotCommitFailed
+            )
+        }
+
+        if normalizedReason.contains("gitactivityrefresh.authorizationresolution.partialauthorizationrecovery") {
+            return GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .authorizationResolution,
+                reason: .partialAuthorizationRecovery
             )
         }
 

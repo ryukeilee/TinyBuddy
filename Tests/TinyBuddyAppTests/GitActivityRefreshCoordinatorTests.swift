@@ -151,7 +151,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 0)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
@@ -166,7 +166,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 0,
-                    widgetReloaded: false,
+                    widgetReloaded: true,
                     reason: "gitActivityRefresh.authorizationResolution.authorizationRequired"
                 )
             )
@@ -186,7 +186,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 0)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
@@ -201,7 +201,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 0,
-                    widgetReloaded: false,
+                    widgetReloaded: true,
                     reason: "gitActivityRefresh.authorizationResolution.authorizationInvalid"
                 )
             )
@@ -226,7 +226,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 0)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.combinedSnapshot, committedSnapshot)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
         XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationInvalid)
@@ -252,7 +252,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 ),
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
-                    widgetReloaded: false,
+                    widgetReloaded: true,
                     reason: "gitActivityRefresh.scriptLookup.scriptMissing"
                 )
             )
@@ -280,7 +280,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.stopAccessCount, roots.count)
     }
 
-    func testVisibleRefreshSkipsWidgetReloadWhenGitActivityIsUnchanged() {
+    func testFirstVisibleRefreshReloadsWidgetWhenReadyStateReplacesLoading() {
         let harness = makeHarness()
 
         harness.performAndWaitForScriptRunCount(1) {
@@ -289,7 +289,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 1)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
@@ -299,7 +299,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 1,
-                    widgetReloaded: false
+                    widgetReloaded: true
                 )
             )
         )
@@ -512,7 +512,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .skipped)
         XCTAssertNil(harness.lastRefreshStatus?.diagnostic)
         XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
     func testFailedScriptOutcomeDoesNotCommitActivitySnapshot() {
@@ -579,7 +579,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
         XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .scriptExecutionFailed)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
     func testRefreshFailsWhenUnifiedSnapshotRevisionCannotAdvance() {
@@ -604,7 +604,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         }
         harness.waitForNoRefresh()
 
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot, committedActivity)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
         XCTAssertEqual(
@@ -640,7 +640,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         }
         harness.waitForNoRefresh()
 
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
         XCTAssertEqual(
             harness.lastRefreshStatus?.diagnostic?.reason,
@@ -785,7 +785,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                     reason: .refreshedActivityUnavailable
                 )
             )
-            XCTAssertEqual(harness.widgetReloadCount, 1)
+            XCTAssertEqual(harness.widgetReloadCount, 2)
             XCTAssertNotEqual(trustedCombinedSnapshot, newerTrustedSnapshot)
             XCTAssertEqual(harness.combinedSnapshot, newerTrustedSnapshot)
         }
@@ -807,7 +807,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 1)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
@@ -822,7 +822,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 1,
-                    widgetReloaded: false,
+                    widgetReloaded: true,
                     reason: "gitActivityRefresh.scriptExecution.scriptExecutionFailed"
                 )
             )
@@ -867,11 +867,11 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForScriptRunCount(2) {
             harness.coordinator.handleDidWake()
         }
-        harness.waitForWidgetReloadCount(1)
+        harness.waitForWidgetReloadCount(2)
 
         XCTAssertEqual(harness.scriptRunCount, 2)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
-        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
     func testStartTriggersLaunchRefreshAndWidgetReload() {
@@ -1048,6 +1048,86 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
         XCTAssertEqual(harness.scriptRunCount, 1)
+        harness.waitForWidgetReloadCount(2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
+    func testRefreshPublishesLoadingBeforeCompleting() {
+        let harness = makeHarness()
+        let didStart = expectation(description: "loading notification")
+        let observer = harness.statusNotificationCenterForTesting.addObserver(
+            forName: .gitActivityRefreshDidStart,
+            object: nil,
+            queue: nil
+        ) { _ in
+            didStart.fulfill()
+        }
+        defer { harness.statusNotificationCenterForTesting.removeObserver(observer) }
+
+        harness.coordinator.handleDidBecomeActive()
+
+        wait(for: [didStart], timeout: 1.0)
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+    }
+
+    func testWidgetReloadReadsPersistedAuthorizationStateInsteadOfPreviousStatus() {
+        let harness = makeHarness(authorizedRoots: [])
+        var statusObservedByWidgetReload: GitActivityRefreshStatus?
+        harness.setWidgetReloaderHook {
+            statusObservedByWidgetReload = harness.lastRefreshStatus
+        }
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(statusObservedByWidgetReload?.diagnostic?.reason, .authorizationRequired)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, true)
+    }
+
+    func testRepeatedSameEmptyStateDoesNotReloadWidgetAgain() {
+        let harness = makeHarness(authorizedRoots: [])
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+
+        harness.advanceCurrentDate(by: 61)
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationRequired)
+    }
+
+    func testRemovingAllAuthorizationsPublishesAndReloadsTheWidgetExactlyOnce() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForRefresh {
+            harness.coordinator.start()
+        }
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+
+        harness.authorizedRoots = []
+        harness.coordinator.handleAuthorizationChanged()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationRequired)
+    }
+
+    func testManualRefreshForUnchangedAuthorizationStateUsesOneForcedWidgetReload() {
+        let harness = makeHarness(authorizedRoots: [])
+
+        harness.coordinator.start()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+
+        harness.coordinator.handleManualRefresh()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationRequired)
     }
 
     func testInvalidSavedAuthorizationKeepsLowFrequencyRecoveryAndRecoversAutomatically() {
@@ -1094,7 +1174,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.scriptRunCount, 1)
         XCTAssertEqual(harness.capturedRootPaths, [liveRoot.path])
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .partial)
-        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialRecovery)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialAuthorizationRecovery)
         XCTAssertEqual(harness.latestHiddenDiagnosticSummary?.reason, .gitScanPartial)
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
     }
@@ -1118,7 +1198,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForScriptRunCount(2) {
             harness.coordinator.handleAuthorizationChanged()
         }
-        harness.waitForNoRefresh()
+        harness.waitForWidgetReloadCount(2)
 
         XCTAssertEqual(harness.capturedRootPaths, [liveRoot.path, restoredRoot.path])
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
@@ -1145,7 +1225,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForScriptRunCount(2) {
             releaseFirstRun.signal()
         }
-        harness.waitForNoRefresh()
+        harness.waitForWidgetReloadCount(2)
 
         XCTAssertEqual(harness.scriptRunCount, 2)
         XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
@@ -1175,7 +1255,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.authorizedRoots = [currentRoot]
         harness.coordinator.handleAuthorizationChanged()
         harness.performAndWaitForScriptRunCount(2) {}
-        harness.waitForNoRefresh()
+        harness.waitForWidgetReloadCount(2)
 
         XCTAssertEqual(harness.scriptCancellationCount, 1)
         XCTAssertEqual(harness.scriptRunCount, 2)
@@ -1217,8 +1297,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.combinedSnapshot, initialSnapshot)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .partial)
-        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialRecovery)
-        XCTAssertEqual(harness.widgetReloadCount, 0)
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialAuthorizationRecovery)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
     func testReopenRestoresPeriodicRefreshAfterAuthorizationBecomesAvailable() {
@@ -1543,7 +1623,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
         harness.waitForNoRefresh()
         XCTAssertEqual(harness.scriptRunCount, 1)
-        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
 
         harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")]
         harness.performAndWaitForWidgetReloadCount(2) {
@@ -1592,7 +1672,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 2)
-        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
         XCTAssertEqual(
             harness.lastRefreshStatus,
             GitActivityRefreshStatus(
@@ -1607,7 +1687,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 1,
-                    widgetReloaded: false,
+                    widgetReloaded: true,
                     reason: "gitActivityRefresh.scriptExecution.scriptExecutionFailed"
                 )
             )
@@ -2070,13 +2150,7 @@ private final class RefreshHarness {
     func waitForNoRefresh() {
         let expectation = testCase.expectation(description: "no refresh completed")
         expectation.isInverted = true
-        state.onWidgetReload = { _ in
-            expectation.fulfill()
-        }
         testCase.wait(for: [expectation], timeout: 0.2)
-        state.onWidgetReload = { [weak self] _ in
-            self?.fulfillPendingRefreshExpectation()
-        }
     }
 
     private func fulfillPendingRefreshExpectation() {

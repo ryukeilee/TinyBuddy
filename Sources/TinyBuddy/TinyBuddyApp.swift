@@ -24,6 +24,7 @@ struct TinyBuddyApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let onboardingStore = TinyBuddyOnboardingStore()
     private let gitScanRootAuthorizationStore = GitScanRootAuthorizationStore()
     private let notificationCenter = NotificationCenter.default
     private var authorizationCommandObservers: [NSObjectProtocol] = []
@@ -31,14 +32,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         gitScanRootStore: gitScanRootAuthorizationStore
     )
     private lazy var gitScanRootAuthorizationController = GitScanRootAuthorizationController(
-        store: gitScanRootAuthorizationStore
+        store: gitScanRootAuthorizationStore,
+        onboardingStore: onboardingStore
     )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
-        gitScanRootAuthorizationController.requestAuthorizationIfNeeded()
         gitActivityRefreshCoordinator.start(isApplicationActive: NSApp.isActive)
     }
 
@@ -65,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if gitScanRootAuthorizationStore.hasAuthorizedRoots {
             gitActivityRefreshCoordinator.handleReopen()
         } else {
-            handleAuthorizationChange(
+            handleAuthorizationRequest(
                 didChange: gitScanRootAuthorizationController.requestAuthorization()
             )
         }
@@ -80,13 +81,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         authorizationCommandObservers = [
             observeAuthorizationCommand(named: .gitScanRootAuthorizationRequested) { [weak self] _ in
-                self?.handleAuthorizationChange(
+                self?.handleAuthorizationRequest(
                     didChange: self?.gitScanRootAuthorizationController.requestAuthorization() ?? false
                 )
             },
             observeAuthorizationCommand(named: .gitScanRootAuthorizationAddRequested) { [weak self] _ in
-                self?.handleAuthorizationChange(
+                self?.handleAuthorizationRequest(
                     didChange: self?.gitScanRootAuthorizationController.requestAuthorization() ?? false
+                )
+            },
+            observeAuthorizationCommand(named: .gitScanRootAuthorizationRepairRequested) { [weak self] _ in
+                self?.handleAuthorizationRequest(
+                    didChange: self?.gitScanRootAuthorizationController.requestReauthorizationForFirstUnavailableRoot() ?? false
                 )
             },
             observeAuthorizationCommand(named: .gitScanRootAuthorizationReauthorizationRequested) { [weak self] notification in
@@ -109,6 +115,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleAuthorizationChange(
                     didChange: self?.gitScanRootAuthorizationController.removeAllAuthorizations() ?? false
                 )
+            },
+            observeAuthorizationCommand(named: .gitActivityRefreshRequested) { [weak self] _ in
+                self?.gitActivityRefreshCoordinator.handleManualRefresh()
             }
         ]
     }
@@ -134,6 +143,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
+        gitActivityRefreshCoordinator.handleAuthorizationChanged()
+        restoreHUDWindow(from: NSApp)
+    }
+
+    private func handleAuthorizationRequest(didChange: Bool) {
+        notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
+        guard didChange else {
+            return
+        }
         gitActivityRefreshCoordinator.handleAuthorizationChanged()
         restoreHUDWindow(from: NSApp)
     }
