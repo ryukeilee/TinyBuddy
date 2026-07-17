@@ -3,6 +3,36 @@ import XCTest
 @testable import TinyBuddy
 
 final class GitScanRootAuthorizationStoreTests: XCTestCase {
+    func testScopedRootStopsExactlyOnceAcrossExplicitStopAndDeinit() {
+        var stopCount = 0
+        weak var weakRoot: ScopedGitScanRoot?
+
+        do {
+            let root = ScopedGitScanRoot(url: URL(fileURLWithPath: "/Authorized/Project")) {
+                stopCount += 1
+            }
+            weakRoot = root
+            root.stopAccessing()
+            root.stopAccessing()
+            XCTAssertEqual(stopCount, 1)
+        }
+
+        XCTAssertNil(weakRoot)
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    func testScopedRootDeinitStopsWhenCallerReturnsEarly() {
+        var stopCount = 0
+
+        do {
+            _ = ScopedGitScanRoot(url: URL(fileURLWithPath: "/Authorized/Project")) {
+                stopCount += 1
+            }
+        }
+
+        XCTAssertEqual(stopCount, 1)
+    }
+
     func testRecordsKeyMatchesTheCrossProcessReleaseHelperContract() {
         XCTAssertEqual(
             GitScanRootAuthorizationStore.Constants.authorizationRecordsKey,

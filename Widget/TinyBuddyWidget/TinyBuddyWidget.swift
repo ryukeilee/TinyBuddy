@@ -58,14 +58,40 @@ struct TinyBuddyProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<TinyBuddyEntry>) -> Void) {
         let timeContext = currentTimeContext()
         let entry = makeEntry(for: timeContext)
-        let nextRefresh = timeContext.nextRefreshDate(maxInterval: 15 * 60)
-        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+        let rolloverContext = makeTimeContext(
+            at: timeContext.nextDayBoundary,
+            basedOn: timeContext
+        )
+        var entries = [entry]
+        if let rolloverContext {
+            entries.append(makeRolloverEntry(for: rolloverContext))
+        }
+        // Shared-data writers explicitly reload this timeline when its semantic
+        // content changes. A prebuilt midnight entry prevents yesterday's data
+        // from surviving across the local-day boundary without creating a
+        // periodic WidgetKit wakeup when nothing changed.
+        completion(Timeline(entries: entries, policy: .never))
+    }
+
+    private func makeRolloverEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
+        TinyBuddyEntry(
+            date: timeContext.now,
+            snapshot: neutralSnapshot(dayIdentifier: timeContext.dayIdentifier),
+            activitySnapshot: neutralActivitySnapshot,
+            refreshStatus: nil
+        )
     }
 
     private func makeEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
         let date = timeContext.now
         let expectedDayIdentifier = timeContext.dayIdentifier
-        let refreshStatus = refreshStatusStore.load()
+        let refreshStatus: GitActivityRefreshStatus? = refreshStatusStore.load().flatMap { status in
+            guard timeContext.dayIdentifier(for: status.refreshedAt)
+                == expectedDayIdentifier else {
+                return nil
+            }
+            return status
+        }
         let combinedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
         )
@@ -98,9 +124,12 @@ struct TinyBuddyProvider: TimelineProvider {
 
         if let observation = combinedRead.observation,
            observation.reason == .staleData || observation.reason == .snapshotCorrupt {
+            let fallbackSnapshot = store.loadSnapshot()
             return TinyBuddyEntry(
                 date: date,
-                snapshot: store.loadSnapshot(),
+                snapshot: fallbackSnapshot.stats.dayIdentifier == expectedDayIdentifier
+                    ? fallbackSnapshot
+                    : neutralSnapshot(dayIdentifier: expectedDayIdentifier),
                 activitySnapshot: neutralActivitySnapshot,
                 refreshStatus: refreshStatus
             )
@@ -142,6 +171,20 @@ struct TinyBuddyProvider: TimelineProvider {
             locale: Locale(identifier: "en_US_POSIX"),
             sourceCalendar: calendar
         )!
+    }
+
+    private func makeTimeContext(
+        at date: Date,
+        basedOn context: TinyBuddyTimeContext
+    ) -> TinyBuddyTimeContext? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = context.timeZone
+        return TinyBuddyTimeContext(
+            now: date,
+            timeZone: context.timeZone,
+            locale: Locale(identifier: context.signature.localeIdentifier),
+            sourceCalendar: calendar
+        )
     }
 }
 

@@ -3,6 +3,16 @@ import Foundation
 import XCTest
 
 final class GitActivityRefreshScriptTests: XCTestCase {
+    func testScriptTerminatesActiveChildBeforeSignalCleanup() throws {
+        let harness = try ScriptHarness()
+        let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("active_command_pid=\"$command_pid\""))
+        XCTAssertTrue(source.contains("terminate_active_command"))
+        XCTAssertTrue(source.contains("trap 'handle_termination 15' TERM"))
+        XCTAssertTrue(source.contains("trap cleanup EXIT"))
+    }
+
     func testScriptDoesNotUseHereStringForCachedRepositoryStats() throws {
         let harness = try ScriptHarness()
         let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)

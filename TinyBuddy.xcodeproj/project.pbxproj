@@ -33,6 +33,8 @@
 		97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */; };
 		9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */; };
 		A77EA72FF1DED02AEE21F604 /* GitActivityRefreshStatusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DDCB1D3B981C8D2317455D9 /* GitActivityRefreshStatusStore.swift */; };
+		A795EF9F43C024A9852A4349 /* RefreshEnvironmentMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D50C649DCBEBEFF73C0B0893 /* RefreshEnvironmentMonitor.swift */; };
+		ABAED697D5AEFF78EAD2FDBD /* GitRepositoryChangeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68039BC3E998F20EF09C2CD /* GitRepositoryChangeMonitor.swift */; };
 		C3753687BCDB329534ED24B5 /* TinyBuddyArcReactorCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F621E187E17E0739A05B14B2 /* TinyBuddyArcReactorCore.swift */; };
 		C415A6F3BCB98704AA243B06 /* GitScanRootSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68DBD0EB8C2D4CC70BFA8594 /* GitScanRootSettingsView.swift */; };
 		C7B9D2FC67BFC83DB7191326 /* TinyBuddySharedSnapshotDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F47EAEACDF2D02524E542DEB /* TinyBuddySharedSnapshotDiagnostics.swift */; };
@@ -119,6 +121,8 @@
 		CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayRecentProjectStore.swift; sourceTree = "<group>"; };
 		CB3739683A8BD56CCC48578E /* GitActivityExperiencePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitActivityExperiencePresentation.swift; sourceTree = "<group>"; };
 		CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDWindowPositionController.swift; sourceTree = "<group>"; };
+		D50C649DCBEBEFF73C0B0893 /* RefreshEnvironmentMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshEnvironmentMonitor.swift; sourceTree = "<group>"; };
+		D68039BC3E998F20EF09C2CD /* GitRepositoryChangeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitRepositoryChangeMonitor.swift; sourceTree = "<group>"; };
 		D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		E8F8EEF00869149828C56CC9 /* update_git_completion_count.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = update_git_completion_count.sh; sourceTree = "<group>"; };
 		F47EAEACDF2D02524E542DEB /* TinyBuddySharedSnapshotDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddySharedSnapshotDiagnostics.swift; sourceTree = "<group>"; };
@@ -262,11 +266,13 @@
 			children = (
 				CB3739683A8BD56CCC48578E /* GitActivityExperiencePresentation.swift */,
 				FEA309302E10538A5325BABB /* GitActivityRefreshCoordinator.swift */,
+				D68039BC3E998F20EF09C2CD /* GitRepositoryChangeMonitor.swift */,
 				2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */,
 				68DBD0EB8C2D4CC70BFA8594 /* GitScanRootSettingsView.swift */,
 				CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */,
 				7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */,
 				C509A181592B4E3F45448EBE /* PetViewModel.swift */,
+				D50C649DCBEBEFF73C0B0893 /* RefreshEnvironmentMonitor.swift */,
 				1ED892A30DA553AB4D2F2EC3 /* TimeEnvironmentChangeMonitor.swift */,
 				017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */,
 				F9C9BB0B130BF6661F6E7DA7 /* TinyBuddyOnboardingStore.swift */,
@@ -469,11 +475,13 @@
 			files = (
 				056F0BACF31A271145052322 /* GitActivityExperiencePresentation.swift in Sources */,
 				5B71B2D72982DC8F5D4300D3 /* GitActivityRefreshCoordinator.swift in Sources */,
+				ABAED697D5AEFF78EAD2FDBD /* GitRepositoryChangeMonitor.swift in Sources */,
 				F6D2B174FF12EA89BA853BFD /* GitScanRootAuthorizationStore.swift in Sources */,
 				C415A6F3BCB98704AA243B06 /* GitScanRootSettingsView.swift in Sources */,
 				7A711448682D280C4087C212 /* HUDWindowPositionController.swift in Sources */,
 				7234061598DF198403D751B3 /* PetView.swift in Sources */,
 				0E5057F141D8668975F6515C /* PetViewModel.swift in Sources */,
+				A795EF9F43C024A9852A4349 /* RefreshEnvironmentMonitor.swift in Sources */,
 				59B45B568CCAE8F3ABC062C0 /* TimeEnvironmentChangeMonitor.swift in Sources */,
 				97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */,
 				FF02303F1D18D4443F72A3E2 /* TinyBuddyOnboardingStore.swift in Sources */,

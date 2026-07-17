@@ -127,6 +127,7 @@ snapshot_write_lock_acquired=0
 trusted_snapshot_stale=0
 refresh_outcome_override=""
 future_reflog_event_detected=0
+active_command_pid=""
 
 record_invalid_repository() {
   local diagnostic="$1"
@@ -156,6 +157,7 @@ run_command_with_timeout() {
 
   "$@" &
   command_pid=$!
+  active_command_pid="$command_pid"
 
   while kill -0 "$command_pid" 2>/dev/null; do
     if [ "$poll_count" -ge "$poll_limit" ]; then
@@ -163,6 +165,7 @@ run_command_with_timeout() {
       sleep 0.1
       kill -KILL "$command_pid" 2>/dev/null || true
       wait "$command_pid" 2>/dev/null || true
+      active_command_pid=""
       return 124
     fi
     poll_count=$((poll_count + 1))
@@ -170,7 +173,24 @@ run_command_with_timeout() {
   done
 
   wait "$command_pid" || command_status=$?
+  active_command_pid=""
   return "$command_status"
+}
+
+terminate_active_command() {
+  if [ -z "$active_command_pid" ]; then
+    return
+  fi
+
+  kill -TERM "$active_command_pid" 2>/dev/null || true
+  wait "$active_command_pid" 2>/dev/null || true
+  active_command_pid=""
+}
+
+handle_termination() {
+  local signal_number="$1"
+  terminate_active_command
+  exit "$((128 + signal_number))"
 }
 
 cleanup() {
@@ -1770,6 +1790,9 @@ enable_error_trap() {
 }
 
 trap cleanup EXIT
+trap 'handle_termination 1' HUP
+trap 'handle_termination 2' INT
+trap 'handle_termination 15' TERM
 enable_error_trap
 
 if ! command -v "$GIT_BIN" >/dev/null 2>&1; then

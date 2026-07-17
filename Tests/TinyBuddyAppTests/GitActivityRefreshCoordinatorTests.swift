@@ -929,10 +929,12 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         for _ in 0..<25 {
             harness.coordinator.handleDidResignActive()
-            XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+            XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+            XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 30 * 60)
 
             harness.coordinator.handleDidBecomeActive()
             XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+            XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 5 * 60)
             XCTAssertEqual(harness.coordinator.workspaceNotificationObserverCount, 3)
         }
 
@@ -981,16 +983,17 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.scriptRunCount, 2)
     }
 
-    func testResigningActiveSuspendsPeriodicAndWakeRefreshUntilNextActivation() {
+    func testResigningActiveUsesBackgroundCadenceAndDefersWakeRefreshUntilNextActivation() {
         let harness = makeHarness()
 
-        harness.performAndWaitForScriptRunCount(1) {
+        harness.performAndWaitForStatusCount(1) {
             harness.coordinator.start()
         }
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
 
         harness.coordinator.handleDidResignActive()
-        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 30 * 60)
 
         harness.advanceCurrentDate(by: 120)
         harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
@@ -1002,6 +1005,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForScriptRunCount(2) {
             harness.coordinator.handleDidBecomeActive()
         }
+        harness.performAndWaitForStatusCount(2) {}
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
         XCTAssertEqual(harness.scriptRunCount, 2)
     }
@@ -1046,9 +1050,9 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.coordinator.handleAuthorizationChanged()
         }
 
-        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
         XCTAssertEqual(harness.scriptRunCount, 1)
         harness.waitForWidgetReloadCount(2)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
         XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
@@ -1116,7 +1120,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationRequired)
     }
 
-    func testManualRefreshForUnchangedAuthorizationStateUsesOneForcedWidgetReload() {
+    func testManualRefreshForUnchangedAuthorizationStateDoesNotReloadWidget() {
         let harness = makeHarness(authorizedRoots: [])
 
         harness.coordinator.start()
@@ -1126,7 +1130,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.coordinator.handleManualRefresh()
         harness.waitForNoRefresh()
 
-        XCTAssertEqual(harness.widgetReloadCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .authorizationRequired)
     }
 
@@ -1225,9 +1229,10 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForScriptRunCount(2) {
             releaseFirstRun.signal()
         }
-        harness.waitForWidgetReloadCount(2)
+        harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
         XCTAssertEqual(harness.stopAccessCount, 2)
         XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
@@ -1255,10 +1260,11 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.authorizedRoots = [currentRoot]
         harness.coordinator.handleAuthorizationChanged()
         harness.performAndWaitForScriptRunCount(2) {}
-        harness.waitForWidgetReloadCount(2)
+        harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptCancellationCount, 1)
         XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
         XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
         XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
     }
@@ -1313,6 +1319,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             harness.coordinator.handleReopen()
         }
 
+        harness.waitForWidgetReloadCount(2)
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
         XCTAssertEqual(harness.scriptRunCount, 1)
     }
@@ -1555,7 +1562,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 2)
-        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
     }
 
     func testResigningActiveDropsQueuedWakeRefreshAfterFailedRefresh() {
@@ -1599,7 +1606,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.scriptRunCount, 2)
         XCTAssertEqual(harness.lastRefreshStatus?.trigger, .didWake)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
-        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
     }
 
     func testWakeNotificationRetriesWhenFirstWakeRefreshCannotStart() {
@@ -1764,6 +1771,42 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.combinedSnapshot?.dayIdentifier, "2026-07-03")
         XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 3)
         XCTAssertEqual(harness.lastRefreshStatus?.trigger, .timeEnvironmentChanged)
+    }
+
+    func testCrossMidnightReloadsWidgetOnceWhenNewDayContentValuesAreUnchanged() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            harness.setActivitySnapshot(
+                focusBlockCount: 0,
+                commitCount: 0,
+                recentProjectName: nil
+            )
+            harness.setScriptMetrics(
+                runCount == 2 ? self.changedScriptMetrics : self.unchangedScriptMetrics
+            )
+        }
+        harness.performAndWaitForWidgetReloadCount(1) {
+            harness.coordinator.start()
+        }
+
+        harness.advanceCurrentDate(by: 12 * 60 * 60)
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.currentDayIdentifier, "2026-07-03")
+        XCTAssertEqual(harness.combinedSnapshot?.dayIdentifier, "2026-07-03")
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 0)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+
+        harness.advanceCurrentDate(by: 6)
+        harness.performAndWaitForStatusCount(3) {
+            harness.coordinator.handleManualRefresh()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.widgetReloadCount, 2)
     }
 
     func testSameDayEnvironmentChangeAfterValidationPreventsOldGenerationCommit() {
@@ -1972,16 +2015,292 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 5)
     }
 
+    func testUnchangedRefreshesBackOffAndRepositoryChangeRestoresFastCadence() {
+        let harness = makeHarness()
+        harness.setScriptMetrics(unchangedScriptMetrics)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 4 {
+                harness.setScriptMetrics(self.changedScriptMetrics)
+                harness.setActivitySnapshot(
+                    focusBlockCount: 1,
+                    commitCount: 0,
+                    recentProjectName: "TinyBuddy"
+                )
+            }
+        }
+
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        XCTAssertEqual(harness.coordinator.currentUnchangedRefreshStreak, 1)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 10 * 60)
+        XCTAssertTrue(harness.coordinator.repositoryChangeMonitorIsRunning)
+
+        harness.advanceCurrentDate(by: 601)
+        harness.performAndWaitForStatusCount(2) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        XCTAssertEqual(harness.coordinator.currentUnchangedRefreshStreak, 2)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 10 * 60)
+
+        harness.advanceCurrentDate(by: 601)
+        harness.performAndWaitForStatusCount(3) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+        XCTAssertEqual(harness.coordinator.currentUnchangedRefreshStreak, 3)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 20 * 60)
+
+        harness.performAndWaitForStatusCount(4) {
+            harness.emitRepositoryChanges(count: 100)
+        }
+        XCTAssertEqual(harness.scriptRunCount, 4)
+        XCTAssertEqual(harness.coordinator.currentUnchangedRefreshStreak, 0)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 5 * 60)
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 4)
+    }
+
+    func testPowerAndVisibilityTransitionsRescheduleOneTimerAndGateFileListening() {
+        let harness = makeHarness()
+
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 5 * 60)
+        XCTAssertTrue(harness.coordinator.repositoryChangeMonitorIsRunning)
+        XCTAssertEqual(harness.repositoryMonitorStartCount, 1)
+
+        harness.setPowerState(
+            TinyBuddyPowerState(isOnBatteryPower: true, isLowPowerModeEnabled: false)
+        )
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 15 * 60)
+        XCTAssertFalse(harness.coordinator.repositoryChangeMonitorIsRunning)
+        XCTAssertEqual(harness.repositoryMonitorStopCount, 1)
+
+        harness.coordinator.handleDidResignActive()
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 60 * 60)
+
+        harness.setPowerState(
+            TinyBuddyPowerState(isOnBatteryPower: false, isLowPowerModeEnabled: true)
+        )
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 60 * 60)
+
+        harness.coordinator.handleDidBecomeActive()
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 30 * 60)
+        XCTAssertFalse(harness.coordinator.repositoryChangeMonitorIsRunning)
+
+        harness.setPowerState(
+            TinyBuddyPowerState(isOnBatteryPower: false, isLowPowerModeEnabled: false)
+        )
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 5 * 60)
+        XCTAssertTrue(harness.coordinator.repositoryChangeMonitorIsRunning)
+        XCTAssertEqual(harness.repositoryMonitorStartCount, 2)
+    }
+
+    func testRapidForegroundBackgroundStormNeverStartsDelayedRepositoryMonitor() {
+        let harness = makeHarness(
+            repositoryMonitoringStartDelay: 60,
+            foregroundActivationRefreshDelay: 60
+        )
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        harness.advanceCurrentDate(by: 61)
+
+        XCTAssertTrue(harness.coordinator.isRepositoryMonitoringStartScheduled)
+        XCTAssertEqual(harness.repositoryMonitorStartCount, 0)
+
+        for _ in 0..<100 {
+            harness.coordinator.handleDidResignActive()
+            XCTAssertFalse(harness.coordinator.isRepositoryMonitoringStartScheduled)
+            XCTAssertFalse(harness.coordinator.isForegroundActivationRefreshScheduled)
+            harness.coordinator.handleDidBecomeActive()
+            XCTAssertTrue(harness.coordinator.isRepositoryMonitoringStartScheduled)
+            XCTAssertTrue(harness.coordinator.isForegroundActivationRefreshScheduled)
+        }
+        harness.coordinator.handleDidResignActive()
+        harness.waitForNoRefresh()
+
+        XCTAssertFalse(harness.coordinator.isRepositoryMonitoringStartScheduled)
+        XCTAssertFalse(harness.coordinator.repositoryChangeMonitorIsRunning)
+        XCTAssertEqual(harness.repositoryMonitorStartCount, 0)
+        XCTAssertEqual(harness.repositoryMonitorStopCount, 0)
+        XCTAssertEqual(harness.scriptRunCount, 1)
+    }
+
+    func testBecameActiveStormRunsOneRefreshAfterStableForegroundDelay() {
+        let harness = makeHarness(foregroundActivationRefreshDelay: 0.01)
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        harness.advanceCurrentDate(by: 61)
+        harness.coordinator.handleDidResignActive()
+
+        harness.performAndWaitForStatusCount(2) {
+            for _ in 0..<100 {
+                harness.coordinator.handleDidBecomeActive()
+            }
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertFalse(harness.coordinator.isForegroundActivationRefreshScheduled)
+    }
+
+    func testRepositoryChangeStormDebouncesToOneRefresh() {
+        let harness = makeHarness()
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        harness.advanceCurrentDate(by: 61)
+
+        harness.performAndWaitForStatusCount(2) {
+            harness.emitRepositoryChanges(count: 250)
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 2)
+    }
+
+    func testManualRefreshStormDuringRefreshQueuesOnlyOneFollowUp() {
+        let harness = makeHarness()
+        let firstRunStarted = expectation(description: "first run started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                firstRunStarted.fulfill()
+                releaseFirstRun.wait()
+            }
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+        for _ in 0..<100 {
+            harness.coordinator.handleManualRefresh()
+        }
+
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRun.signal()
+        }
+        harness.performAndWaitForStatusCount(2) {}
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 2)
+    }
+
+    func testWidgetReloadFingerprintDistinguishesPartialFailureReasons() {
+        let harness = makeHarness(
+            authorizedRoots: [URL(fileURLWithPath: "/Authorized/LiveProject")],
+            authorizationIssue: .authorizationInvalid
+        )
+        harness.setScriptMetrics(
+            GitRefreshScriptMetrics(
+                repositoryCount: 1,
+                invalidRepositoryCount: 1,
+                refreshOutcome: .partial,
+                cacheHitCount: 0,
+                reflogUnchangedSkipCount: 0,
+                recomputedRepositoryCount: 1,
+                sharedDataWritten: false
+            )
+        )
+
+        harness.performAndWaitForWidgetReloadCount(1) {
+            harness.coordinator.start()
+        }
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.diagnostic?.reason,
+            .partialAuthorizationRecovery
+        )
+
+        harness.authorizationIssue = nil
+        harness.advanceCurrentDate(by: 61)
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.coordinator.handleManualRefresh()
+        }
+
+        XCTAssertEqual(harness.lastRefreshStatus?.diagnostic?.reason, .partialRecovery)
+        XCTAssertEqual(harness.widgetReloadCount, 2)
+    }
+
+    func testBackgroundWakeAfterSleepRebuildsTimersWithoutImmediateDuplicateScan() {
+        let harness = makeHarness()
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        harness.coordinator.handleDidResignActive()
+        harness.coordinator.handleWillSleep()
+        XCTAssertFalse(harness.coordinator.isPeriodicRefreshScheduled)
+
+        harness.advanceCurrentDate(by: 10)
+        harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 30 * 60)
+    }
+
+    func testWakeResamplesLowPowerStateBeforeSchedulingAndRefreshing() {
+        let harness = makeHarness()
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        harness.coordinator.handleWillSleep()
+        harness.stagePowerState(
+            TinyBuddyPowerState(isOnBatteryPower: true, isLowPowerModeEnabled: true)
+        )
+        harness.advanceCurrentDate(by: 10)
+
+        harness.performAndWaitForStatusCount(2) {
+            harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.coordinator.currentScheduledRefreshInterval, 30 * 60)
+        XCTAssertFalse(harness.coordinator.repositoryChangeMonitorIsRunning)
+        XCTAssertFalse(harness.coordinator.isRepositoryMonitoringStartScheduled)
+    }
+
     private func makeHarness(
         authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")],
         authorizationIssue: GitScanRootAccessIssue? = nil,
-        scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh")
+        scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh"),
+        repositoryMonitoringStartDelay: TimeInterval = 0,
+        foregroundActivationRefreshDelay: TimeInterval = 0
     ) -> RefreshHarness {
         RefreshHarness(
             testCase: self,
             authorizedRoots: authorizedRoots,
             authorizationIssue: authorizationIssue,
-            scriptURL: scriptURL
+            scriptURL: scriptURL,
+            repositoryMonitoringStartDelay: repositoryMonitoringStartDelay,
+            foregroundActivationRefreshDelay: foregroundActivationRefreshDelay
+        )
+    }
+
+    private var unchangedScriptMetrics: GitRefreshScriptMetrics {
+        GitRefreshScriptMetrics(
+            repositoryCount: 1,
+            refreshOutcome: .success,
+            cacheHitCount: 1,
+            reflogUnchangedSkipCount: 1,
+            recomputedRepositoryCount: 0,
+            sharedDataWritten: false
+        )
+    }
+
+    private var changedScriptMetrics: GitRefreshScriptMetrics {
+        GitRefreshScriptMetrics(
+            repositoryCount: 1,
+            refreshOutcome: .success,
+            cacheHitCount: 0,
+            reflogUnchangedSkipCount: 0,
+            recomputedRepositoryCount: 1,
+            sharedDataWritten: true
         )
     }
 
@@ -2045,7 +2364,9 @@ private final class RefreshHarness {
         testCase: XCTestCase,
         authorizedRoots: [URL],
         authorizationIssue: GitScanRootAccessIssue? = nil,
-        scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh")
+        scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh"),
+        repositoryMonitoringStartDelay: TimeInterval = 0,
+        foregroundActivationRefreshDelay: TimeInterval = 0
     ) {
         self.testCase = testCase
         self.state = State(currentDate: Self.makeDate(second: 0))
@@ -2170,6 +2491,9 @@ private final class RefreshHarness {
             monotonicTimeProvider: { [state] in
                 state.monotonicTime
             },
+            powerStateProvider: { [state] in
+                state.powerState
+            },
             timeScopePublisher: { [state] token in
                 state.timeScopePublishCount += 1
                 if let hook = state.timeScopePublisherHook {
@@ -2180,12 +2504,20 @@ private final class RefreshHarness {
             beforeActivityCommit: { [state] in
                 state.beforeActivityCommitHook?()
             },
+            repositoryChangeMonitorFactory: { [state] changeHandler in
+                let monitor = TestGitRepositoryChangeMonitor(changeHandler: changeHandler)
+                state.repositoryChangeMonitor = monitor
+                return monitor
+            },
             workspaceNotificationCenter: workspaceNotificationCenter,
             statusNotificationCenter: statusNotificationCenter,
             diagnosticRecorder: { [state] diagnostic, _ in
                 state.diagnosticEventIdentifiers.append(diagnostic.stableIdentifier)
             },
-            sharedSnapshotDiagnosticRecorder: sharedSnapshotDiagnosticRecorder
+            sharedSnapshotDiagnosticRecorder: sharedSnapshotDiagnosticRecorder,
+            repositoryChangeDebounceInterval: 0.01,
+            repositoryMonitoringStartDelay: repositoryMonitoringStartDelay,
+            foregroundActivationRefreshDelay: foregroundActivationRefreshDelay
         )
         statusObserver = statusNotificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
@@ -2197,11 +2529,15 @@ private final class RefreshHarness {
             }
 
             state.statusHistory.append(status)
+            state.onStatusChange?(state.statusHistory.count)
         }
         state.onWidgetReload = { [weak self] _ in
             self?.fulfillPendingRefreshExpectation()
         }
         state.onScriptRun = { [weak self] _ in
+            self?.fulfillPendingRefreshExpectation()
+        }
+        state.onStatusChange = { [weak self] _ in
             self?.fulfillPendingRefreshExpectation()
         }
     }
@@ -2239,6 +2575,14 @@ private final class RefreshHarness {
         set { state.authorizationIssue = newValue }
     }
 
+    var repositoryMonitorStartCount: Int {
+        state.repositoryChangeMonitor?.startCount ?? 0
+    }
+
+    var repositoryMonitorStopCount: Int {
+        state.repositoryChangeMonitor?.stopCount ?? 0
+    }
+
     func advanceCurrentDate(by seconds: TimeInterval) {
         state.currentDate = state.currentDate.addingTimeInterval(seconds)
         state.monotonicTime += max(0, seconds)
@@ -2260,8 +2604,23 @@ private final class RefreshHarness {
         state.currentLocale = locale
     }
 
+    func setPowerState(_ powerState: TinyBuddyPowerState) {
+        state.powerState = powerState
+        coordinator.handlePowerStateChanged(powerState)
+    }
+
+    func stagePowerState(_ powerState: TinyBuddyPowerState) {
+        state.powerState = powerState
+    }
+
     func postWorkspaceNotification(named name: Notification.Name) {
         workspaceNotificationCenter.post(name: name, object: nil)
+    }
+
+    func emitRepositoryChanges(count: Int) {
+        for _ in 0..<count {
+            state.repositoryChangeMonitor?.emitChange()
+        }
     }
 
     func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
@@ -2420,6 +2779,21 @@ private final class RefreshHarness {
         testCase.wait(for: [expectation], timeout: 1.0)
     }
 
+    func performAndWaitForStatusCount(_ expectedStatusCount: Int, action: () -> Void) {
+        let expectation = testCase.expectation(description: "status count \(expectedStatusCount)")
+        refreshExpectationQueue.sync {
+            pendingRefreshExpectation = expectation
+            state.expectedStatusCount = expectedStatusCount
+            if state.statusHistory.count >= expectedStatusCount {
+                expectation.fulfill()
+                pendingRefreshExpectation = nil
+                state.expectedStatusCount = 0
+            }
+        }
+        action()
+        testCase.wait(for: [expectation], timeout: 1.0)
+    }
+
     func waitForWidgetReloadCount(_ expectedReloadCount: Int) {
         let expectation = testCase.expectation(description: "refresh count \(expectedReloadCount)")
         refreshExpectationQueue.sync {
@@ -2456,10 +2830,16 @@ private final class RefreshHarness {
                 return
             }
 
+            if state.expectedStatusCount > 0,
+               state.statusHistory.count < state.expectedStatusCount {
+                return
+            }
+
             expectation.fulfill()
             pendingRefreshExpectation = nil
             state.expectedWidgetReloadCount = 0
             state.expectedScriptRunCount = 0
+            state.expectedStatusCount = 0
         }
     }
 
@@ -2495,6 +2875,10 @@ private final class RefreshHarness {
         var monotonicTime: TimeInterval = 1_000
         var currentTimeZone = TimeZone(secondsFromGMT: 0)!
         var currentLocale = Locale(identifier: "en_US_POSIX")
+        var powerState = TinyBuddyPowerState(
+            isOnBatteryPower: false,
+            isLowPowerModeEnabled: false
+        )
         var authorizedRoots: [URL] = []
         var authorizationIssue: GitScanRootAccessIssue?
         var capturedRootPaths: [String] = []
@@ -2504,8 +2888,10 @@ private final class RefreshHarness {
         var stopAccessCount = 0
         var expectedWidgetReloadCount = 0
         var expectedScriptRunCount = 0
+        var expectedStatusCount = 0
         var onWidgetReload: ((Int) -> Void)?
         var onScriptRun: ((Int) -> Void)?
+        var onStatusChange: ((Int) -> Void)?
         var scriptRunnerHook: ((Int) throws -> Void)?
         var scriptCancellationHook: (() -> Void)?
         var beforeActivityCommitHook: (() -> Void)?
@@ -2518,9 +2904,46 @@ private final class RefreshHarness {
         var statusHistory: [GitActivityRefreshStatus] = []
         var diagnosticEventIdentifiers: [String] = []
         var combinedSnapshotWriteWasOnMainThread: Bool?
+        var repositoryChangeMonitor: TestGitRepositoryChangeMonitor?
 
         init(currentDate: Date) {
             self.currentDate = currentDate
         }
+    }
+}
+
+private final class TestGitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
+    private let changeHandler: () -> Void
+    private(set) var isRunning = false
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+
+    init(changeHandler: @escaping () -> Void) {
+        self.changeHandler = changeHandler
+    }
+
+    @discardableResult
+    func start() -> Bool {
+        guard !isRunning else {
+            return true
+        }
+        isRunning = true
+        startCount += 1
+        return true
+    }
+
+    func stop() {
+        guard isRunning else {
+            return
+        }
+        isRunning = false
+        stopCount += 1
+    }
+
+    func emitChange() {
+        guard isRunning else {
+            return
+        }
+        changeHandler()
     }
 }

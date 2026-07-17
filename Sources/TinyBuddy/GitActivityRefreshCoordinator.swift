@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OSLog
 import TinyBuddyCore
 import WidgetKit
 import Darwin
@@ -188,6 +189,23 @@ final class GitActivityRefreshCoordinator {
     typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
     typealias TimeScopePublisher = (String) -> URL?
     typealias ActivityCommitHook = () -> Void
+    typealias PowerStateProvider = () -> TinyBuddyPowerState
+    typealias RepositoryChangeMonitorFactory = (
+        _ changeHandler: @escaping () -> Void
+    ) -> GitRepositoryChangeMonitoring
+
+    private enum PendingRefreshKind: Int {
+        case wake
+        case repositoryChange
+        case manual
+        case authorization
+    }
+
+    private struct PendingRefreshRequest {
+        let kind: PendingRefreshKind
+        let trigger: GitTodayActivityRefreshTrigger
+        let requestedAt: Date
+    }
 
     private struct PublishedWidgetActivity: Equatable {
         let focusBlockCount: Int
@@ -200,6 +218,27 @@ final class GitActivityRefreshCoordinator {
             let projectName = snapshot?.recentProjectName?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             recentProjectName = projectName?.isEmpty == false ? projectName : nil
+        }
+    }
+
+    private struct PublishedWidgetContent: Equatable {
+        let dayIdentifier: String
+        let activity: PublishedWidgetActivity
+        let experienceState: GitActivityExperienceState
+        let diagnosticReason: GitActivityRefreshDiagnosticReason?
+
+        init(
+            dayIdentifier: String,
+            refreshStatus: GitActivityRefreshStatus?,
+            activitySnapshot: GitTodayActivitySnapshot
+        ) {
+            self.dayIdentifier = dayIdentifier
+            activity = PublishedWidgetActivity(activitySnapshot)
+            experienceState = GitActivityExperienceState(
+                refreshStatus: refreshStatus,
+                activitySnapshot: activitySnapshot
+            )
+            diagnosticReason = refreshStatus?.diagnostic?.reason
         }
     }
 
@@ -220,20 +259,31 @@ final class GitActivityRefreshCoordinator {
     private let authorizedRootsProvider: AuthorizedRootsProvider
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let monotonicTimeProvider: () -> TimeInterval
+    private let powerStateProvider: PowerStateProvider
     private let timeScopePublisher: TimeScopePublisher
     private let beforeActivityCommit: ActivityCommitHook
+    private let repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory?
     private let workspaceNotificationCenter: NotificationCenter
     private let statusNotificationCenter: NotificationCenter
     private let diagnosticRecorder: DiagnosticRecorder
     private let refreshInterval: TimeInterval
     private let minimumRefreshSpacing: TimeInterval
     private let wakeRefreshCoalescingInterval: TimeInterval
+    private let immediateRefreshCoalescingInterval: TimeInterval
+    private let repositoryChangeDebounceInterval: TimeInterval
+    private let repositoryMonitoringStartDelay: TimeInterval
+    private let foregroundActivationRefreshDelay: TimeInterval
+    private let minimumPowerStateRefreshInterval: TimeInterval
     private let clockDiscontinuityTolerance: TimeInterval
     private let refreshQueue = DispatchQueue(label: "TinyBuddy.GitActivityRefresh", qos: .utility)
     private let activityCommitLock = NSLock()
 
     private var timer: Timer?
     private var dayBoundaryTimer: Timer?
+    private var repositoryChangeDebounceTimer: Timer?
+    private var repositoryMonitoringStartTimer: Timer?
+    private var foregroundActivationRefreshTimer: Timer?
+    private var repositoryChangeMonitor: GitRepositoryChangeMonitoring?
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
     private var isStarted = false
     private var lifecycleGeneration = 0
@@ -245,16 +295,28 @@ final class GitActivityRefreshCoordinator {
     private var currentTimeScopeFileURL: URL?
     private var needsWakeRevalidation = false
     private var isApplicationActive = false
+    private var isInterfaceVisible = true
+    private var powerState = TinyBuddyPowerState(
+        isOnBatteryPower: false,
+        isLowPowerModeEnabled: false
+    )
     private var isRefreshing = false
+    private var isPeriodicRefreshSuspended = false
+    private var scheduledRefreshInterval: TimeInterval?
+    private var unchangedRefreshStreak = 0
     private var lastRefreshAttemptMonotonicTime: TimeInterval?
     private var lastRefreshFailureMonotonicTime: TimeInterval?
     private var lastWakeRefreshMonotonicTime: TimeInterval?
-    private var pendingAuthorizationRefresh = false
-    private var forceWidgetReloadAfterCurrentRefresh = false
+    private var lastImmediateRefreshMonotonicTime: TimeInterval?
+    private var lastPowerStateRefreshMonotonicTime: TimeInterval?
     private var didReloadWidgetDuringCurrentRefresh = false
-    private var lastWidgetExperienceState: GitActivityExperienceState
-    private var pendingWakeRefreshTrigger: GitTodayActivityRefreshTrigger?
-    private var pendingWakeRefreshRequestedAt: Date?
+    private var lastWidgetContent: PublishedWidgetContent
+    private var pendingRefreshRequest: PendingRefreshRequest?
+
+    private static let schedulingLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.ryukeili.TinyBuddy",
+        category: "RefreshScheduling"
+    )
 
     init(
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
@@ -276,13 +338,22 @@ final class GitActivityRefreshCoordinator {
         monotonicTimeProvider: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         },
+        powerStateProvider: @escaping PowerStateProvider = {
+            TinyBuddyPowerState.current()
+        },
         timeScopePublisher: TimeScopePublisher? = nil,
         beforeActivityCommit: @escaping ActivityCommitHook = {},
+        repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory? = nil,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         statusNotificationCenter: NotificationCenter = .default,
         diagnosticRecorder: @escaping DiagnosticRecorder = GitActivityRefreshCoordinator.logDiagnostic(_:trigger:),
         sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared,
         wakeRefreshCoalescingInterval: TimeInterval = 5,
+        immediateRefreshCoalescingInterval: TimeInterval = 5,
+        repositoryChangeDebounceInterval: TimeInterval = 5,
+        repositoryMonitoringStartDelay: TimeInterval = 5,
+        foregroundActivationRefreshDelay: TimeInterval = 5,
+        minimumPowerStateRefreshInterval: TimeInterval = 30,
         clockDiscontinuityTolerance: TimeInterval = 5
     ) {
         var adapterCalendar = Calendar.autoupdatingCurrent
@@ -322,29 +393,42 @@ final class GitActivityRefreshCoordinator {
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
         self.timeEnvironment = resolvedTimeEnvironment
         self.monotonicTimeProvider = monotonicTimeProvider
+        self.powerStateProvider = powerStateProvider
         self.timeScopePublisher = timeScopePublisher
             ?? GitActivityRefreshCoordinator.publishTimeScopeToken
         self.beforeActivityCommit = beforeActivityCommit
+        self.repositoryChangeMonitorFactory = repositoryChangeMonitorFactory
         self.workspaceNotificationCenter = workspaceNotificationCenter
         self.statusNotificationCenter = statusNotificationCenter
         self.diagnosticRecorder = diagnosticRecorder
         self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
+        self.immediateRefreshCoalescingInterval = immediateRefreshCoalescingInterval
+        self.repositoryChangeDebounceInterval = repositoryChangeDebounceInterval
+        self.repositoryMonitoringStartDelay = max(0, repositoryMonitoringStartDelay)
+        self.foregroundActivationRefreshDelay = max(0, foregroundActivationRefreshDelay)
+        self.minimumPowerStateRefreshInterval = max(0, minimumPowerStateRefreshInterval)
         self.clockDiscontinuityTolerance = clockDiscontinuityTolerance
         self.activeTimeContext = initialTimeContext
         self.lastObservedTimeContext = initialTimeContext
         self.lastObservedMonotonicTime = initialMonotonicTime
-        self.lastWidgetExperienceState = GitActivityExperienceState(
+        self.lastWidgetContent = PublishedWidgetContent(
+            dayIdentifier: initialTimeContext.dayIdentifier,
             refreshStatus: refreshStatusStore.load(),
             activitySnapshot: activityStore.loadTodaySnapshot()
         )
     }
 
-    func start(isApplicationActive: Bool = true) {
+    func start(
+        isApplicationActive: Bool = true,
+        isInterfaceVisible: Bool = true,
+        powerState: TinyBuddyPowerState? = nil
+    ) {
         guard !isStarted else {
             return
         }
 
         isStarted = true
+        isPeriodicRefreshSuspended = false
         if let context = timeEnvironment.capture() {
             activeTimeContext = context
             observeTimeContext(context, at: monotonicTimeProvider())
@@ -352,43 +436,74 @@ final class GitActivityRefreshCoordinator {
         renewTimeScopeLease()
         registerWorkspaceNotificationsIfNeeded()
         self.isApplicationActive = isApplicationActive
-        if isApplicationActive {
-            scheduleTimerIfNeeded()
+        self.isInterfaceVisible = isInterfaceVisible
+        if let powerState {
+            self.powerState = powerState
         }
+        lastPowerStateRefreshMonotonicTime = monotonicTimeProvider()
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
         scheduleDayBoundaryTimer()
         refresh(trigger: .launch, force: true)
     }
 
     func handleDidBecomeActive() {
         isApplicationActive = true
-        scheduleTimerIfNeeded()
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
         if needsWakeRevalidation {
-            needsWakeRevalidation = false
-            invalidateTimeEnvironment(
-                adopting: timeEnvironment.capture() ?? activeTimeContext,
-                trigger: .becameActive,
-                monotonicTime: monotonicTimeProvider()
-            )
+            requestWakeRefresh(trigger: .becameActive)
             return
         }
         if revalidateTimeContextIfNeeded(trigger: .becameActive) {
             return
         }
-        refresh(trigger: .becameActive)
+        scheduleForegroundActivationRefresh()
     }
 
     func handleDidResignActive() {
         isApplicationActive = false
-        timer?.invalidate()
-        timer = nil
-        pendingWakeRefreshTrigger = nil
-        pendingWakeRefreshRequestedAt = nil
+        foregroundActivationRefreshTimer?.invalidate()
+        foregroundActivationRefreshTimer = nil
+        dropPendingRefreshRequests(ofKinds: [.wake, .repositoryChange])
+        repositoryChangeDebounceTimer?.invalidate()
+        repositoryChangeDebounceTimer = nil
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
+    }
+
+    func handleInterfaceVisibilityChanged(isVisible: Bool) {
+        guard isInterfaceVisible != isVisible else {
+            return
+        }
+
+        isInterfaceVisible = isVisible
+        if !isVisible {
+            foregroundActivationRefreshTimer?.invalidate()
+            foregroundActivationRefreshTimer = nil
+            dropPendingRefreshRequests(ofKinds: [.repositoryChange])
+            repositoryChangeDebounceTimer?.invalidate()
+            repositoryChangeDebounceTimer = nil
+        }
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
+        if isVisible, isApplicationActive {
+            scheduleForegroundActivationRefresh()
+        }
+    }
+
+    func handlePowerStateChanged(_ state: TinyBuddyPowerState) {
+        lastPowerStateRefreshMonotonicTime = monotonicTimeProvider()
+        guard adoptPowerState(state) else {
+            return
+        }
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
     }
 
     func handleReopen() {
-        if isApplicationActive {
-            scheduleTimerIfNeeded()
-        }
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
         if revalidateTimeContextIfNeeded(trigger: .reopen) {
             return
         }
@@ -414,47 +529,76 @@ final class GitActivityRefreshCoordinator {
         isRefreshing = false
         timer?.invalidate()
         timer = nil
+        scheduledRefreshInterval = nil
         dayBoundaryTimer?.invalidate()
         dayBoundaryTimer = nil
-        pendingWakeRefreshTrigger = nil
-        pendingWakeRefreshRequestedAt = nil
+        repositoryChangeDebounceTimer?.invalidate()
+        repositoryChangeDebounceTimer = nil
+        repositoryMonitoringStartTimer?.invalidate()
+        repositoryMonitoringStartTimer = nil
+        foregroundActivationRefreshTimer?.invalidate()
+        foregroundActivationRefreshTimer = nil
+        pendingRefreshRequest = nil
+        repositoryChangeMonitor?.stop()
         renewTimeScopeLease()
         cancelScript()
     }
 
     func handleAuthorizationChanged() {
-        if isApplicationActive {
-            scheduleTimerIfNeeded()
-        }
+        isPeriodicRefreshSuspended = false
+        repositoryChangeMonitor?.stop()
+        updateRepositoryChangeMonitoring()
+        scheduleTimerIfNeeded(forceReschedule: true)
         if isRefreshing {
-            pendingAuthorizationRefresh = true
+            enqueuePendingRefresh(
+                kind: .authorization,
+                trigger: .reopen,
+                requestedAt: activeTimeContext.now
+            )
             cancelScript()
             return
         }
-        didReloadWidgetDuringCurrentRefresh = false
-        forceWidgetReloadAfterCurrentRefresh = true
-        if !refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
-            if !didReloadWidgetDuringCurrentRefresh {
-                reloadWidgetForStateChange()
-            }
-            didReloadWidgetDuringCurrentRefresh = false
-            forceWidgetReloadAfterCurrentRefresh = false
-        }
+        _ = refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
     }
 
     func handleManualRefresh() {
+        let monotonicTime = monotonicTimeProvider()
         if isRefreshing {
+            enqueuePendingRefresh(
+                kind: .manual,
+                trigger: .reopen,
+                requestedAt: activeTimeContext.now
+            )
             return
         }
-        didReloadWidgetDuringCurrentRefresh = false
-        forceWidgetReloadAfterCurrentRefresh = true
-        if !refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
-            if !didReloadWidgetDuringCurrentRefresh {
-                reloadWidgetForStateChange()
-            }
-            didReloadWidgetDuringCurrentRefresh = false
-            forceWidgetReloadAfterCurrentRefresh = false
+        if let lastImmediateRefreshMonotonicTime,
+           monotonicTime - lastImmediateRefreshMonotonicTime >= 0,
+           monotonicTime - lastImmediateRefreshMonotonicTime < immediateRefreshCoalescingInterval {
+            return
         }
+        lastImmediateRefreshMonotonicTime = monotonicTime
+        _ = refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
+    }
+
+    func handleRepositoryContentsChanged() {
+        guard currentCadence.allowsRepositoryEventListening else {
+            return
+        }
+
+        unchangedRefreshStreak = 0
+        repositoryChangeDebounceTimer?.invalidate()
+        let debounceTimer = Timer(timeInterval: repositoryChangeDebounceInterval, repeats: false) {
+            [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isStarted else {
+                    return
+                }
+                self.repositoryChangeDebounceTimer = nil
+                self.requestRepositoryChangeRefresh()
+            }
+        }
+        repositoryChangeDebounceTimer = debounceTimer
+        RunLoop.main.add(debounceTimer, forMode: .common)
     }
 
     func handleDidWake() {
@@ -477,15 +621,21 @@ final class GitActivityRefreshCoordinator {
         isRefreshing = false
         timer?.invalidate()
         timer = nil
+        scheduledRefreshInterval = nil
         dayBoundaryTimer?.invalidate()
         dayBoundaryTimer = nil
+        repositoryChangeDebounceTimer?.invalidate()
+        repositoryChangeDebounceTimer = nil
+        repositoryMonitoringStartTimer?.invalidate()
+        repositoryMonitoringStartTimer = nil
+        foregroundActivationRefreshTimer?.invalidate()
+        foregroundActivationRefreshTimer = nil
+        repositoryChangeMonitor?.stop()
+        repositoryChangeMonitor = nil
         workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
         workspaceNotificationObservers.removeAll()
-        pendingAuthorizationRefresh = false
-        forceWidgetReloadAfterCurrentRefresh = false
         didReloadWidgetDuringCurrentRefresh = false
-        pendingWakeRefreshTrigger = nil
-        pendingWakeRefreshRequestedAt = nil
+        pendingRefreshRequest = nil
         needsWakeRevalidation = false
         cancelScript()
     }
@@ -498,31 +648,73 @@ final class GitActivityRefreshCoordinator {
         timer != nil
     }
 
+    var currentScheduledRefreshInterval: TimeInterval? {
+        scheduledRefreshInterval
+    }
+
+    var repositoryChangeMonitorIsRunning: Bool {
+        repositoryChangeMonitor?.isRunning == true
+    }
+
+    var isRepositoryMonitoringStartScheduled: Bool {
+        repositoryMonitoringStartTimer != nil
+    }
+
+    var isForegroundActivationRefreshScheduled: Bool {
+        foregroundActivationRefreshTimer != nil
+    }
+
+    var currentUnchangedRefreshStreak: Int {
+        unchangedRefreshStreak
+    }
+
     var workspaceNotificationObserverCount: Int {
         workspaceNotificationObservers.count
     }
 
-    private func scheduleTimerIfNeeded() {
-        guard timer == nil else {
+    private var currentCadence: GitTodayActivityRefreshCadence {
+        GitTodayActivityRefreshPolicy.cadence(
+            for: GitTodayActivityRefreshCadenceConditions(
+                isApplicationActive: isApplicationActive,
+                isInterfaceVisible: isInterfaceVisible,
+                isOnBatteryPower: powerState.isOnBatteryPower,
+                isLowPowerModeEnabled: powerState.isLowPowerModeEnabled,
+                unchangedRefreshStreak: unchangedRefreshStreak
+            )
+        )
+    }
+
+    private func scheduleTimerIfNeeded(forceReschedule: Bool = false) {
+        guard isStarted, !isRefreshing, !isPeriodicRefreshSuspended else {
             return
         }
 
-        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.isApplicationActive else {
+        let interval = currentCadence.nextRefreshInterval
+        if !forceReschedule, timer != nil, scheduledRefreshInterval == interval {
+            return
+        }
+
+        timer?.invalidate()
+        let refreshTimer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isStarted else {
                     return
                 }
-
+                self.timer = nil
+                self.scheduledRefreshInterval = nil
                 self.handleTimerFired()
             }
         }
+        timer = refreshTimer
+        scheduledRefreshInterval = interval
+        RunLoop.main.add(refreshTimer, forMode: .common)
     }
 
     private func scheduleDayBoundaryTimer() {
         dayBoundaryTimer?.invalidate()
         let interval = max(0.1, activeTimeContext.nextDayBoundary.timeIntervalSince(activeTimeContext.now))
-        dayBoundaryTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        let boundaryTimer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
                 guard let self else {
                     return
                 }
@@ -534,16 +726,58 @@ final class GitActivityRefreshCoordinator {
                 )
             }
         }
+        dayBoundaryTimer = boundaryTimer
+        RunLoop.main.add(boundaryTimer, forMode: .common)
     }
 
     private func handleTimerFired() {
-        guard isApplicationActive else {
-            return
+        if refreshPowerStateIfNeeded() {
+            updateRepositoryChangeMonitoring()
         }
         if revalidateTimeContextIfNeeded(trigger: .timer) {
             return
         }
-        refresh(trigger: .timer)
+        if !refresh(trigger: .timer) {
+            scheduleTimerIfNeeded(forceReschedule: true)
+        }
+    }
+
+    private func scheduleForegroundActivationRefresh() {
+        foregroundActivationRefreshTimer?.invalidate()
+        foregroundActivationRefreshTimer = nil
+        guard isApplicationActive, isInterfaceVisible else {
+            return
+        }
+
+        guard foregroundActivationRefreshDelay > 0 else {
+            _ = refresh(trigger: .becameActive)
+            return
+        }
+        guard isStarted else {
+            return
+        }
+        let activationTimer = Timer(
+            timeInterval: foregroundActivationRefreshDelay,
+            repeats: false
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.foregroundActivationRefreshTimer = nil
+                guard self.isStarted,
+                      self.isApplicationActive,
+                      self.isInterfaceVisible else {
+                    return
+                }
+                if self.revalidateTimeContextIfNeeded(trigger: .becameActive) {
+                    return
+                }
+                _ = self.refresh(trigger: .becameActive)
+            }
+        }
+        foregroundActivationRefreshTimer = activationTimer
+        RunLoop.main.add(activationTimer, forMode: .common)
     }
 
     private func registerWorkspaceNotificationsIfNeeded() {
@@ -577,18 +811,32 @@ final class GitActivityRefreshCoordinator {
     }
 
     private func requestWakeRefresh(trigger: GitTodayActivityRefreshTrigger) {
-        guard isApplicationActive else {
-            return
+        if needsWakeRevalidation,
+           refreshPowerStateIfNeeded(force: true) {
+            scheduleTimerIfNeeded(forceReschedule: true)
+            updateRepositoryChangeMonitoring()
         }
-
         if needsWakeRevalidation {
             needsWakeRevalidation = false
             let context = timeEnvironment.capture() ?? activeTimeContext
-            invalidateTimeEnvironment(
-                adopting: context,
-                trigger: trigger,
-                monotonicTime: monotonicTimeProvider()
-            )
+            let monotonicTime = monotonicTimeProvider()
+            if shouldRevalidateTimeContext(context, at: monotonicTime) {
+                invalidateTimeEnvironment(
+                    adopting: context,
+                    trigger: trigger,
+                    monotonicTime: monotonicTime
+                )
+                return
+            }
+            observeTimeContext(context, at: monotonicTime)
+            if isStarted {
+                scheduleDayBoundaryTimer()
+                scheduleTimerIfNeeded(forceReschedule: true)
+                updateRepositoryChangeMonitoring()
+            }
+        }
+
+        guard isApplicationActive else {
             return
         }
         if revalidateTimeContextIfNeeded(trigger: trigger) {
@@ -598,12 +846,16 @@ final class GitActivityRefreshCoordinator {
         let monotonicTime = monotonicTimeProvider()
 
         if isRefreshing {
-            pendingWakeRefreshTrigger = trigger
-            pendingWakeRefreshRequestedAt = activeTimeContext.now
+            enqueuePendingRefresh(
+                kind: .wake,
+                trigger: trigger,
+                requestedAt: activeTimeContext.now
+            )
             return
         }
 
         if let lastWakeRefreshMonotonicTime,
+           monotonicTime - lastWakeRefreshMonotonicTime >= 0,
            monotonicTime - lastWakeRefreshMonotonicTime < wakeRefreshCoalescingInterval {
             return
         }
@@ -615,48 +867,100 @@ final class GitActivityRefreshCoordinator {
 
     private func finishRefresh(succeeded: Bool) {
         isRefreshing = false
-
-        if forceWidgetReloadAfterCurrentRefresh && !didReloadWidgetDuringCurrentRefresh {
-            reloadWidgetForStateChange()
-        }
-        forceWidgetReloadAfterCurrentRefresh = false
         didReloadWidgetDuringCurrentRefresh = false
 
-        if pendingAuthorizationRefresh {
-            pendingAuthorizationRefresh = false
-            forceWidgetReloadAfterCurrentRefresh = true
-            if refresh(trigger: .reopen, force: true, bypassFailureBackoff: true) {
+        if let pendingRequest = pendingRefreshRequest {
+            pendingRefreshRequest = nil
+            let canRunWhileActive = isApplicationActive
+            if canRunWhileActive || pendingRequest.kind == .authorization {
+                let monotonicTime = monotonicTimeProvider()
+                let shouldDropCoalescedWake = pendingRequest.kind == .wake
+                    && succeeded
+                    && lastWakeRefreshMonotonicTime.map {
+                        monotonicTime - $0 >= 0
+                            && monotonicTime - $0 < wakeRefreshCoalescingInterval
+                    } == true
+                    && activeTimeContext.now.timeIntervalSince(pendingRequest.requestedAt) >= 0
+
+                if !shouldDropCoalescedWake {
+                    let bypassFailureBackoff = pendingRequest.kind == .authorization
+                        || pendingRequest.kind == .manual
+                    if refresh(
+                        trigger: pendingRequest.trigger,
+                        force: true,
+                        bypassFailureBackoff: bypassFailureBackoff
+                    ) {
+                        if pendingRequest.kind == .wake {
+                            lastWakeRefreshMonotonicTime = monotonicTime
+                        } else if pendingRequest.kind == .manual
+                            || pendingRequest.kind == .repositoryChange {
+                            lastImmediateRefreshMonotonicTime = monotonicTime
+                        }
+                        return
+                    }
+                }
+            }
+        }
+
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
+    }
+
+    private func enqueuePendingRefresh(
+        kind: PendingRefreshKind,
+        trigger: GitTodayActivityRefreshTrigger,
+        requestedAt: Date
+    ) {
+        if let current = pendingRefreshRequest {
+            if current.kind.rawValue > kind.rawValue {
                 return
             }
-            reloadWidgetForStateChange()
-            forceWidgetReloadAfterCurrentRefresh = false
+            if current.kind == kind {
+                pendingRefreshRequest = PendingRefreshRequest(
+                    kind: kind,
+                    trigger: current.trigger,
+                    requestedAt: min(current.requestedAt, requestedAt)
+                )
+                return
+            }
         }
+        pendingRefreshRequest = PendingRefreshRequest(
+            kind: kind,
+            trigger: trigger,
+            requestedAt: requestedAt
+        )
+    }
 
-        guard isApplicationActive else {
-            pendingWakeRefreshTrigger = nil
-            pendingWakeRefreshRequestedAt = nil
+    private func dropPendingRefreshRequests(ofKinds kinds: Set<PendingRefreshKind>) {
+        guard let pendingRefreshRequest, kinds.contains(pendingRefreshRequest.kind) else {
+            return
+        }
+        self.pendingRefreshRequest = nil
+    }
+
+    private func requestRepositoryChangeRefresh() {
+        guard isApplicationActive, isInterfaceVisible,
+              currentCadence.allowsRepositoryEventListening else {
             return
         }
 
-        guard let pendingWakeRefreshTrigger else {
+        if isRefreshing {
+            enqueuePendingRefresh(
+                kind: .repositoryChange,
+                trigger: .timer,
+                requestedAt: activeTimeContext.now
+            )
             return
         }
 
-        let pendingWakeRefreshRequestedAt = self.pendingWakeRefreshRequestedAt
-        self.pendingWakeRefreshTrigger = nil
-        self.pendingWakeRefreshRequestedAt = nil
-
-        if succeeded,
-           let lastWakeRefreshMonotonicTime,
-           let pendingWakeRefreshRequestedAt,
-           activeTimeContext.now.timeIntervalSince(pendingWakeRefreshRequestedAt) >= 0,
-           monotonicTimeProvider() - lastWakeRefreshMonotonicTime < wakeRefreshCoalescingInterval {
+        let monotonicTime = monotonicTimeProvider()
+        if let lastImmediateRefreshMonotonicTime,
+           monotonicTime - lastImmediateRefreshMonotonicTime >= 0,
+           monotonicTime - lastImmediateRefreshMonotonicTime < immediateRefreshCoalescingInterval {
             return
         }
-
-        if refresh(trigger: pendingWakeRefreshTrigger, force: true) {
-            lastWakeRefreshMonotonicTime = monotonicTimeProvider()
-        }
+        lastImmediateRefreshMonotonicTime = monotonicTime
+        _ = refresh(trigger: .timer, force: true)
     }
 
     @discardableResult
@@ -730,6 +1034,7 @@ final class GitActivityRefreshCoordinator {
         let authorizedRootURLs = scopedRoots.map(\.url)
         if accessResult.issue == .authorizationInvalid,
            authorizedRootURLs.isEmpty {
+            isPeriodicRefreshSuspended = false
             lastRefreshAttemptMonotonicTime = monotonicTime
             lastRefreshFailureMonotonicTime = monotonicTime
             let diagnostic = diagnostic(for: accessResult.issue)
@@ -750,8 +1055,13 @@ final class GitActivityRefreshCoordinator {
         }
 
         guard !authorizedRootURLs.isEmpty else {
+            isPeriodicRefreshSuspended = true
             timer?.invalidate()
             timer = nil
+            scheduledRefreshInterval = nil
+            repositoryMonitoringStartTimer?.invalidate()
+            repositoryMonitoringStartTimer = nil
+            repositoryChangeMonitor?.stop()
             let diagnostic = diagnostic(for: accessResult.issue)
             recordRefreshStatus(
                 refreshedAt: timeContext.now,
@@ -769,7 +1079,11 @@ final class GitActivityRefreshCoordinator {
             return false
         }
 
+        isPeriodicRefreshSuspended = false
         isRefreshing = true
+        timer?.invalidate()
+        timer = nil
+        scheduledRefreshInterval = nil
         didReloadWidgetDuringCurrentRefresh = false
         statusNotificationCenter.post(
             name: .gitActivityRefreshDidStart,
@@ -938,6 +1252,12 @@ final class GitActivityRefreshCoordinator {
                 )
             )
             lastRefreshFailureMonotonicTime = nil
+            updateUnchangedRefreshStreak(
+                after: refreshChange(
+                    for: result.metrics,
+                    didChangePublishedWidgetActivity: false
+                )
+            )
             finishRefresh(succeeded: true)
             return
         }
@@ -1000,35 +1320,17 @@ final class GitActivityRefreshCoordinator {
             widgetReloaded: false,
             diagnostic: diagnostic
         )
-        let nextExperienceState = GitActivityExperienceState(
-            refreshStatus: GitActivityRefreshStatus(
-                refreshedAt: completionContext.now,
-                trigger: trigger,
-                outcome: refreshOutcome,
-                diagnostic: diagnostic,
-                metrics: baseMetrics
-            ),
-            activitySnapshot: activityStore.loadTodaySnapshot()
-        )
-        let stateWillChange = nextExperienceState != lastWidgetExperienceState
-        let shouldReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
-            for: trigger,
-            didChange: didChangePublishedWidgetActivity
-        )
-        var didReloadWidget = false
-        if shouldReloadWidget && !stateWillChange {
-            didReloadWidget = reloadWidgetForStateChange()
-            didReloadWidgetDuringCurrentRefresh = didReloadWidget
-        }
-
         recordRefreshStatus(
             refreshedAt: completionContext.now,
             trigger: trigger,
             outcome: refreshOutcome,
             diagnostic: diagnostic,
-            metrics: metricsByRecordingWidgetReload(
-                baseMetrics,
-                didReload: didReloadWidget
+            metrics: baseMetrics
+        )
+        updateUnchangedRefreshStreak(
+            after: refreshChange(
+                for: result.metrics,
+                didChangePublishedWidgetActivity: didChangePublishedWidgetActivity
             )
         )
         lastRefreshFailureMonotonicTime = nil
@@ -1239,7 +1541,126 @@ final class GitActivityRefreshCoordinator {
         }
 
         let elapsed = monotonicTime - lastRefreshFailureMonotonicTime
-        return elapsed < 0 || elapsed >= refreshInterval
+        let retryInterval = max(refreshInterval, currentCadence.nextRefreshInterval)
+        return elapsed < 0 || elapsed >= retryInterval
+    }
+
+    private func refreshChange(
+        for metrics: GitRefreshScriptMetrics?,
+        didChangePublishedWidgetActivity: Bool
+    ) -> GitTodayActivityRefreshChange {
+        if didChangePublishedWidgetActivity || metrics?.sharedDataWritten == true {
+            return .changed
+        }
+        if metrics?.sharedDataWritten == false {
+            return .unchanged
+        }
+        if metrics?.recomputedRepositoryCount == 0,
+           metrics?.repositoryCount != nil {
+            return .unchanged
+        }
+        return .unknown
+    }
+
+    private func updateUnchangedRefreshStreak(
+        after result: GitTodayActivityRefreshChange
+    ) {
+        unchangedRefreshStreak = GitTodayActivityRefreshPolicy.updatedUnchangedRefreshStreak(
+            currentStreak: unchangedRefreshStreak,
+            result: result
+        )
+    }
+
+    @discardableResult
+    private func refreshPowerStateIfNeeded(force: Bool = false) -> Bool {
+        let monotonicTime = monotonicTimeProvider()
+        if !force,
+           let lastPowerStateRefreshMonotonicTime,
+           monotonicTime - lastPowerStateRefreshMonotonicTime >= 0,
+           monotonicTime - lastPowerStateRefreshMonotonicTime
+            < minimumPowerStateRefreshInterval {
+            return false
+        }
+
+        lastPowerStateRefreshMonotonicTime = monotonicTime
+        return adoptPowerState(powerStateProvider())
+    }
+
+    @discardableResult
+    private func adoptPowerState(_ state: TinyBuddyPowerState) -> Bool {
+        guard powerState != state else {
+            return false
+        }
+
+        powerState = state
+        if state.isOnBatteryPower || state.isLowPowerModeEnabled {
+            dropPendingRefreshRequests(ofKinds: [.repositoryChange])
+            repositoryChangeDebounceTimer?.invalidate()
+            repositoryChangeDebounceTimer = nil
+        }
+        Self.schedulingLogger.info(
+            "power state battery=\(state.isOnBatteryPower, privacy: .public) lowPower=\(state.isLowPowerModeEnabled, privacy: .public)"
+        )
+        return true
+    }
+
+    private func updateRepositoryChangeMonitoring() {
+        guard shouldRunRepositoryChangeMonitor,
+              repositoryChangeMonitorFactory != nil else {
+            repositoryMonitoringStartTimer?.invalidate()
+            repositoryMonitoringStartTimer = nil
+            repositoryChangeMonitor?.stop()
+            return
+        }
+
+        if repositoryChangeMonitor?.isRunning == true {
+            repositoryMonitoringStartTimer?.invalidate()
+            repositoryMonitoringStartTimer = nil
+            return
+        }
+        guard repositoryMonitoringStartTimer == nil else {
+            return
+        }
+        guard repositoryMonitoringStartDelay > 0 else {
+            startRepositoryChangeMonitoringIfEligible()
+            return
+        }
+
+        let startTimer = Timer(
+            timeInterval: repositoryMonitoringStartDelay,
+            repeats: false
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.repositoryMonitoringStartTimer = nil
+                self.startRepositoryChangeMonitoringIfEligible()
+            }
+        }
+        repositoryMonitoringStartTimer = startTimer
+        RunLoop.main.add(startTimer, forMode: .common)
+    }
+
+    private var shouldRunRepositoryChangeMonitor: Bool {
+        isStarted
+            && !isPeriodicRefreshSuspended
+            && currentCadence.allowsRepositoryEventListening
+    }
+
+    private func startRepositoryChangeMonitoringIfEligible() {
+        guard shouldRunRepositoryChangeMonitor,
+              let repositoryChangeMonitorFactory else {
+            return
+        }
+        if repositoryChangeMonitor == nil {
+            repositoryChangeMonitor = repositoryChangeMonitorFactory { [weak self] in
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleRepositoryContentsChanged()
+                }
+            }
+        }
+        _ = repositoryChangeMonitor?.start()
     }
 
     private func revalidateTimeContextIfNeeded(
@@ -1290,30 +1711,33 @@ final class GitActivityRefreshCoordinator {
         activeTimeContext = context
         observeTimeContext(context, at: monotonicTime)
         isRefreshing = false
-        pendingAuthorizationRefresh = false
-        pendingWakeRefreshTrigger = nil
-        pendingWakeRefreshRequestedAt = nil
-        forceWidgetReloadAfterCurrentRefresh = false
+        pendingRefreshRequest = nil
         didReloadWidgetDuringCurrentRefresh = false
+        unchangedRefreshStreak = 0
+        isPeriodicRefreshSuspended = false
+        repositoryChangeDebounceTimer?.invalidate()
+        repositoryChangeDebounceTimer = nil
+        foregroundActivationRefreshTimer?.invalidate()
+        foregroundActivationRefreshTimer = nil
         renewTimeScopeLease()
         cancelScript()
-        if isApplicationActive {
-            scheduleTimerIfNeeded()
-        }
         if isStarted {
+            scheduleTimerIfNeeded(forceReschedule: true)
             scheduleDayBoundaryTimer()
+            updateRepositoryChangeMonitoring()
         }
         statusNotificationCenter.post(
             name: .tinyBuddyTimeEnvironmentDidChange,
             object: context,
             userInfo: lifecycleNotificationUserInfo
         )
-        _ = reloadWidgetForStateChange()
-        _ = refresh(
+        if !refresh(
             trigger: trigger,
             force: true,
             bypassFailureBackoff: true
-        )
+        ) {
+            scheduleTimerIfNeeded(forceReschedule: true)
+        }
     }
 
     private func validatedCompletionContext(
@@ -1377,18 +1801,20 @@ final class GitActivityRefreshCoordinator {
         // Timeline reloads from racing against the previous refresh status.
         refreshStatusStore.save(preliminaryStatus)
 
-        let nextWidgetExperienceState = GitActivityExperienceState(
+        let activitySnapshot = activityStore.loadTodaySnapshot()
+        let nextWidgetContent = PublishedWidgetContent(
+            dayIdentifier: activeTimeContext.dayIdentifier,
             refreshStatus: preliminaryStatus,
-            activitySnapshot: activityStore.loadTodaySnapshot()
+            activitySnapshot: activitySnapshot
         )
         var didReloadForStateChange = false
-        if nextWidgetExperienceState != lastWidgetExperienceState {
+        if nextWidgetContent != lastWidgetContent {
             didReloadForStateChange = reloadWidgetForStateChange()
             if didReloadForStateChange {
                 didReloadWidgetDuringCurrentRefresh = true
             }
         }
-        lastWidgetExperienceState = nextWidgetExperienceState
+        lastWidgetContent = nextWidgetContent
 
         let finalMetrics = metrics.map {
             metricsByRecordingWidgetReload(
@@ -1633,6 +2059,14 @@ final class GitActivityRefreshCoordinator {
             environment["TINYBUDDY_TIME_SCOPE_TOKEN"] = timeScopeLease.token
         }
         let temporaryDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBuddyGitRefresh-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectoryURL,
+            withIntermediateDirectories: false
+        )
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectoryURL)
+        }
         environment["TMPDIR"] = Self.scriptTemporaryDirectoryEnvironment(temporaryDirectoryURL)
         let userHomePath = resolvedUserHomeDirectoryPath()
         environment["TINYBUDDY_USER_HOME"] = userHomePath
@@ -1653,8 +2087,8 @@ final class GitActivityRefreshCoordinator {
         }
         process.environment = environment
 
-        let standardOutputURL = temporaryDirectoryURL.appendingPathComponent(UUID().uuidString)
-        let standardErrorURL = temporaryDirectoryURL.appendingPathComponent(UUID().uuidString)
+        let standardOutputURL = temporaryDirectoryURL.appendingPathComponent("stdout")
+        let standardErrorURL = temporaryDirectoryURL.appendingPathComponent("stderr")
         FileManager.default.createFile(atPath: standardOutputURL.path, contents: nil)
         FileManager.default.createFile(atPath: standardErrorURL.path, contents: nil)
         let standardOutputHandle = try FileHandle(forWritingTo: standardOutputURL)
@@ -1662,8 +2096,6 @@ final class GitActivityRefreshCoordinator {
         defer {
             try? standardOutputHandle.close()
             try? standardErrorHandle.close()
-            try? FileManager.default.removeItem(at: standardOutputURL)
-            try? FileManager.default.removeItem(at: standardErrorURL)
         }
         process.standardOutput = standardOutputHandle
         process.standardError = standardErrorHandle

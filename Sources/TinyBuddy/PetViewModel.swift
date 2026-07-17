@@ -329,18 +329,22 @@ final class PetViewModel: ObservableObject {
             timeContext: timeEnvironment.capture()
         )
 
-        let fallbackSnapshot = store.loadSnapshot()
-        let combinedRead = combinedSnapshotStore.readValidated(
-            expectedDayIdentifier: fallbackSnapshot.stats.dayIdentifier
+        let combinedHUDState = Self.publishAndLoadCombinedSnapshot(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore,
+            includeTrustedActivity: Self.shouldIncludeTrustedActivity(
+                for: latestRefreshStatus
+            ),
+            diagnosticRecorder: sharedSnapshotDiagnosticRecorder,
+            rebuiltSnapshotFaultIdentifiers: &rebuiltSnapshotFaultIdentifiers
         )
-        combinedRead.observation.map(sharedSnapshotDiagnosticRecorder.record)
-        if let combinedSnapshot = combinedRead.snapshot {
-            _ = applyHUDState(
-                snapshot: combinedSnapshot.snapshot,
-                activitySnapshot: combinedSnapshot.activitySnapshot
-            )
-        } else {
-            updateGitActivityExperience()
+        _ = applyHUDState(
+            snapshot: combinedHUDState.snapshot,
+            activitySnapshot: combinedHUDState.activitySnapshot
+        )
+        if combinedHUDState.didPersist {
+            reloadWidgetIfPossible()
         }
         hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
     }

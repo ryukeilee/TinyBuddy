@@ -51,8 +51,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         combinedSnapshotStore: combinedSnapshotStore,
         refreshStatusStore: refreshStatusStore,
         gitScanRootStore: gitScanRootAuthorizationStore,
-        timeEnvironment: timeEnvironment
+        timeEnvironment: timeEnvironment,
+        repositoryChangeMonitorFactory: { [gitScanRootAuthorizationStore] changeHandler in
+            GitRepositoryChangeMonitor(
+                authorizedRootsProvider: gitScanRootAuthorizationStore.accessAuthorizedRootResult,
+                changeHandler: changeHandler
+            )
+        }
     )
+    private lazy var powerStateMonitor = TinyBuddyPowerStateMonitor { [weak self] state in
+        self?.gitActivityRefreshCoordinator.handlePowerStateChanged(state)
+    }
+    private lazy var hudVisibilityMonitor = HUDVisibilityMonitor(
+        visibilityProvider: { [weak self] in
+            self?.isHUDVisible ?? false
+        }
+    ) { [weak self] isVisible in
+        self?.gitActivityRefreshCoordinator.handleInterfaceVisibilityChanged(
+            isVisible: isVisible
+        )
+    }
     private lazy var timeEnvironmentChangeMonitor = TimeEnvironmentChangeMonitor<TinyBuddyTimeContext>(
         notificationCenter: notificationCenter,
         capture: { [timeEnvironment] in
@@ -79,12 +97,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
         timeEnvironmentChangeMonitor.start()
-        gitActivityRefreshCoordinator.start(isApplicationActive: NSApp.isActive)
+        gitActivityRefreshCoordinator.start(
+            isApplicationActive: NSApp.isActive,
+            isInterfaceVisible: isHUDVisible,
+            powerState: TinyBuddyPowerState.current()
+        )
+        powerStateMonitor.start()
+        hudVisibilityMonitor.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()
+        hudVisibilityMonitor.stop()
+        powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
         HUDWindowPositionController.shared.stop()
@@ -214,6 +240,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         application.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        notificationCenter.post(name: .tinyBuddyHUDWindowDidConfigure, object: window)
+    }
+
+    private var isHUDVisible: Bool {
+        guard let window = NSApp.windows.first(where: {
+            $0.identifier == tinyBuddyHUDWindowIdentifier
+        }) else {
+            return false
+        }
+
+        return window.isVisible
+            && !window.isMiniaturized
+            && (window.occlusionState.contains(.visible) || window.isKeyWindow)
     }
 }
 
@@ -260,5 +299,9 @@ struct WindowConfigurator: NSViewRepresentable {
         window.maxSize = targetSize
         window.standardWindowButton(.zoomButton)?.isHidden = true
         HUDWindowPositionController.shared.attach(to: window)
+        NotificationCenter.default.post(
+            name: .tinyBuddyHUDWindowDidConfigure,
+            object: window
+        )
     }
 }

@@ -3,11 +3,10 @@
 #
 # The default budgets are intentionally measured after a warm baseline: 16 MiB
 # RSS and six threads allow normal AppKit/Swift/WidgetKit settling while still
-# making a repeating lifecycle allocation visible.  A CPU value at or above
-# 15% for three consecutive 30-second samples is treated as a sustained idle
-# load.  Six non-decreasing RSS samples that add 8 MiB catch gradual growth
-# before the final RSS cap.  Override any value with the variables printed by
-# --help when establishing a machine-specific baseline.
+# making a repeating lifecycle allocation visible. CPU, disk-read, and wakeup
+# budgets are derived from Darwin rusage counters so they remain comparable
+# across process IDs. Override any value with the variables printed by --help
+# when establishing a machine-specific baseline.
 #
 # This command requires an interactive macOS desktop session because it uses
 # AppleScript activation to create active/resign lifecycle transitions.  It
@@ -19,6 +18,8 @@ APP_NAME="TinyBuddy"
 APP_BUNDLE="$ROOT_DIR/.build/xcode/Build/Products/Debug/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 BUNDLE_ID="com.ryukeili.TinyBuddy"
+PROBE_SOURCE="$ROOT_DIR/script/process_resource_probe.swift"
+SAMPLE_HEADER="elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state,cpu_time_ns,disk_read_bytes,interrupt_wakeups,idle_wakeups"
 
 DURATION_SECONDS="${TINYBUDDY_RESOURCE_DURATION_SECONDS:-600}"
 SAMPLE_INTERVAL_SECONDS="${TINYBUDDY_RESOURCE_SAMPLE_INTERVAL_SECONDS:-30}"
@@ -31,6 +32,9 @@ SUSTAINED_CPU_PERCENT="${TINYBUDDY_RESOURCE_SUSTAINED_CPU_PERCENT:-15}"
 SUSTAINED_CPU_SAMPLES="${TINYBUDDY_RESOURCE_SUSTAINED_CPU_SAMPLES:-3}"
 MONOTONIC_SAMPLES="${TINYBUDDY_RESOURCE_MONOTONIC_SAMPLES:-6}"
 MONOTONIC_GROWTH_KB="${TINYBUDDY_RESOURCE_MONOTONIC_GROWTH_KB:-8192}"
+DISK_READ_DELTA_BYTES="${TINYBUDDY_RESOURCE_DISK_READ_DELTA_BYTES:-67108864}"
+INTERRUPT_WAKEUPS_PER_MINUTE="${TINYBUDDY_RESOURCE_INTERRUPT_WAKEUPS_PER_MINUTE:-600}"
+IDLE_WAKEUPS_PER_MINUTE="${TINYBUDDY_RESOURCE_IDLE_WAKEUPS_PER_MINUTE:-600}"
 SKIP_INTERNAL_TESTS="${TINYBUDDY_RESOURCE_SKIP_INTERNAL_TESTS:-0}"
 
 APP_PID=""
@@ -40,22 +44,28 @@ WARM_THREADS=""
 START_SECONDS=0
 MONITOR_START_SECONDS=0
 PREEXISTING_PIDS=""
+PROBE_BINARY=""
 
 usage() {
   cat <<'USAGE'
-usage: script/verify_resource_stability.sh [--help|--dry-run|--thread-count pid|--evaluate-samples path]
+usage: script/verify_resource_stability.sh [--help|--dry-run|--thread-count pid|--probe-process pid|--evaluate-samples path|--compare-summaries before.csv after.csv]
 
 Builds and launches the unsigned Debug app, runs lifecycle cycles through
 AppleScript, then writes CSV samples to stdout:
-  elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state
+  elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state,cpu_time_ns,disk_read_bytes,interrupt_wakeups,idle_wakeups
 
 Defaults: duration=600s, interval=30s, warmup=15s, cycles=25.
 Budgets (relative to the warm baseline): RSS final delta <= 16384 KB, maximum
-thread delta <= 6, CPU < 15% for every 3 consecutive samples, and no run of
-6 non-decreasing RSS samples that grows by >= 8192 KB.
+thread delta <= 6, CPU < 15% for every 3 consecutive samples (derived from
+cumulative CPU time), disk reads <= 67108864 bytes, interrupt and package-idle
+wakeups <= 600/minute, and no run of 6 non-decreasing RSS samples that grows
+by >= 8192 KB.
+
+--compare-summaries reports before/after deltas and ratios for every measured
+counter; it rejects samples that omit any required counter.
 
 Environment overrides:
-  TINYBUDDY_RESOURCE_DURATION_SECONDS (default 600; may be reduced locally)
+  TINYBUDDY_RESOURCE_DURATION_SECONDS (default 600; set 86400 for a 24-hour run)
   TINYBUDDY_RESOURCE_SAMPLE_INTERVAL_SECONDS (default 30)
   TINYBUDDY_RESOURCE_WARMUP_SECONDS (default 15)
   TINYBUDDY_RESOURCE_CYCLE_COUNT (default/minimum 25)
@@ -66,6 +76,9 @@ Environment overrides:
   TINYBUDDY_RESOURCE_SUSTAINED_CPU_SAMPLES (default 3)
   TINYBUDDY_RESOURCE_MONOTONIC_SAMPLES (default 6)
   TINYBUDDY_RESOURCE_MONOTONIC_GROWTH_KB (default 8192)
+  TINYBUDDY_RESOURCE_DISK_READ_DELTA_BYTES (default 67108864)
+  TINYBUDDY_RESOURCE_INTERRUPT_WAKEUPS_PER_MINUTE (default 600)
+  TINYBUDDY_RESOURCE_IDLE_WAKEUPS_PER_MINUTE (default 600)
   TINYBUDDY_RESOURCE_SKIP_INTERNAL_TESTS=1 (skip deterministic invariant tests)
 USAGE
 }
@@ -82,7 +95,7 @@ validate_configuration() {
   local value
   for value in "$SAMPLE_INTERVAL_SECONDS" "$WARMUP_SECONDS" "$CYCLE_SETTLE_SECONDS" \
     "$RSS_DELTA_KB" "$THREAD_DELTA" "$SUSTAINED_CPU_SAMPLES" "$MONOTONIC_SAMPLES" \
-    "$MONOTONIC_GROWTH_KB"
+    "$MONOTONIC_GROWTH_KB" "$DISK_READ_DELTA_BYTES"
   do
     is_positive_integer "$value" || { echo "expected a positive integer, got: $value" >&2; return 2; }
   done
@@ -91,8 +104,11 @@ validate_configuration() {
     echo "TINYBUDDY_RESOURCE_CYCLE_COUNT must be at least 25" >&2
     return 2
   }
-  /usr/bin/awk -v value="$SUSTAINED_CPU_PERCENT" 'BEGIN { exit !(value + 0 > 0) }' || {
-    echo "TINYBUDDY_RESOURCE_SUSTAINED_CPU_PERCENT must be positive" >&2
+  /usr/bin/awk -v cpu="$SUSTAINED_CPU_PERCENT" \
+    -v interrupt="$INTERRUPT_WAKEUPS_PER_MINUTE" \
+    -v idle="$IDLE_WAKEUPS_PER_MINUTE" \
+    'BEGIN { exit !(cpu + 0 > 0 && interrupt + 0 > 0 && idle + 0 > 0) }' || {
+    echo "CPU and wakeup rate thresholds must be positive" >&2
     return 2
   }
 }
@@ -105,6 +121,9 @@ print_configuration() {
   printf 'rss_delta_kb,%s\n' "$RSS_DELTA_KB"
   printf 'thread_delta,%s\n' "$THREAD_DELTA"
   printf 'sustained_cpu_percent,%s\n' "$SUSTAINED_CPU_PERCENT"
+  printf 'disk_read_delta_bytes,%s\n' "$DISK_READ_DELTA_BYTES"
+  printf 'interrupt_wakeups_per_minute,%s\n' "$INTERRUPT_WAKEUPS_PER_MINUTE"
+  printf 'idle_wakeups_per_minute,%s\n' "$IDLE_WAKEUPS_PER_MINUTE"
 }
 
 is_preexisting_pid() {
@@ -119,6 +138,7 @@ is_owned_app_process() {
 
   [ -n "$APP_PID" ] && /bin/kill -0 "$APP_PID" 2>/dev/null || return 1
   if ! command="$(LC_ALL=C /bin/ps -p "$APP_PID" -o comm= 2>&1)"; then
+    /bin/kill -0 "$APP_PID" 2>/dev/null || return 1
     echo "ps ownership check failed for PID $APP_PID: $command" >&2
     return 2
   fi
@@ -151,6 +171,7 @@ cleanup() {
     is_owned_app_process && /bin/kill -9 "$APP_PID" 2>/dev/null || true
   fi
   [ -n "$SAMPLES_FILE" ] && /bin/rm -f "$SAMPLES_FILE"
+  [ -n "$PROBE_BINARY" ] && /bin/rm -f "$PROBE_BINARY"
   return 0
 }
 
@@ -166,6 +187,34 @@ run_internal_invariant_tests() {
   echo "running deterministic lifecycle invariant tests before OS sampling" >&2
   "$ROOT_DIR/script/swiftpm.sh" test --filter GitActivityRefreshCoordinatorTests >&2
   "$ROOT_DIR/script/swiftpm.sh" test --filter PetViewModelTests >&2
+}
+
+build_probe() {
+  [ -f "$PROBE_SOURCE" ] || { echo "resource probe source is missing: $PROBE_SOURCE" >&2; return 1; }
+  command -v swiftc >/dev/null 2>&1 || { echo "swiftc is required to compile the resource probe" >&2; return 1; }
+  PROBE_BINARY="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/tinybuddy-resource-probe.XXXXXX")"
+  /bin/rm -f "$PROBE_BINARY"
+  if ! swiftc "$PROBE_SOURCE" -o "$PROBE_BINARY"; then
+    echo "failed to compile Darwin resource probe" >&2
+    return 1
+  fi
+}
+
+probe_process() {
+  local pid="$1" raw
+  [ -n "$PROBE_BINARY" ] || { echo "resource probe has not been compiled" >&2; return 1; }
+  if ! raw="$("$PROBE_BINARY" "$pid" 2>&1)"; then
+    echo "resource probe failed for PID $pid: $raw" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$raw" | /usr/bin/awk -F, '
+    NF != 4 { exit 1 }
+    { for (fieldNumber = 1; fieldNumber <= 4; fieldNumber++) if ($fieldNumber !~ /^[0-9]+$/) exit 1 }
+  '; then
+    echo "resource probe returned malformed counters for PID $pid: $raw" >&2
+    return 1
+  fi
+  printf '%s\n' "$raw"
 }
 
 wait_for_app_pid() {
@@ -201,14 +250,14 @@ wait_for_app_pid() {
 }
 
 record_sample() {
-  local state="$1" elapsed raw rss cpu threads line
+  local state="$1" elapsed raw rss cpu threads line probe_raw cpu_time_ns disk_read_bytes interrupt_wakeups idle_wakeups
   elapsed="$((SECONDS - START_SECONDS))"
   if is_owned_app_process; then
     :
   else
     local ownership_status="$?"
     [ "$ownership_status" -eq 1 ] || return "$ownership_status"
-    line="${elapsed},,,,0,${state}"
+    line="${elapsed},,,,0,${state},,,,"
     printf '%s\n' "$line" | /usr/bin/tee -a "$SAMPLES_FILE"
     echo "app process exited while sampling ($state)" >&2
     return 1
@@ -220,13 +269,17 @@ record_sample() {
   fi
   read -r rss cpu <<< "$(printf '%s\n' "$raw" | /usr/bin/awk '{ print $1, $2 }')"
   threads="$(thread_count_for_pid "$APP_PID")" || return 1
+  probe_raw="$(probe_process "$APP_PID")" || return 1
+  IFS=, read -r cpu_time_ns disk_read_bytes interrupt_wakeups idle_wakeups <<< "$probe_raw"
   if ! is_positive_integer "$rss" || ! is_positive_integer "$threads" || \
-    ! /usr/bin/awk -v value="$cpu" 'BEGIN { exit !(value + 0 >= 0) }'; then
+    ! /usr/bin/awk -v value="$cpu" 'BEGIN { exit !(value + 0 >= 0) }' || \
+    ! is_nonnegative_integer "$cpu_time_ns" || ! is_nonnegative_integer "$disk_read_bytes" || \
+    ! is_nonnegative_integer "$interrupt_wakeups" || ! is_nonnegative_integer "$idle_wakeups"; then
     echo "unable to parse ps sample for PID $APP_PID: $raw" >&2
     return 1
   fi
 
-  line="${elapsed},${rss},${cpu},${threads},1,${state}"
+  line="${elapsed},${rss},${cpu},${threads},1,${state},${cpu_time_ns},${disk_read_bytes},${interrupt_wakeups},${idle_wakeups}"
   printf '%s\n' "$line" | /usr/bin/tee -a "$SAMPLES_FILE"
   if [ "$state" = "warm" ]; then
     WARM_RSS_KB="$rss"
@@ -256,20 +309,24 @@ evaluate_budgets() {
     -v cpuSamples="$SUSTAINED_CPU_SAMPLES" \
     -v monotonicSamples="$MONOTONIC_SAMPLES" \
     -v monotonicGrowth="$MONOTONIC_GROWTH_KB" \
+    -v diskReadCap="$DISK_READ_DELTA_BYTES" \
+    -v interruptWakeupsPerMinuteCap="$INTERRUPT_WAKEUPS_PER_MINUTE" \
+    -v idleWakeupsPerMinuteCap="$IDLE_WAKEUPS_PER_MINUTE" \
     -v requiredSamples="$required_samples" '
       BEGIN { maxThreadDelta = 0 }
       function isPositiveInteger(value) { return value ~ /^[0-9]+$/ && value + 0 > 0 }
       function isNonnegativeNumber(value) { return value ~ /^[0-9]+([.][0-9]+)?$/ }
+      function isNonnegativeInteger(value) { return value ~ /^[0-9]+$/ }
       NR == 1 {
         headerSeen = 1
-        if ($0 != "elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state") {
+        if ($0 != "elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state,cpu_time_ns,disk_read_bytes,interrupt_wakeups,idle_wakeups") {
           print "FAIL: unexpected sample header" > "/dev/stderr"
           failed = 1
         }
         next
       }
       {
-        if (NF != 6) {
+        if (NF != 10) {
           print "FAIL: malformed sample row " NR > "/dev/stderr"
           failed = 1
           next
@@ -280,7 +337,9 @@ evaluate_budgets() {
           next
         }
         if ($5 != 1) { print "FAIL: process was not alive at " $6 > "/dev/stderr"; failed = 1; next }
-        if (!isPositiveInteger($2) || !isNonnegativeNumber($3) || !isPositiveInteger($4)) {
+        if (!isPositiveInteger($2) || !isNonnegativeNumber($3) || !isPositiveInteger($4) || \
+            !isNonnegativeInteger($7) || !isNonnegativeInteger($8) || \
+            !isNonnegativeInteger($9) || !isNonnegativeInteger($10)) {
           print "FAIL: invalid process sample at row " NR > "/dev/stderr"
           failed = 1
           next
@@ -294,6 +353,14 @@ evaluate_budgets() {
         }
         warmRSS = $2 + 0
         warmThreads = $4 + 0
+        warmElapsed = $1 + 0
+        warmCPUTime = $7 + 0
+        warmDiskReadBytes = $8 + 0
+        warmInterruptWakeups = $9 + 0
+        warmIdleWakeups = $10 + 0
+        previousSampleElapsed = warmElapsed
+        previousSampleCPUTime = warmCPUTime
+        havePreviousSample = 1
         next
       }
       {
@@ -310,16 +377,36 @@ evaluate_budgets() {
         rss = $2 + 0
         cpu = $3 + 0
         threads = $4 + 0
+        elapsed = $1 + 0
+        cpuTime = $7 + 0
+        diskReadBytes = $8 + 0
+        interruptWakeups = $9 + 0
+        idleWakeups = $10 + 0
         finalRSS = rss
+        finalElapsed = elapsed
+        finalCPUTime = cpuTime
+        finalDiskReadBytes = diskReadBytes
+        finalInterruptWakeups = interruptWakeups
+        finalIdleWakeups = idleWakeups
         measurementCount++
         if (threads - warmThreads > maxThreadDelta) maxThreadDelta = threads - warmThreads
         if ($6 == "sample") {
           sampleCount++
-          if (cpu >= cpuCap) cpuRun++; else cpuRun = 0
-          if (cpuRun >= cpuSamples) {
-            print "FAIL: sustained CPU " cpu "% for " cpuRun " samples" > "/dev/stderr"
-            failed = 1
+          if (havePreviousSample && elapsed > previousSampleElapsed) {
+            cpuRate = (cpuTime - previousSampleCPUTime) * 100 / ((elapsed - previousSampleElapsed) * 1000000000)
+            if (cpuRate >= cpuCap) cpuRun++; else cpuRun = 0
+            if (cpuRun >= cpuSamples) {
+              print "FAIL: sustained CPU " cpuRate "% for " cpuRun " samples" > "/dev/stderr"
+              failed = 1
+            }
           }
+          previousSampleElapsed = elapsed
+          previousSampleCPUTime = cpuTime
+          havePreviousSample = 1
+        } else if ($6 == "post_cycles") {
+          previousSampleElapsed = elapsed
+          previousSampleCPUTime = cpuTime
+          havePreviousSample = 1
         }
         if (!havePrevious || rss < previousRSS) {
           runStartRSS = rss
@@ -353,6 +440,17 @@ evaluate_budgets() {
         }
         if (!warmSeen || !measurementCount) exit 1
         finalDelta = finalRSS - warmRSS
+        diskReadDelta = finalDiskReadBytes - warmDiskReadBytes
+        interruptWakeupsDelta = finalInterruptWakeups - warmInterruptWakeups
+        idleWakeupsDelta = finalIdleWakeups - warmIdleWakeups
+        measurementDuration = finalElapsed - warmElapsed
+        if (measurementDuration <= 0) {
+          print "FAIL: post-warm measurement duration must be positive" > "/dev/stderr"
+          failed = 1
+        } else {
+          interruptWakeupsPerMinute = interruptWakeupsDelta * 60 / measurementDuration
+          idleWakeupsPerMinute = idleWakeupsDelta * 60 / measurementDuration
+        }
         if (finalDelta > rssCap) {
           print "FAIL: final RSS delta " finalDelta " KB exceeds " rssCap " KB" > "/dev/stderr"
           failed = 1
@@ -361,10 +459,121 @@ evaluate_budgets() {
           print "FAIL: thread delta " maxThreadDelta " exceeds " threadCap > "/dev/stderr"
           failed = 1
         }
+        if (diskReadDelta > diskReadCap) {
+          print "FAIL: disk read delta " diskReadDelta " bytes exceeds " diskReadCap > "/dev/stderr"
+          failed = 1
+        }
+        if (measurementDuration > 0 && interruptWakeupsPerMinute > interruptWakeupsPerMinuteCap) {
+          print "FAIL: interrupt wakeups " interruptWakeupsPerMinute "/minute exceeds " interruptWakeupsPerMinuteCap > "/dev/stderr"
+          failed = 1
+        }
+        if (measurementDuration > 0 && idleWakeupsPerMinute > idleWakeupsPerMinuteCap) {
+          print "FAIL: package-idle wakeups " idleWakeupsPerMinute "/minute exceeds " idleWakeupsPerMinuteCap > "/dev/stderr"
+          failed = 1
+        }
         if (failed) exit 1
-        print "PASS: final RSS delta=" finalDelta " KB, max thread delta=" maxThreadDelta > "/dev/stderr"
+        print "PASS: final RSS delta=" finalDelta " KB, max thread delta=" maxThreadDelta ", disk read delta=" diskReadDelta " bytes, interrupt wakeups/minute=" interruptWakeupsPerMinute ", idle wakeups/minute=" idleWakeupsPerMinute > "/dev/stderr"
       }
     ' "$samples_path"
+}
+
+summarize_samples() {
+  local samples_path="$1"
+
+  /usr/bin/awk -F, '
+    function isPositiveInteger(value) { return value ~ /^[0-9]+$/ && value + 0 > 0 }
+    function isNonnegativeInteger(value) { return value ~ /^[0-9]+$/ }
+    function isNonnegativeNumber(value) { return value ~ /^[0-9]+([.][0-9]+)?$/ }
+    function malformed(message) { print "FAIL: " message > "/dev/stderr"; failed = 1 }
+    NR == 1 {
+      if ($0 != "elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state,cpu_time_ns,disk_read_bytes,interrupt_wakeups,idle_wakeups") {
+        malformed("unexpected sample header")
+      }
+      next
+    }
+    {
+      if (NF != 10) { malformed("malformed sample row " NR); next }
+      if (!isNonnegativeInteger($1) || !isPositiveInteger($2) || !isNonnegativeNumber($3) || !isPositiveInteger($4) || $5 != 1 || !isNonnegativeInteger($7) || !isNonnegativeInteger($8) || !isNonnegativeInteger($9) || !isNonnegativeInteger($10)) {
+        malformed("invalid process sample at row " NR)
+        next
+      }
+      if ($6 != "warm" && $6 != "post_cycles" && $6 != "sample") { malformed("unknown sample state " $6); next }
+      if ($6 == "warm") {
+        if (warmSeen++) { malformed("duplicate warm baseline"); next }
+        warmElapsed = $1 + 0
+        warmRSS = $2 + 0
+        warmThreads = $4 + 0
+        warmCPUTime = $7 + 0
+        warmDiskReadBytes = $8 + 0
+        warmInterruptWakeups = $9 + 0
+        warmIdleWakeups = $10 + 0
+        next
+      }
+      if (!warmSeen) { malformed("sample recorded before warm baseline"); next }
+      finalElapsed = $1 + 0
+      finalRSS = $2 + 0
+      finalCPUTime = $7 + 0
+      finalDiskReadBytes = $8 + 0
+      finalInterruptWakeups = $9 + 0
+      finalIdleWakeups = $10 + 0
+      threadDelta = $4 + 0 - warmThreads
+      if (threadDelta > maxThreadDelta) maxThreadDelta = threadDelta
+      measurementCount++
+    }
+    END {
+      if (NR == 0) malformed("sample file is empty")
+      if (!warmSeen) malformed("missing warm baseline")
+      if (!measurementCount) malformed("missing post-warm samples")
+      duration = finalElapsed - warmElapsed
+      if (duration <= 0) malformed("post-warm measurement duration must be positive")
+      if (failed) exit 1
+      cpuDelta = finalCPUTime - warmCPUTime
+      diskDelta = finalDiskReadBytes - warmDiskReadBytes
+      interruptDelta = finalInterruptWakeups - warmInterruptWakeups
+      idleDelta = finalIdleWakeups - warmIdleWakeups
+      printf "rss_delta_kb\t%.0f\n", finalRSS - warmRSS
+      printf "thread_delta\t%.0f\n", maxThreadDelta
+      printf "cpu_time_delta_ns\t%.0f\n", cpuDelta
+      printf "cpu_rate_percent\t%.6f\n", cpuDelta * 100 / (duration * 1000000000)
+      printf "disk_read_delta_bytes\t%.0f\n", diskDelta
+      printf "interrupt_wakeups_delta\t%.0f\n", interruptDelta
+      printf "interrupt_wakeups_per_minute\t%.6f\n", interruptDelta * 60 / duration
+      printf "idle_wakeups_delta\t%.0f\n", idleDelta
+      printf "idle_wakeups_per_minute\t%.6f\n", idleDelta * 60 / duration
+    }
+  ' "$samples_path"
+}
+
+compare_summaries() {
+  local before_path="$1" after_path="$2" before_summary after_summary
+  [ -f "$before_path" ] || { echo "before sample file does not exist: $before_path" >&2; return 2; }
+  [ -f "$after_path" ] || { echo "after sample file does not exist: $after_path" >&2; return 2; }
+  before_summary="$(summarize_samples "$before_path")" || return 1
+  after_summary="$(summarize_samples "$after_path")" || return 1
+
+  /usr/bin/awk -F '\t' '
+    NR == FNR { before[$1] = $2; next }
+    { after[$1] = $2 }
+    END {
+      metricCount = split("rss_delta_kb thread_delta cpu_time_delta_ns cpu_rate_percent disk_read_delta_bytes interrupt_wakeups_delta interrupt_wakeups_per_minute idle_wakeups_delta idle_wakeups_per_minute", metrics, " ")
+      for (metricNumber = 1; metricNumber <= metricCount; metricNumber++) {
+        metric = metrics[metricNumber]
+        if (!(metric in before) || !(metric in after)) {
+          print "FAIL: missing " metric " in comparison input" > "/dev/stderr"
+          failed = 1
+          continue
+        }
+      }
+      if (failed) exit 1
+      print "metric,before,after,delta,ratio"
+      for (metricNumber = 1; metricNumber <= metricCount; metricNumber++) {
+        metric = metrics[metricNumber]
+        delta = after[metric] - before[metric]
+        ratio = before[metric] == 0 ? "undefined" : sprintf("%.6f", after[metric] / before[metric])
+        printf "%s,%s,%s,%.6f,%s\n", metric, before[metric], after[metric], delta, ratio
+      }
+    }
+  ' <(printf '%s\n' "$before_summary") <(printf '%s\n' "$after_summary")
 }
 
 case "${1:-}" in
@@ -383,11 +592,24 @@ case "${1:-}" in
     thread_count_for_pid "$2"
     exit "$?"
     ;;
+  --probe-process)
+    [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+    is_positive_integer "$2" || { echo "PID must be a positive integer" >&2; exit 2; }
+    build_probe
+    printf 'cpu_time_ns,disk_read_bytes,interrupt_wakeups,idle_wakeups\n'
+    probe_process "$2"
+    exit "$?"
+    ;;
   --evaluate-samples)
     [ "$#" -eq 2 ] || { usage >&2; exit 2; }
     validate_configuration
     [ -f "$2" ] || { echo "sample file does not exist: $2" >&2; exit 2; }
     evaluate_budgets "$2"
+    exit "$?"
+    ;;
+  --compare-summaries)
+    [ "$#" -eq 3 ] || { usage >&2; exit 2; }
+    compare_summaries "$2" "$3"
     exit "$?"
     ;;
   "")
@@ -408,6 +630,7 @@ else
 fi
 
 run_internal_invariant_tests
+build_probe
 echo "building and launching unsigned Debug app" >&2
 TINYBUDDY_BUILD_CONFIGURATION=Debug TINYBUDDY_SIGNING_MODE=unsigned \
   "$ROOT_DIR/script/build_and_run.sh" >&2
@@ -416,7 +639,7 @@ wait_for_app_pid
 START_SECONDS="$SECONDS"
 echo "warming PID $APP_PID for ${WARMUP_SECONDS}s" >&2
 /bin/sleep "$WARMUP_SECONDS"
-printf 'elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state\n' | /usr/bin/tee "$SAMPLES_FILE"
+printf '%s\n' "$SAMPLE_HEADER" | /usr/bin/tee "$SAMPLES_FILE"
 record_sample warm
 run_lifecycle_cycles
 record_sample post_cycles

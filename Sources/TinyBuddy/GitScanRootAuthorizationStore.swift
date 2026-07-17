@@ -2,9 +2,10 @@ import AppKit
 import Darwin
 import Foundation
 
-struct ScopedGitScanRoot {
+final class ScopedGitScanRoot {
     let url: URL
-    private let stopAccessingAction: () -> Void
+    private let lock = NSLock()
+    private var stopAccessingAction: (() -> Void)?
 
     init(url: URL, stopAccessingAction: @escaping () -> Void = {}) {
         self.url = url
@@ -12,7 +13,16 @@ struct ScopedGitScanRoot {
     }
 
     func stopAccessing() {
-        stopAccessingAction()
+        let action: (() -> Void)?
+        lock.lock()
+        action = stopAccessingAction
+        stopAccessingAction = nil
+        lock.unlock()
+        action?()
+    }
+
+    deinit {
+        stopAccessing()
     }
 }
 
