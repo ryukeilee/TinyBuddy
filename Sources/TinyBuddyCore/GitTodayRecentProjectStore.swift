@@ -7,29 +7,52 @@ public final class GitTodayRecentProjectStore {
     }
 
     private let userDefaults: UserDefaults
-    private let calendar: Calendar
-    private let dateProvider: () -> Date
+    private let timeEnvironment: TinyBuddyTimeEnvironment
     private let sharedFallbacksEnabled: Bool
 
     public init(
         userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
-        calendar: Calendar = .current,
-        dateProvider: @escaping () -> Date = Date.init,
+        timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
         sharedFallbacksEnabled: Bool = true
     ) {
         self.userDefaults = userDefaults
-        self.calendar = calendar
-        self.dateProvider = dateProvider
+        self.timeEnvironment = timeEnvironment
         self.sharedFallbacksEnabled = sharedFallbacksEnabled
     }
 
+    public convenience init(
+        userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
+        calendar: Calendar,
+        dateProvider: @escaping () -> Date = Date.init,
+        sharedFallbacksEnabled: Bool = true
+    ) {
+        self.init(
+            userDefaults: userDefaults,
+            timeEnvironment: TinyBuddyTimeEnvironment(
+                calendar: calendar,
+                dateProvider: dateProvider
+            ),
+            sharedFallbacksEnabled: sharedFallbacksEnabled
+        )
+    }
+
     public func loadTodayProjectName() -> String? {
-        if let projectName = loadTodayProjectName(from: userDefaults) {
+        guard let context = timeEnvironment.capture() else {
+            return loadLastValidProjectName(from: userDefaults)
+        }
+        let expectedDayIdentifier = context.dayIdentifier
+
+        if let projectName = loadTodayProjectName(
+            from: userDefaults,
+            expectedDayIdentifier: expectedDayIdentifier
+        ) {
             return projectName
         }
 
         if sharedFallbacksEnabled,
-           let directProjectName = loadTodayProjectNameFromSharedPreferences() {
+           let directProjectName = loadTodayProjectNameFromSharedPreferences(
+            expectedDayIdentifier: expectedDayIdentifier
+           ) {
             return directProjectName
         }
 
@@ -37,11 +60,22 @@ public final class GitTodayRecentProjectStore {
             return nil
         }
 
-        return loadTodayProjectName(from: .standard)
+        return loadTodayProjectName(
+            from: .standard,
+            expectedDayIdentifier: expectedDayIdentifier
+        )
     }
 
     public func saveTodayProjectName(_ projectName: String?) {
-        userDefaults.set(todayIdentifier(), forKey: Key.dayIdentifier)
+        guard let context = timeEnvironment.capture() else {
+            return
+        }
+        if let storedDay = userDefaults.string(forKey: Key.dayIdentifier),
+           TinyBuddyTimeContext.isValidDayIdentifier(storedDay),
+           storedDay > context.dayIdentifier {
+            return
+        }
+        userDefaults.set(context.dayIdentifier, forKey: Key.dayIdentifier)
 
         let normalizedProjectName = projectName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -53,18 +87,15 @@ public final class GitTodayRecentProjectStore {
         }
     }
 
-    private func todayIdentifier() -> String {
-        let components = calendar.dateComponents([.year, .month, .day], from: dateProvider())
-        let year = components.year ?? 0
-        let month = components.month ?? 0
-        let day = components.day ?? 0
-        return String(format: "%04d-%02d-%02d", year, month, day)
-    }
-
-    private func loadTodayProjectName(from defaults: UserDefaults) -> String? {
+    private func loadTodayProjectName(
+        from defaults: UserDefaults,
+        expectedDayIdentifier: String
+    ) -> String? {
         defaults.synchronize()
 
-        guard defaults.string(forKey: Key.dayIdentifier) == todayIdentifier() else {
+        guard let storedDay = defaults.string(forKey: Key.dayIdentifier),
+              TinyBuddyTimeContext.isValidDayIdentifier(storedDay),
+              storedDay == expectedDayIdentifier else {
             return nil
         }
 
@@ -80,12 +111,16 @@ public final class GitTodayRecentProjectStore {
         return normalizedProjectName
     }
 
-    private func loadTodayProjectNameFromSharedPreferences() -> String? {
+    private func loadTodayProjectNameFromSharedPreferences(
+        expectedDayIdentifier: String
+    ) -> String? {
         guard let preferences = TinyBuddySharedData.loadAppGroupPreferencesDictionary() else {
             return nil
         }
 
-        guard (preferences[Key.dayIdentifier] as? String) == todayIdentifier() else {
+        guard let storedDay = preferences[Key.dayIdentifier] as? String,
+              TinyBuddyTimeContext.isValidDayIdentifier(storedDay),
+              storedDay == expectedDayIdentifier else {
             return nil
         }
 
@@ -99,5 +134,15 @@ public final class GitTodayRecentProjectStore {
         }
 
         return normalizedProjectName
+    }
+
+    private func loadLastValidProjectName(from defaults: UserDefaults) -> String? {
+        guard let storedDay = defaults.string(forKey: Key.dayIdentifier),
+              TinyBuddyTimeContext.isValidDayIdentifier(storedDay),
+              let projectName = defaults.string(forKey: Key.projectName) else {
+            return nil
+        }
+        let normalizedProjectName = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalizedProjectName.isEmpty ? nil : normalizedProjectName
     }
 }

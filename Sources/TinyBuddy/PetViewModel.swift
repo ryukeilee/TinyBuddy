@@ -63,12 +63,14 @@ final class PetViewModel: ObservableObject {
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let notificationCenter: NotificationCenter
+    private let timeEnvironment: TinyBuddyTimeEnvironment
     private let widgetReloader: () throws -> Void
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private var rebuiltSnapshotFaultIdentifiers: Set<String>
     private var latestRefreshStatus: GitActivityRefreshStatus?
     private var latestActivitySnapshot: GitTodayActivitySnapshot
     private var isGitActivityRefreshing = false
+    private var latestLifecycleGeneration = 0
     private var observers: [NSObjectProtocol] = []
 
     init(
@@ -78,6 +80,7 @@ final class PetViewModel: ObservableObject {
         combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
         notificationCenter: NotificationCenter = .default,
+        timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
         widgetReloader: @escaping () throws -> Void = {
             WidgetCenter.shared.reloadAllTimelines()
         },
@@ -135,6 +138,7 @@ final class PetViewModel: ObservableObject {
         self.combinedSnapshotStore = combinedSnapshotStore
         self.refreshStatusStore = refreshStatusStore
         self.notificationCenter = notificationCenter
+        self.timeEnvironment = timeEnvironment
         self.widgetReloader = widgetReloader
         self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
         self.rebuiltSnapshotFaultIdentifiers = rebuiltSnapshotFaultIdentifiers
@@ -144,7 +148,10 @@ final class PetViewModel: ObservableObject {
         self.stats = snapshot.stats
         self.hudPresentation = hudPresentation
         self.displayState = Self.makeDisplayState(from: hudPresentation)
-        self.refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
+        self.refreshDiagnostics = Self.makeRefreshDiagnostics(
+            from: latestRefreshStatus,
+            timeContext: timeEnvironment.capture()
+        )
         self.gitActivityExperience = GitActivityExperiencePresentation.make(
             refreshStatus: latestRefreshStatus,
             activitySnapshot: activitySnapshot,
@@ -165,13 +172,17 @@ final class PetViewModel: ObservableObject {
                 guard let self else {
                     return
                 }
+                guard self.acceptLifecycleNotification(notification) else {
+                    return
+                }
 
                 let status = notification.object as? GitActivityRefreshStatus
                     ?? self.refreshStatusStore.load()
                 self.isGitActivityRefreshing = false
                 self.latestRefreshStatus = status
                 self.refreshDiagnostics = Self.makeRefreshDiagnostics(
-                    from: status
+                    from: status,
+                    timeContext: self.timeEnvironment.capture()
                 )
                 self.reloadCommittedHUDState()
             }
@@ -180,9 +191,12 @@ final class PetViewModel: ObservableObject {
             forName: .gitActivityRefreshDidStart,
             object: nil,
             queue: nil
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self else {
+                    return
+                }
+                guard self.acceptLifecycleNotification(notification) else {
                     return
                 }
                 self.isGitActivityRefreshing = true
@@ -202,9 +216,26 @@ final class PetViewModel: ObservableObject {
             forName: .gitActivitySnapshotDidChange,
             object: nil,
             queue: nil
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             Task { @MainActor [weak self] in
-                self?.reloadCommittedHUDState()
+                guard let self,
+                      self.acceptLifecycleNotification(notification) else {
+                    return
+                }
+                self.reloadCommittedHUDState()
+            }
+        })
+        observers.append(notificationCenter.addObserver(
+            forName: .tinyBuddyTimeEnvironmentDidChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.acceptLifecycleNotification(notification) else {
+                    return
+                }
+                self.handleTimeEnvironmentDidChange()
             }
         })
         observers.append(notificationCenter.addObserver(
@@ -267,13 +298,57 @@ final class PetViewModel: ObservableObject {
     private func restorePersistedState() {
         isGitActivityRefreshing = false
         latestRefreshStatus = refreshStatusStore.load()
-        refreshDiagnostics = Self.makeRefreshDiagnostics(from: latestRefreshStatus)
+        refreshDiagnostics = Self.makeRefreshDiagnostics(
+            from: latestRefreshStatus,
+            timeContext: timeEnvironment.capture()
+        )
         if reloadHUDState() {
             reloadWidgetIfPossible()
         }
     }
 
-    private static func makeRefreshDiagnostics(from status: GitActivityRefreshStatus?) -> RefreshDiagnostics {
+    private func acceptLifecycleNotification(_ notification: Notification) -> Bool {
+        guard let generation = notification.userInfo?[TinyBuddyLifecycleNotification.generationKey]
+            as? Int else {
+            return true
+        }
+        guard generation >= latestLifecycleGeneration else {
+            return false
+        }
+        latestLifecycleGeneration = generation
+        return true
+    }
+
+    private func handleTimeEnvironmentDidChange() {
+        isGitActivityRefreshing = false
+        if let currentStatus = refreshStatusStore.load() {
+            latestRefreshStatus = currentStatus
+        }
+        refreshDiagnostics = Self.makeRefreshDiagnostics(
+            from: latestRefreshStatus,
+            timeContext: timeEnvironment.capture()
+        )
+
+        let fallbackSnapshot = store.loadSnapshot()
+        let combinedRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: fallbackSnapshot.stats.dayIdentifier
+        )
+        combinedRead.observation.map(sharedSnapshotDiagnosticRecorder.record)
+        if let combinedSnapshot = combinedRead.snapshot {
+            _ = applyHUDState(
+                snapshot: combinedSnapshot.snapshot,
+                activitySnapshot: combinedSnapshot.activitySnapshot
+            )
+        } else {
+            updateGitActivityExperience()
+        }
+        hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
+    }
+
+    private static func makeRefreshDiagnostics(
+        from status: GitActivityRefreshStatus?,
+        timeContext: TinyBuddyTimeContext?
+    ) -> RefreshDiagnostics {
         guard let status else {
             return RefreshDiagnostics(
                 badgeTitle: "未刷新",
@@ -291,7 +366,7 @@ final class PetViewModel: ObservableObject {
         return RefreshDiagnostics(
             badgeTitle: badgeTitle(for: status.outcome),
             summary: summaryTitle(for: status, diagnosticReason: diagnosticReason),
-            detail: Self.refreshDateFormatter.string(from: status.refreshedAt),
+            detail: refreshDateFormatter(timeContext: timeContext).string(from: status.refreshedAt),
             reason: localizedReason(for: diagnosticReason, fallbackReason: status.reason),
             outcome: status.outcome,
             actionTitle: actionTitle
@@ -700,15 +775,21 @@ final class PetViewModel: ObservableObject {
             return "屏幕唤醒"
         case .sessionDidBecomeActive:
             return "会话激活"
+        case .timeEnvironmentChanged:
+            return "时间环境变化"
         case .timer:
             return "定时器"
         }
     }
 
-    private static let refreshDateFormatter: DateFormatter = {
+    private static func refreshDateFormatter(
+        timeContext: TinyBuddyTimeContext?
+    ) -> DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeContext?.timeZone ?? TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "MM-dd HH:mm:ss"
         return formatter
-    }()
+    }
 }

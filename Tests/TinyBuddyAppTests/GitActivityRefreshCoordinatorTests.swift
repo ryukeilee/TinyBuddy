@@ -1728,6 +1728,250 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertTrue(harness.diagnosticEventIdentifiers.isEmpty)
     }
 
+    func testCrossMidnightInvalidatesInFlightRefreshAndPublishesOnlyNewGeneration() {
+        let harness = makeHarness()
+        let firstRefreshStarted = expectation(description: "first refresh started")
+        let releaseFirstRefresh = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 9,
+                    commitCount: 9,
+                    recentProjectName: "OldDay"
+                )
+                firstRefreshStarted.fulfill()
+                releaseFirstRefresh.wait()
+            } else if runCount == 2 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 2,
+                    commitCount: 3,
+                    recentProjectName: "NewDay"
+                )
+            }
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRefreshStarted], timeout: 1.0)
+        harness.advanceCurrentDate(by: 12 * 60 * 60)
+        harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRefresh.signal()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertGreaterThanOrEqual(harness.scriptCancellationCount, 1)
+        XCTAssertEqual(harness.combinedSnapshot?.dayIdentifier, "2026-07-03")
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 3)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .timeEnvironmentChanged)
+    }
+
+    func testSameDayEnvironmentChangeAfterValidationPreventsOldGenerationCommit() {
+        let harness = makeHarness()
+        let oldCommitReached = expectation(description: "old generation reached commit boundary")
+        let releaseOldCommit = DispatchSemaphore(value: 0)
+        let newRefreshStarted = expectation(description: "new environment refresh started")
+        let releaseNewRefresh = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 9,
+                    commitCount: 9,
+                    recentProjectName: "OldDay"
+                )
+            } else if runCount == 2 {
+                newRefreshStarted.fulfill()
+                releaseNewRefresh.wait()
+                harness.setActivitySnapshot(
+                    focusBlockCount: 2,
+                    commitCount: 3,
+                    recentProjectName: "NewDay"
+                )
+            }
+        }
+        harness.setBeforeActivityCommitHook {
+            guard harness.scriptRunCount == 1 else {
+                return
+            }
+            oldCommitReached.fulfill()
+            releaseOldCommit.wait()
+        }
+
+        harness.coordinator.start()
+        wait(for: [oldCommitReached], timeout: 1.0)
+        harness.setLocale(Locale(identifier: "fr_FR"))
+        harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+
+        releaseOldCommit.signal()
+        wait(for: [newRefreshStarted], timeout: 1.0)
+        XCTAssertNil(harness.combinedSnapshot)
+
+        let expectedReloadCount = harness.widgetReloadCount + 1
+        harness.performAndWaitForWidgetReloadCount(expectedReloadCount) {
+            releaseNewRefresh.signal()
+        }
+
+        XCTAssertEqual(harness.combinedSnapshot?.dayIdentifier, "2026-07-02")
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 3)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.recentProjectName, "NewDay")
+    }
+
+    func testTimeScopeLeasePublicationFailurePreservesCommittedSnapshotAndSkipsReplacementScript() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else {
+                return
+            }
+            harness.setActivitySnapshot(
+                focusBlockCount: 4,
+                commitCount: 5,
+                recentProjectName: "Committed"
+            )
+        }
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.start()
+        }
+        harness.waitForNoRefresh()
+        let committed = harness.combinedSnapshot
+
+        harness.setTimeScopePublisherHook { _ in nil }
+        harness.setLocale(Locale(identifier: "fr_FR"))
+        harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.combinedSnapshot, committed)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+        XCTAssertEqual(
+            harness.lastRefreshStatus?.diagnostic?.reason,
+            .scriptExecutionFailed
+        )
+    }
+
+    func testClockRollbackDoesNotFreezeFailureBackoff() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                struct ScriptFailure: Error {}
+                throw ScriptFailure()
+            }
+            harness.setActivitySnapshot(
+                focusBlockCount: 1,
+                commitCount: 2,
+                recentProjectName: "Recovered"
+            )
+        }
+
+        harness.coordinator.handleDidBecomeActive()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+
+        harness.adjustWallClock(by: -60 * 60)
+        harness.advanceMonotonicTime(by: 300)
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.coordinator.handleDidWake()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 2)
+    }
+
+    func testRepeatedTimeEnvironmentInvalidationsCoalesceToOneReplacementRefresh() {
+        let harness = makeHarness()
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.start()
+        }
+        harness.waitForNoRefresh()
+
+        let secondRefreshStarted = expectation(description: "replacement refresh started")
+        let releaseSecondRefresh = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 2 {
+                secondRefreshStarted.fulfill()
+                releaseSecondRefresh.wait()
+            }
+        }
+        harness.advanceCurrentDate(by: 12 * 60 * 60)
+        harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+        wait(for: [secondRefreshStarted], timeout: 1.0)
+
+        for _ in 0..<8 {
+            harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+        }
+        releaseSecondRefresh.signal()
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+    }
+
+    func testSleepInvalidatesInFlightRefreshAndWakeStartsOneReplacement() {
+        let harness = makeHarness()
+        let firstRefreshStarted = expectation(description: "sleeping refresh started")
+        let releaseFirstRefresh = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 8,
+                    commitCount: 8,
+                    recentProjectName: "BeforeSleep"
+                )
+                firstRefreshStarted.fulfill()
+                releaseFirstRefresh.wait()
+            } else if runCount == 2 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 1,
+                    commitCount: 1,
+                    recentProjectName: "AfterWake"
+                )
+            }
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRefreshStarted], timeout: 1.0)
+        harness.coordinator.handleWillSleep()
+
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRefresh.signal()
+            harness.coordinator.handleDidBecomeActive()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertGreaterThanOrEqual(harness.scriptCancellationCount, 1)
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.recentProjectName, "AfterWake")
+    }
+
+    func testWestwardTimeZoneChangePreservesNewestCommittedDayInsteadOfPublishingRollback() throws {
+        let harness = makeHarness()
+        harness.adjustWallClock(by: -11 * 60 * 60)
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 4,
+                    commitCount: 5,
+                    recentProjectName: "UTC"
+                )
+            }
+        }
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.start()
+        }
+        harness.waitForNoRefresh()
+        let committed = try XCTUnwrap(harness.combinedSnapshot)
+
+        harness.setTimeZone(try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles")))
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.coordinator.handleTimeEnvironmentChanged(harness.currentTimeContext)
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.combinedSnapshot, committed)
+        XCTAssertEqual(harness.combinedSnapshot?.dayIdentifier, "2026-07-02")
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 5)
+    }
+
     private func makeHarness(
         authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")],
         authorizationIssue: GitScanRootAccessIssue? = nil,
@@ -1789,6 +2033,7 @@ private final class RefreshHarness {
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let activityDefaults: UserDefaults
     private let calendar: Calendar
+    private let timeEnvironment: TinyBuddyTimeEnvironment
     private let dailyStatsStore: DailyStatsStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
@@ -1811,10 +2056,20 @@ private final class RefreshHarness {
         self.activityDefaults = defaults
         let calendar = Self.makeCalendar()
         self.calendar = calendar
+        let timeEnvironment = TinyBuddyTimeEnvironment(capture: { [state] in
+            var sourceCalendar = Calendar(identifier: .gregorian)
+            sourceCalendar.timeZone = state.currentTimeZone
+            return TinyBuddyTimeContext(
+                now: state.currentDate,
+                timeZone: state.currentTimeZone,
+                locale: state.currentLocale,
+                sourceCalendar: sourceCalendar
+            )
+        })
+        self.timeEnvironment = timeEnvironment
         self.dailyStatsStore = DailyStatsStore(
             userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { [state] in state.currentDate }
+            timeEnvironment: timeEnvironment
         )
         self.combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
             userDefaults: defaults,
@@ -1836,19 +2091,16 @@ private final class RefreshHarness {
         self.sharedSnapshotDiagnosticRecorder = TinyBuddySharedSnapshotDiagnosticRecorder()
         self.refreshStatusStore = GitActivityRefreshStatusStore(
             userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { [state] in state.currentDate }
+            timeEnvironment: timeEnvironment
         )
         let focusBlockCountStore = GitTodayFocusBlockCountStore(
             userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { [state] in state.currentDate },
+            timeEnvironment: timeEnvironment,
             sharedFallbacksEnabled: false
         )
         let commitCountStore = GitTodayCommitCountStore(
             userDefaults: defaults,
-            calendar: calendar,
-            dateProvider: { [state] in state.currentDate },
+            timeEnvironment: timeEnvironment,
             sharedFallbacksEnabled: false
         )
         focusBlockCountStore.saveTodayCount(0)
@@ -1862,12 +2114,10 @@ private final class RefreshHarness {
             commitCountStore: commitCountStore,
             recentProjectStore: GitTodayRecentProjectStore(
                 userDefaults: defaults,
-                calendar: calendar,
-                dateProvider: { [state] in state.currentDate },
+                timeEnvironment: timeEnvironment,
                 sharedFallbacksEnabled: false
             ),
-            calendar: calendar,
-            dateProvider: { [state] in state.currentDate }
+            timeEnvironment: timeEnvironment
         )
 
         self.coordinator = GitActivityRefreshCoordinator(
@@ -1887,7 +2137,7 @@ private final class RefreshHarness {
                 state.onWidgetReload?(state.widgetReloadCount)
             },
             scriptURLProvider: { scriptURL },
-            scriptRunner: { [state] _, rootURLs in
+            scriptRunner: { [state] _, rootURLs, _, _ in
                 state.scriptRunCount += 1
                 state.capturedRootPaths = rootURLs.map(\.standardizedFileURL.path)
                 try state.scriptRunnerHook?(state.scriptRunCount)
@@ -1913,8 +2163,22 @@ private final class RefreshHarness {
                     issue: state.authorizationIssue
                 )
             },
+            timeEnvironment: timeEnvironment,
             dateProvider: { [state] in
                 state.currentDate
+            },
+            monotonicTimeProvider: { [state] in
+                state.monotonicTime
+            },
+            timeScopePublisher: { [state] token in
+                state.timeScopePublishCount += 1
+                if let hook = state.timeScopePublisherHook {
+                    return hook(token)
+                }
+                return URL(fileURLWithPath: "/tmp/tinybuddy-test-time-scope")
+            },
+            beforeActivityCommit: { [state] in
+                state.beforeActivityCommitHook?()
             },
             workspaceNotificationCenter: workspaceNotificationCenter,
             statusNotificationCenter: statusNotificationCenter,
@@ -1954,7 +2218,8 @@ private final class RefreshHarness {
     var stopAccessCount: Int { state.stopAccessCount }
     var scriptCancellationCount: Int { state.scriptCancellationCount }
     var currentDate: Date { state.currentDate }
-    var currentDayIdentifier: String { Self.dayIdentifier(for: currentDate, calendar: calendar) }
+    var currentDayIdentifier: String { currentTimeContext.dayIdentifier }
+    var currentTimeContext: TinyBuddyTimeContext { timeEnvironment.capture()! }
     var lastRefreshStatus: GitActivityRefreshStatus? { refreshStatusStore.load() }
     var statusHistory: [GitActivityRefreshStatus] { state.statusHistory }
     var diagnosticEventIdentifiers: [String] { state.diagnosticEventIdentifiers }
@@ -1976,6 +2241,23 @@ private final class RefreshHarness {
 
     func advanceCurrentDate(by seconds: TimeInterval) {
         state.currentDate = state.currentDate.addingTimeInterval(seconds)
+        state.monotonicTime += max(0, seconds)
+    }
+
+    func adjustWallClock(by seconds: TimeInterval) {
+        state.currentDate = state.currentDate.addingTimeInterval(seconds)
+    }
+
+    func advanceMonotonicTime(by seconds: TimeInterval) {
+        state.monotonicTime += max(0, seconds)
+    }
+
+    func setTimeZone(_ timeZone: TimeZone) {
+        state.currentTimeZone = timeZone
+    }
+
+    func setLocale(_ locale: Locale) {
+        state.currentLocale = locale
     }
 
     func postWorkspaceNotification(named name: Notification.Name) {
@@ -1988,6 +2270,14 @@ private final class RefreshHarness {
 
     func setScriptCancellationHook(_ hook: @escaping () -> Void) {
         state.scriptCancellationHook = hook
+    }
+
+    func setBeforeActivityCommitHook(_ hook: @escaping () -> Void) {
+        state.beforeActivityCommitHook = hook
+    }
+
+    func setTimeScopePublisherHook(_ hook: @escaping (String) -> URL?) {
+        state.timeScopePublisherHook = hook
     }
 
     func setWidgetReloaderHook(_ hook: @escaping () throws -> Void) {
@@ -2068,20 +2358,17 @@ private final class RefreshHarness {
     ) {
         let focusStore = GitTodayFocusBlockCountStore(
             userDefaults: activityDefaults,
-            calendar: calendar,
-            dateProvider: { self.currentDate },
+            timeEnvironment: timeEnvironment,
             sharedFallbacksEnabled: false
         )
         let commitStore = GitTodayCommitCountStore(
             userDefaults: activityDefaults,
-            calendar: calendar,
-            dateProvider: { self.currentDate },
+            timeEnvironment: timeEnvironment,
             sharedFallbacksEnabled: false
         )
         let recentProjectStore = GitTodayRecentProjectStore(
             userDefaults: activityDefaults,
-            calendar: calendar,
-            dateProvider: { self.currentDate },
+            timeEnvironment: timeEnvironment,
             sharedFallbacksEnabled: false
         )
 
@@ -2205,6 +2492,9 @@ private final class RefreshHarness {
 
     private final class State {
         var currentDate: Date
+        var monotonicTime: TimeInterval = 1_000
+        var currentTimeZone = TimeZone(secondsFromGMT: 0)!
+        var currentLocale = Locale(identifier: "en_US_POSIX")
         var authorizedRoots: [URL] = []
         var authorizationIssue: GitScanRootAccessIssue?
         var capturedRootPaths: [String] = []
@@ -2218,6 +2508,9 @@ private final class RefreshHarness {
         var onScriptRun: ((Int) -> Void)?
         var scriptRunnerHook: ((Int) throws -> Void)?
         var scriptCancellationHook: (() -> Void)?
+        var beforeActivityCommitHook: (() -> Void)?
+        var timeScopePublisherHook: ((String) -> URL?)?
+        var timeScopePublishCount = 0
         var widgetReloaderHook: (() throws -> Void)?
         var scriptMetrics: GitRefreshScriptMetrics?
         var validatedSnapshotReadCount = 0

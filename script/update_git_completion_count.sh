@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+LC_ALL=C
+export LC_ALL
+
 APP_GROUP_ID="group.com.ryukeili.TinyBuddy"
 USER_HOME="${TINYBUDDY_USER_HOME:-$HOME}"
 APP_GROUP_CONTAINER="${TINYBUDDY_APP_GROUP_CONTAINER:-$USER_HOME/Library/Group Containers/$APP_GROUP_ID}"
@@ -14,7 +17,8 @@ RECENT_PROJECT_DAY_KEY="tinybuddy.gitTodayRecentProject.dayIdentifier"
 RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
 TRUSTED_SNAPSHOT_KEY="tinybuddy.gitTodayActivity.trustedSnapshot"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
-TODAY="${TINYBUDDY_TODAY:-$(date +%F)}"
+TODAY="${TINYBUDDY_TODAY:-$(/bin/date +%F)}"
+TIME_SCOPE_IDENTIFIER="${TINYBUDDY_TIME_SCOPE_IDENTIFIER:-${TZ:-system-default}}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 # Signed-runtime dependency boundary: Bash 3.2 plus date, find, stat, mktemp,
 # awk, sed, sort, cmp, cp, mv, rm, mkdir, rmdir, test, sleep, tr, paste, basename,
@@ -30,6 +34,7 @@ REPOSITORY_CACHE_MAX_AGE_SECONDS="${TINYBUDDY_GIT_REPOSITORY_CACHE_MAX_AGE_SECON
 SCAN_ROOT_TIMEOUT_SECONDS="${TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS:-15}"
 REPOSITORY_READ_TIMEOUT_SECONDS="${TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS:-5}"
 REPOSITORY_PARSE_TIMEOUT_SECONDS="${TINYBUDDY_GIT_REPOSITORY_PARSE_TIMEOUT_SECONDS:-30}"
+SNAPSHOT_WRITE_LOCK_TIMEOUT_SECONDS="${TINYBUDDY_SNAPSHOT_WRITE_LOCK_TIMEOUT_SECONDS:-120}"
 CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-repository-cache}"
 CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
 CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
@@ -60,6 +65,15 @@ normalize_nonnegative_int64() {
   printf '%s\n' "$value"
 }
 
+if [ -n "${TINYBUDDY_REFRESH_EPOCH:-}" ]; then
+  if ! REFRESH_EPOCH="$(normalize_nonnegative_int64 "$TINYBUDDY_REFRESH_EPOCH")"; then
+    echo "TinyBuddy refresh script: explicit refresh epoch is invalid" >&2
+    exit 64
+  fi
+else
+  REFRESH_EPOCH="$(/bin/date +%s)"
+fi
+
 if [ -n "${TINYBUDDY_REFRESH_REVISION:-}" ]; then
   if ! REFRESH_REVISION="$(normalize_nonnegative_int64 "$TINYBUDDY_REFRESH_REVISION")"; then
     echo "TinyBuddy refresh script: explicit refresh revision is invalid" >&2
@@ -67,7 +81,7 @@ if [ -n "${TINYBUDDY_REFRESH_REVISION:-}" ]; then
   fi
   REFRESH_REVISION_IS_EXPLICIT=1
 else
-  REFRESH_REVISION="$(/bin/date +%s)"
+  REFRESH_REVISION="$REFRESH_EPOCH"
   REFRESH_REVISION_IS_EXPLICIT=0
 fi
 SNAPSHOT_WRITE_LOCK="$APP_GROUP_PREFERENCES_DIR/.tinybuddy-git-snapshot-write.lock"
@@ -112,6 +126,7 @@ recovery_has_missing_reflog=0
 snapshot_write_lock_acquired=0
 trusted_snapshot_stale=0
 refresh_outcome_override=""
+future_reflog_event_detected=0
 
 record_invalid_repository() {
   local diagnostic="$1"
@@ -597,13 +612,20 @@ append_reflog_events_for_today() {
 
   while IFS=$'\t' read -r kind old_object_id new_object_id epoch actor_is_automated message; do
     [ "$SECONDS" -lt "$parse_deadline" ] || return 124
+    if ! epoch="$(normalize_nonnegative_int64 "$epoch")"; then
+      continue
+    fi
+    if [ "$epoch" -gt "$REFRESH_EPOCH" ]; then
+      future_reflog_event_detected=1
+      continue
+    fi
     day_identifier="$(/bin/date -r "$epoch" +%Y-%m-%d 2>/dev/null)" || continue
     [ "$day_identifier" = "$TODAY" ] || continue
     local_hour="$(/bin/date -r "$epoch" +%H 2>/dev/null)" || continue
     local_minute="$(/bin/date -r "$epoch" +%M 2>/dev/null)" || continue
     block_minute=0
     [ "$local_minute" -ge 30 ] && block_minute=30
-    focus_block="$(printf '%sT%s:%02d' "$day_identifier" "$local_hour" "$block_minute")"
+    focus_block=$((epoch / 1800))
     activity_subject="${message#*: }"
     message_fingerprint="$(printf '%s' "$activity_subject" | /usr/bin/cksum)"
     message_fingerprint="${message_fingerprint%% *}"
@@ -1078,6 +1100,7 @@ cached_reflog_events_match() {
     -v git_dir="$git_dir" \
     -v reflog_path="$reflog_path" \
     -v today="$TODAY" \
+    -v time_scope="$TIME_SCOPE_IDENTIFIER" \
     -v reflog_mtime="$reflog_mtime" \
     -v empty="$EMPTY_CACHE_VALUE" '
       BEGIN { valid = 1 }
@@ -1098,30 +1121,31 @@ cached_reflog_events_match() {
           length(digits) == 12 && digits !~ /[^0-9]/
       }
 
-      $1 == "v2" &&
+      $1 == "v3" &&
       $2 == repository_identity &&
       $4 == git_dir &&
       $5 == reflog_path &&
       $6 == today &&
-      $7 == reflog_mtime {
+      $7 == time_scope &&
+      $8 == reflog_mtime {
         found = 1
-        if (NF != 14) {
+        if (NF != 15) {
           valid = 0
-        } else if ($8 == empty) {
+        } else if ($9 == empty) {
           empty_count++
-          if ($9 != empty || $10 != empty || $11 != empty || $12 != empty || $13 != empty || $14 != empty) {
+          if ($10 != empty || $11 != empty || $12 != empty || $13 != empty || $14 != empty || $15 != empty) {
             valid = 0
           }
         } else {
           event_count++
-          if (!is_unsigned($8) ||
-                   !is_object_id($9) ||
+          if (!is_unsigned($9) ||
                    !is_object_id($10) ||
-                   ($11 != "commit" && $11 != "amend" && $11 != "merge" &&
-                    $11 != "rewriteStart" && $11 != "rewrite" && $11 != "rewriteFinish") ||
-                   !is_unsigned($12) ||
-                   !is_focus_block($13) ||
-                   ($14 != "0" && $14 != "1")) {
+                   !is_object_id($11) ||
+                   ($12 != "commit" && $12 != "amend" && $12 != "merge" &&
+                    $12 != "rewriteStart" && $12 != "rewrite" && $12 != "rewriteFinish") ||
+                   !is_unsigned($13) ||
+                   !is_unsigned($14) ||
+                   ($15 != "0" && $15 != "1")) {
             valid = 0
           }
         }
@@ -1143,11 +1167,15 @@ cached_reflog_entry_exists() {
   awk -F '\t' \
     -v repository_identity="$repository_identity" \
     -v git_dir="$git_dir" \
-    -v reflog_path="$reflog_path" '
-      $1 == "v2" &&
+    -v reflog_path="$reflog_path" \
+    -v today="$TODAY" \
+    -v time_scope="$TIME_SCOPE_IDENTIFIER" '
+      $1 == "v3" &&
       $2 == repository_identity &&
       $4 == git_dir &&
-      $5 == reflog_path {
+      $5 == reflog_path &&
+      $6 == today &&
+      $7 == time_scope {
         found = 1
         exit
       }
@@ -1167,6 +1195,7 @@ append_cached_reflog_events() {
   local cached_git_dir
   local cached_reflog_path
   local cached_day
+  local cached_time_scope
   local cached_mtime
   local epoch
   local old_object_id
@@ -1181,19 +1210,29 @@ append_cached_reflog_events() {
     -v git_dir="$git_dir" \
     -v reflog_path="$reflog_path" \
     -v today="$TODAY" \
+    -v time_scope="$TIME_SCOPE_IDENTIFIER" \
     -v reflog_mtime="$reflog_mtime" '
-      $1 == "v2" &&
+      $1 == "v3" &&
       $2 == repository_identity &&
       $4 == git_dir &&
       $5 == reflog_path &&
       $6 == today &&
-      $7 == reflog_mtime
+      $7 == time_scope &&
+      $8 == reflog_mtime
     ' "$repo_stats_cache_file" > "$repo_reflog_file"
 
   : > "$repo_activity_events_file"
 
-  while IFS=$'\t' read -r schema cached_identity cached_display_name cached_git_dir cached_reflog_path cached_day cached_mtime epoch old_object_id new_object_id kind message_fingerprint focus_block actor_is_automated; do
+  while IFS=$'\t' read -r schema cached_identity cached_display_name cached_git_dir cached_reflog_path cached_day cached_time_scope cached_mtime epoch old_object_id new_object_id kind message_fingerprint focus_block actor_is_automated; do
     [ "$epoch" = "$EMPTY_CACHE_VALUE" ] && continue
+    if ! epoch="$(normalize_nonnegative_int64 "$epoch")"; then
+      future_reflog_event_detected=1
+      continue
+    fi
+    if [ "$epoch" -gt "$REFRESH_EPOCH" ]; then
+      future_reflog_event_detected=1
+      continue
+    fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" >> "$repo_activity_events_file"
   done < "$repo_reflog_file"
@@ -1217,13 +1256,15 @@ retain_last_valid_cached_reflog_events() {
     -v repository_identity="$repository_identity" \
     -v git_dir="$git_dir" \
     -v reflog_path="$reflog_path" \
-    -v today="$TODAY" '
-      $1 == "v2" &&
+    -v today="$TODAY" \
+    -v time_scope="$TIME_SCOPE_IDENTIFIER" '
+      $1 == "v3" &&
       $2 == repository_identity &&
       $4 == git_dir &&
       $5 == reflog_path &&
-      $6 == today {
-        print $7
+      $6 == today &&
+      $7 == time_scope {
+        print $8
         exit
       }
     ' "$repo_stats_cache_file")"
@@ -1253,15 +1294,15 @@ write_reflog_events_to_cache() {
   local actor_is_automated
 
   if [ ! -s "$repo_activity_events_file" ]; then
-    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$TODAY" "$reflog_mtime" \
+    printf 'v3\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$TODAY" "$TIME_SCOPE_IDENTIFIER" "$reflog_mtime" \
       "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" "$EMPTY_CACHE_VALUE" >> "$new_repo_stats_file"
     return
   fi
 
   while IFS=$'\t' read -r epoch old_object_id new_object_id kind message_fingerprint focus_block actor_is_automated; do
-    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$TODAY" "$reflog_mtime" \
+    printf 'v3\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$TODAY" "$TIME_SCOPE_IDENTIFIER" "$reflog_mtime" \
       "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" >> "$new_repo_stats_file"
   done < "$repo_activity_events_file"
 }
@@ -1596,6 +1637,7 @@ write_plist_integer_if_changed() {
 
 acquire_snapshot_write_lock() {
   local attempt=0
+  local deadline=$((SECONDS + SNAPSHOT_WRITE_LOCK_TIMEOUT_SECONDS))
   local owner_name=""
   local owner_path=""
   local owner_pid=""
@@ -1635,7 +1677,7 @@ acquire_snapshot_write_lock() {
           ;;
       esac
     fi
-    if [ "$attempt" -ge 200 ]; then
+    if [ "$SECONDS" -ge "$deadline" ]; then
       log_error "timed out waiting for shared snapshot write lock"
       return 1
     fi
@@ -1649,6 +1691,19 @@ acquire_snapshot_write_lock() {
   snapshot_write_lock_acquired=1
 }
 
+time_scope_token_is_current() {
+  local observed_token
+
+  if [ -z "${TINYBUDDY_TIME_SCOPE_FILE:-}" ] && [ -z "${TINYBUDDY_TIME_SCOPE_TOKEN:-}" ]; then
+    return 0
+  fi
+  if [ -z "${TINYBUDDY_TIME_SCOPE_FILE:-}" ] || [ -z "${TINYBUDDY_TIME_SCOPE_TOKEN:-}" ]; then
+    return 1
+  fi
+  observed_token="$(sed -n '1p' "$TINYBUDDY_TIME_SCOPE_FILE" 2>/dev/null)" || return 1
+  [ "$observed_token" = "$TINYBUDDY_TIME_SCOPE_TOKEN" ]
+}
+
 write_trusted_snapshot_if_newer() {
   local encoded_project_name
   local current_snapshot=""
@@ -1658,7 +1713,11 @@ write_trusted_snapshot_if_newer() {
   local proposed_payload
 
   encoded_project_name="$(printf '%s' "$recent_project_name" | /usr/bin/base64 | tr -d '\n')"
-  proposed_payload="$TODAY"$'\t'"$focus_block_count"$'\t'"$total_count"$'\t'"$encoded_project_name"
+  if [ -n "${TINYBUDDY_TIME_SCOPE_TOKEN:-}" ]; then
+    proposed_payload="$TODAY"$'\t'"$TIME_SCOPE_IDENTIFIER"$'\t'"$TINYBUDDY_TIME_SCOPE_TOKEN"$'\t'"$focus_block_count"$'\t'"$total_count"$'\t'"$encoded_project_name"
+  else
+    proposed_payload="$TODAY"$'\t'"$TIME_SCOPE_IDENTIFIER"$'\t'"$focus_block_count"$'\t'"$total_count"$'\t'"$encoded_project_name"
+  fi
 
   if current_snapshot="$(read_plist_value "$TRUSTED_SNAPSHOT_KEY")"; then
     current_revision="${current_snapshot%%$'\t'*}"
@@ -1767,6 +1826,71 @@ if [ "$SCAN_ROOT_TIMEOUT_SECONDS" -lt 1 ] || [ "$SCAN_ROOT_TIMEOUT_SECONDS" -gt 
   exit 64
 fi
 
+case "$TODAY" in
+  ????-??-??)
+    case "${TODAY:0:4}${TODAY:5:2}${TODAY:8:2}" in
+      *[!0-9]*)
+        log_error "today identifier is invalid"
+        refresh_outcome_override="failed"
+        emit_refresh_metrics
+        exit 64
+        ;;
+    esac
+    ;;
+  *)
+    log_error "today identifier is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+if [ "$(/bin/date -j -f '%Y-%m-%d' "$TODAY" '+%Y-%m-%d' 2>/dev/null || true)" != "$TODAY" ]; then
+  log_error "today identifier is invalid"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
+fi
+
+case "$TIME_SCOPE_IDENTIFIER" in
+  ""|*[!A-Za-z0-9._+/:=-]*)
+    log_error "time scope identifier is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+case "$SNAPSHOT_WRITE_LOCK_TIMEOUT_SECONDS" in
+  ""|*[!0-9]*)
+    log_error "snapshot write lock timeout is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+if [ "$SNAPSHOT_WRITE_LOCK_TIMEOUT_SECONDS" -lt 1 ] || [ "$SNAPSHOT_WRITE_LOCK_TIMEOUT_SECONDS" -gt 600 ]; then
+  log_error "snapshot write lock timeout is outside the supported range"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
+fi
+if { [ -n "${TINYBUDDY_TIME_SCOPE_FILE:-}" ] && [ -z "${TINYBUDDY_TIME_SCOPE_TOKEN:-}" ]; } ||
+   { [ -z "${TINYBUDDY_TIME_SCOPE_FILE:-}" ] && [ -n "${TINYBUDDY_TIME_SCOPE_TOKEN:-}" ]; }; then
+  log_error "time scope file and token must be supplied together"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
+fi
+if [ -n "${TINYBUDDY_TIME_SCOPE_TOKEN:-}" ]; then
+  case "$TINYBUDDY_TIME_SCOPE_TOKEN" in
+    *[!A-Za-z0-9_-]*)
+      log_error "time scope token is invalid"
+      refresh_outcome_override="failed"
+      emit_refresh_metrics
+      exit 64
+      ;;
+  esac
+fi
+
 # Avoid here-strings because the signed sandboxed app can reject bash's
 # implicit temporary-file creation, leaving the authorized root list empty.
 printf '%s' "$SCAN_ROOTS" | while IFS= read -r scan_root || [ -n "$scan_root" ]; do
@@ -1799,6 +1923,12 @@ if [ ! -s "$scan_roots_file" ]; then
   emit_refresh_metrics
   exit 0
 fi
+
+# A refresh must be single-flight across cache construction and publication.
+# Serializing only the final plist write allowed an older scan to receive a
+# newer revision and overwrite a more recent scan's payload.
+/bin/mkdir -p "$APP_GROUP_PREFERENCES_DIR"
+acquire_snapshot_write_lock
 
 had_cached_repository_list=0
 if [ -s "$CACHE_REPO_LIST_FILE" ]; then
@@ -1892,17 +2022,27 @@ if [ "$failed_reflog_repo_count" -gt 0 ] && [ "$successful_reflog_repo_count" -e
   exit 1
 fi
 
+if [ "$future_reflog_event_detected" -eq 1 ]; then
+  log_error "future git reflog activity detected; preserving previous shared data"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 1
+fi
+
 if [ "$failed_reflog_repo_count" -gt 0 ]; then
   emit_runtime_diagnostics_once
   log_error "partial refresh: one or more git reflogs failed; publishing other valid repositories"
 fi
 
-/bin/mkdir -p "$APP_GROUP_PREFERENCES_DIR"
+if ! time_scope_token_is_current; then
+  log_error "time scope changed during refresh; preserving previous shared data"
+  refresh_outcome_override="skipped"
+  emit_refresh_metrics
+  exit 0
+fi
 if [ ! -f "$APP_GROUP_PREFERENCES_PLIST" ]; then
   /usr/bin/plutil -create xml1 "$APP_GROUP_PREFERENCES_PLIST"
 fi
-
-acquire_snapshot_write_lock
 write_trusted_snapshot_if_newer
 if [ "$trusted_snapshot_stale" -eq 0 ]; then
   write_plist_string_if_changed "$DAY_KEY" "$TODAY"

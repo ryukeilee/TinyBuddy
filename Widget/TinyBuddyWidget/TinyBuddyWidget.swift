@@ -13,14 +13,26 @@ struct TinyBuddyEntry: TimelineEntry {
 }
 
 struct TinyBuddyProvider: TimelineProvider {
-    private let store = DailyStatsStore()
-    private let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(repairOnLoad: false)
-    private let refreshStatusStore = GitActivityRefreshStatusStore()
+    private let timeEnvironment: TinyBuddyTimeEnvironment
+    private let store: DailyStatsStore
+    private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
+    private let refreshStatusStore: GitActivityRefreshStatusStore
     private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
 
+    init() {
+        let timeEnvironment = TinyBuddyTimeEnvironment()
+        self.timeEnvironment = timeEnvironment
+        self.store = DailyStatsStore(timeEnvironment: timeEnvironment)
+        self.combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(repairOnLoad: false)
+        self.refreshStatusStore = GitActivityRefreshStatusStore(
+            timeEnvironment: timeEnvironment
+        )
+    }
+
     func placeholder(in context: Context) -> TinyBuddyEntry {
+        let now = timeEnvironment.capture()?.now ?? Date(timeIntervalSince1970: 0)
         return TinyBuddyEntry(
-            date: Date(),
+            date: now,
             snapshot: TinyBuddySnapshot(
                 status: .idle,
                 stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 0)
@@ -31,7 +43,7 @@ struct TinyBuddyProvider: TimelineProvider {
                 recentProjectName: "TinyBuddy"
             ),
             refreshStatus: GitActivityRefreshStatus(
-                refreshedAt: Date(),
+                refreshedAt: now,
                 trigger: .launch,
                 outcome: .succeeded,
                 metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
@@ -40,17 +52,19 @@ struct TinyBuddyProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TinyBuddyEntry) -> Void) {
-        completion(makeEntry(for: Date()))
+        completion(makeEntry(for: currentTimeContext()))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<TinyBuddyEntry>) -> Void) {
-        let entry = makeEntry(for: Date())
-        let nextRefresh = Calendar.current.date(byAdding: .minute, value: 15, to: entry.date) ?? entry.date.addingTimeInterval(900)
+        let timeContext = currentTimeContext()
+        let entry = makeEntry(for: timeContext)
+        let nextRefresh = timeContext.nextRefreshDate(maxInterval: 15 * 60)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 
-    private func makeEntry(for date: Date) -> TinyBuddyEntry {
-        let expectedDayIdentifier = Self.dayIdentifier(for: date)
+    private func makeEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
+        let date = timeContext.now
+        let expectedDayIdentifier = timeContext.dayIdentifier
         let refreshStatus = refreshStatusStore.load()
         let combinedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
@@ -65,6 +79,19 @@ struct TinyBuddyProvider: TimelineProvider {
                 date: date,
                 snapshot: combinedSnapshot.snapshot,
                 activitySnapshot: combinedSnapshot.activitySnapshot,
+                refreshStatus: refreshStatus
+            )
+        }
+
+        if let observation = combinedRead.observation,
+           observation.reason == .staleData,
+           let retainedSnapshot = combinedSnapshotStore.loadReadOnly(
+               minimumDayIdentifier: expectedDayIdentifier
+           ) {
+            return TinyBuddyEntry(
+                date: date,
+                snapshot: retainedSnapshot.snapshot,
+                activitySnapshot: retainedSnapshot.activitySnapshot,
                 refreshStatus: refreshStatus
             )
         }
@@ -102,14 +129,19 @@ struct TinyBuddyProvider: TimelineProvider {
         )
     }
 
-    private static func dayIdentifier(for date: Date) -> String {
-        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
-        return String(
-            format: "%04d-%02d-%02d",
-            components.year ?? 0,
-            components.month ?? 0,
-            components.day ?? 0
-        )
+    private func currentTimeContext() -> TinyBuddyTimeContext {
+        if let context = timeEnvironment.capture() {
+            return context
+        }
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return TinyBuddyTimeContext(
+            now: Date(timeIntervalSince1970: 0),
+            timeZone: timeZone,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: calendar
+        )!
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TinyBuddyCore
 import WidgetKit
 
 private let tinyBuddyHUDWindowIdentifier = NSUserInterfaceItemIdentifier("TinyBuddy.HUDWindow")
@@ -10,7 +11,7 @@ struct TinyBuddyApp: App {
 
     var body: some Scene {
         WindowGroup {
-            PetView()
+            PetView(viewModel: appDelegate.petViewModel)
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
@@ -27,10 +28,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let onboardingStore = TinyBuddyOnboardingStore()
     private let gitScanRootAuthorizationStore = GitScanRootAuthorizationStore()
     private let notificationCenter = NotificationCenter.default
+    private let timeEnvironment = TinyBuddyTimeEnvironment()
     private var authorizationCommandObservers: [NSObjectProtocol] = []
-    private lazy var gitActivityRefreshCoordinator = GitActivityRefreshCoordinator(
-        gitScanRootStore: gitScanRootAuthorizationStore
+    private lazy var dailyStatsStore = DailyStatsStore(timeEnvironment: timeEnvironment)
+    private lazy var activityStore = GitTodayActivityStore(timeEnvironment: timeEnvironment)
+    private lazy var refreshStatusStore = GitActivityRefreshStatusStore(
+        timeEnvironment: timeEnvironment
     )
+    private lazy var combinedSnapshotStore = dailyStatsStore.makeCombinedSnapshotStore()
+    lazy var petViewModel = PetViewModel(
+        onboardingStore: onboardingStore,
+        store: dailyStatsStore,
+        activityStore: activityStore,
+        combinedSnapshotStore: combinedSnapshotStore,
+        refreshStatusStore: refreshStatusStore,
+        notificationCenter: notificationCenter,
+        timeEnvironment: timeEnvironment
+    )
+    private lazy var gitActivityRefreshCoordinator = GitActivityRefreshCoordinator(
+        activityStore: activityStore,
+        dailyStatsStore: dailyStatsStore,
+        combinedSnapshotStore: combinedSnapshotStore,
+        refreshStatusStore: refreshStatusStore,
+        gitScanRootStore: gitScanRootAuthorizationStore,
+        timeEnvironment: timeEnvironment
+    )
+    private lazy var timeEnvironmentChangeMonitor = TimeEnvironmentChangeMonitor<TinyBuddyTimeContext>(
+        notificationCenter: notificationCenter,
+        capture: { [timeEnvironment] in
+            timeEnvironment.capture()
+        }
+    ) { [weak self] event in
+        guard let self else {
+            return
+        }
+        switch event {
+        case .environmentChanged(let context):
+            self.gitActivityRefreshCoordinator.handleTimeEnvironmentChanged(context)
+        case .willSleep:
+            self.gitActivityRefreshCoordinator.handleWillSleep()
+        }
+    }
     private lazy var gitScanRootAuthorizationController = GitScanRootAuthorizationController(
         store: gitScanRootAuthorizationStore,
         onboardingStore: onboardingStore
@@ -40,12 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
+        timeEnvironmentChangeMonitor.start()
         gitActivityRefreshCoordinator.start(isApplicationActive: NSApp.isActive)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()
+        timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
         HUDWindowPositionController.shared.stop()
     }

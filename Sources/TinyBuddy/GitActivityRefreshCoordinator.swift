@@ -10,6 +10,11 @@ extension Notification.Name {
     static let gitActivityRefreshRequested = Notification.Name("TinyBuddy.gitActivityRefreshRequested")
     static let gitActivitySnapshotDidChange = Notification.Name("TinyBuddy.gitActivitySnapshotDidChange")
     static let gitScanRootAuthorizationRequested = Notification.Name("TinyBuddy.gitScanRootAuthorizationRequested")
+    static let tinyBuddyTimeEnvironmentDidChange = Notification.Name("TinyBuddy.timeEnvironmentDidChange")
+}
+
+enum TinyBuddyLifecycleNotification {
+    static let generationKey = "TinyBuddy.lifecycleGeneration"
 }
 
 enum GitRefreshScriptOutcome: String, Equatable {
@@ -59,6 +64,11 @@ struct GitRefreshScriptResult {
     let standardOutput: String
     let standardError: String
     let metrics: GitRefreshScriptMetrics?
+}
+
+struct GitRefreshTimeScopeLease: Equatable {
+    let token: String
+    let fileURL: URL?
 }
 
 struct GitRefreshScriptResultParser {
@@ -167,10 +177,17 @@ private struct GitRefreshScriptExecutionError: LocalizedError {
 }
 
 final class GitActivityRefreshCoordinator {
-    typealias ScriptRunner = (URL, [URL]) throws -> GitRefreshScriptResult
+    typealias ScriptRunner = (
+        URL,
+        [URL],
+        TinyBuddyTimeContext,
+        GitRefreshTimeScopeLease
+    ) throws -> GitRefreshScriptResult
     typealias ScriptURLProvider = () -> URL?
     typealias AuthorizedRootsProvider = () -> GitScanRootAccessResult
     typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
+    typealias TimeScopePublisher = (String) -> URL?
+    typealias ActivityCommitHook = () -> Void
 
     private struct PublishedWidgetActivity: Equatable {
         let focusBlockCount: Int
@@ -201,24 +218,37 @@ final class GitActivityRefreshCoordinator {
     private let cancelScript: () -> Void
     private let scriptURLProvider: ScriptURLProvider
     private let authorizedRootsProvider: AuthorizedRootsProvider
-    private let dateProvider: () -> Date
+    private let timeEnvironment: TinyBuddyTimeEnvironment
+    private let monotonicTimeProvider: () -> TimeInterval
+    private let timeScopePublisher: TimeScopePublisher
+    private let beforeActivityCommit: ActivityCommitHook
     private let workspaceNotificationCenter: NotificationCenter
     private let statusNotificationCenter: NotificationCenter
     private let diagnosticRecorder: DiagnosticRecorder
     private let refreshInterval: TimeInterval
     private let minimumRefreshSpacing: TimeInterval
     private let wakeRefreshCoalescingInterval: TimeInterval
+    private let clockDiscontinuityTolerance: TimeInterval
     private let refreshQueue = DispatchQueue(label: "TinyBuddy.GitActivityRefresh", qos: .utility)
+    private let activityCommitLock = NSLock()
 
     private var timer: Timer?
+    private var dayBoundaryTimer: Timer?
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
     private var isStarted = false
     private var lifecycleGeneration = 0
+    private var activityCommitGeneration = 0
+    private var activeTimeContext: TinyBuddyTimeContext
+    private var lastObservedTimeContext: TinyBuddyTimeContext
+    private var lastObservedMonotonicTime: TimeInterval
+    private var currentTimeScopeToken = UUID().uuidString
+    private var currentTimeScopeFileURL: URL?
+    private var needsWakeRevalidation = false
     private var isApplicationActive = false
     private var isRefreshing = false
-    private var lastRefreshAttemptAt: Date?
-    private var lastRefreshFailureAt: Date?
-    private var lastWakeRefreshAt: Date?
+    private var lastRefreshAttemptMonotonicTime: TimeInterval?
+    private var lastRefreshFailureMonotonicTime: TimeInterval?
+    private var lastWakeRefreshMonotonicTime: TimeInterval?
     private var pendingAuthorizationRefresh = false
     private var forceWidgetReloadAfterCurrentRefresh = false
     private var didReloadWidgetDuringCurrentRefresh = false
@@ -241,13 +271,29 @@ final class GitActivityRefreshCoordinator {
         scriptRunner: ScriptRunner? = nil,
         cancelScript: @escaping () -> Void = {},
         authorizedRootsProvider: AuthorizedRootsProvider? = nil,
+        timeEnvironment: TinyBuddyTimeEnvironment? = nil,
         dateProvider: @escaping () -> Date = Date.init,
+        monotonicTimeProvider: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        },
+        timeScopePublisher: TimeScopePublisher? = nil,
+        beforeActivityCommit: @escaping ActivityCommitHook = {},
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         statusNotificationCenter: NotificationCenter = .default,
         diagnosticRecorder: @escaping DiagnosticRecorder = GitActivityRefreshCoordinator.logDiagnostic(_:trigger:),
         sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared,
-        wakeRefreshCoalescingInterval: TimeInterval = 5
+        wakeRefreshCoalescingInterval: TimeInterval = 5,
+        clockDiscontinuityTolerance: TimeInterval = 5
     ) {
+        var adapterCalendar = Calendar.autoupdatingCurrent
+        adapterCalendar.timeZone = .autoupdatingCurrent
+        let resolvedTimeEnvironment = timeEnvironment ?? TinyBuddyTimeEnvironment(
+            calendar: adapterCalendar,
+            dateProvider: dateProvider
+        )
+        let initialTimeContext = resolvedTimeEnvironment.capture()
+            ?? GitActivityRefreshCoordinator.fallbackTimeContext
+        let initialMonotonicTime = monotonicTimeProvider()
         self.activityStore = activityStore
         self.dailyStatsStore = dailyStatsStore
         self.combinedSnapshotStore = combinedSnapshotStore ?? dailyStatsStore.makeCombinedSnapshotStore()
@@ -262,21 +308,31 @@ final class GitActivityRefreshCoordinator {
             self.cancelScript = cancelScript
         } else {
             let executionController = GitRefreshScriptExecutionController()
-            self.scriptRunner = { scriptURL, rootURLs in
+            self.scriptRunner = { scriptURL, rootURLs, timeContext, timeScopeLease in
                 try GitActivityRefreshCoordinator.runScript(
                     at: scriptURL,
                     scanningRoots: rootURLs,
+                    timeContext: timeContext,
+                    timeScopeLease: timeScopeLease,
                     executionController: executionController
                 )
             }
             self.cancelScript = executionController.cancel
         }
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
-        self.dateProvider = dateProvider
+        self.timeEnvironment = resolvedTimeEnvironment
+        self.monotonicTimeProvider = monotonicTimeProvider
+        self.timeScopePublisher = timeScopePublisher
+            ?? GitActivityRefreshCoordinator.publishTimeScopeToken
+        self.beforeActivityCommit = beforeActivityCommit
         self.workspaceNotificationCenter = workspaceNotificationCenter
         self.statusNotificationCenter = statusNotificationCenter
         self.diagnosticRecorder = diagnosticRecorder
         self.wakeRefreshCoalescingInterval = wakeRefreshCoalescingInterval
+        self.clockDiscontinuityTolerance = clockDiscontinuityTolerance
+        self.activeTimeContext = initialTimeContext
+        self.lastObservedTimeContext = initialTimeContext
+        self.lastObservedMonotonicTime = initialMonotonicTime
         self.lastWidgetExperienceState = GitActivityExperienceState(
             refreshStatus: refreshStatusStore.load(),
             activitySnapshot: activityStore.loadTodaySnapshot()
@@ -289,17 +345,35 @@ final class GitActivityRefreshCoordinator {
         }
 
         isStarted = true
+        if let context = timeEnvironment.capture() {
+            activeTimeContext = context
+            observeTimeContext(context, at: monotonicTimeProvider())
+        }
+        renewTimeScopeLease()
         registerWorkspaceNotificationsIfNeeded()
         self.isApplicationActive = isApplicationActive
         if isApplicationActive {
             scheduleTimerIfNeeded()
         }
+        scheduleDayBoundaryTimer()
         refresh(trigger: .launch, force: true)
     }
 
     func handleDidBecomeActive() {
         isApplicationActive = true
         scheduleTimerIfNeeded()
+        if needsWakeRevalidation {
+            needsWakeRevalidation = false
+            invalidateTimeEnvironment(
+                adopting: timeEnvironment.capture() ?? activeTimeContext,
+                trigger: .becameActive,
+                monotonicTime: monotonicTimeProvider()
+            )
+            return
+        }
+        if revalidateTimeContextIfNeeded(trigger: .becameActive) {
+            return
+        }
         refresh(trigger: .becameActive)
     }
 
@@ -315,7 +389,37 @@ final class GitActivityRefreshCoordinator {
         if isApplicationActive {
             scheduleTimerIfNeeded()
         }
+        if revalidateTimeContextIfNeeded(trigger: .reopen) {
+            return
+        }
         refresh(trigger: .reopen)
+    }
+
+    func handleTimeEnvironmentChanged(_ context: TinyBuddyTimeContext) {
+        let monotonicTime = monotonicTimeProvider()
+        guard shouldRevalidateTimeContext(context, at: monotonicTime) else {
+            observeTimeContext(context, at: monotonicTime)
+            return
+        }
+        invalidateTimeEnvironment(
+            adopting: context,
+            trigger: .timeEnvironmentChanged,
+            monotonicTime: monotonicTime
+        )
+    }
+
+    func handleWillSleep() {
+        needsWakeRevalidation = true
+        advanceLifecycleGeneration()
+        isRefreshing = false
+        timer?.invalidate()
+        timer = nil
+        dayBoundaryTimer?.invalidate()
+        dayBoundaryTimer = nil
+        pendingWakeRefreshTrigger = nil
+        pendingWakeRefreshRequestedAt = nil
+        renewTimeScopeLease()
+        cancelScript()
     }
 
     func handleAuthorizationChanged() {
@@ -367,11 +471,14 @@ final class GitActivityRefreshCoordinator {
 
     func stop() {
         isStarted = false
-        lifecycleGeneration &+= 1
+        advanceLifecycleGeneration()
+        renewTimeScopeLease()
         isApplicationActive = false
         isRefreshing = false
         timer?.invalidate()
         timer = nil
+        dayBoundaryTimer?.invalidate()
+        dayBoundaryTimer = nil
         workspaceNotificationObservers.forEach(workspaceNotificationCenter.removeObserver)
         workspaceNotificationObservers.removeAll()
         pendingAuthorizationRefresh = false
@@ -379,6 +486,7 @@ final class GitActivityRefreshCoordinator {
         didReloadWidgetDuringCurrentRefresh = false
         pendingWakeRefreshTrigger = nil
         pendingWakeRefreshRequestedAt = nil
+        needsWakeRevalidation = false
         cancelScript()
     }
 
@@ -405,9 +513,37 @@ final class GitActivityRefreshCoordinator {
                     return
                 }
 
-                self.refresh(trigger: .timer)
+                self.handleTimerFired()
             }
         }
+    }
+
+    private func scheduleDayBoundaryTimer() {
+        dayBoundaryTimer?.invalidate()
+        let interval = max(0.1, activeTimeContext.nextDayBoundary.timeIntervalSince(activeTimeContext.now))
+        dayBoundaryTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+                let context = self.timeEnvironment.capture() ?? self.activeTimeContext
+                self.invalidateTimeEnvironment(
+                    adopting: context,
+                    trigger: .timeEnvironmentChanged,
+                    monotonicTime: self.monotonicTimeProvider()
+                )
+            }
+        }
+    }
+
+    private func handleTimerFired() {
+        guard isApplicationActive else {
+            return
+        }
+        if revalidateTimeContextIfNeeded(trigger: .timer) {
+            return
+        }
+        refresh(trigger: .timer)
     }
 
     private func registerWorkspaceNotificationsIfNeeded() {
@@ -445,21 +581,35 @@ final class GitActivityRefreshCoordinator {
             return
         }
 
-        let now = dateProvider()
-
-        if isRefreshing {
-            pendingWakeRefreshTrigger = trigger
-            pendingWakeRefreshRequestedAt = now
+        if needsWakeRevalidation {
+            needsWakeRevalidation = false
+            let context = timeEnvironment.capture() ?? activeTimeContext
+            invalidateTimeEnvironment(
+                adopting: context,
+                trigger: trigger,
+                monotonicTime: monotonicTimeProvider()
+            )
+            return
+        }
+        if revalidateTimeContextIfNeeded(trigger: trigger) {
             return
         }
 
-        if let lastWakeRefreshAt,
-           now.timeIntervalSince(lastWakeRefreshAt) < wakeRefreshCoalescingInterval {
+        let monotonicTime = monotonicTimeProvider()
+
+        if isRefreshing {
+            pendingWakeRefreshTrigger = trigger
+            pendingWakeRefreshRequestedAt = activeTimeContext.now
+            return
+        }
+
+        if let lastWakeRefreshMonotonicTime,
+           monotonicTime - lastWakeRefreshMonotonicTime < wakeRefreshCoalescingInterval {
             return
         }
 
         if refresh(trigger: trigger, force: true) {
-            lastWakeRefreshAt = now
+            lastWakeRefreshMonotonicTime = monotonicTime
         }
     }
 
@@ -497,14 +647,15 @@ final class GitActivityRefreshCoordinator {
         self.pendingWakeRefreshRequestedAt = nil
 
         if succeeded,
-           let lastWakeRefreshAt,
+           let lastWakeRefreshMonotonicTime,
            let pendingWakeRefreshRequestedAt,
-           pendingWakeRefreshRequestedAt.timeIntervalSince(lastWakeRefreshAt) < wakeRefreshCoalescingInterval {
+           activeTimeContext.now.timeIntervalSince(pendingWakeRefreshRequestedAt) >= 0,
+           monotonicTimeProvider() - lastWakeRefreshMonotonicTime < wakeRefreshCoalescingInterval {
             return
         }
 
         if refresh(trigger: pendingWakeRefreshTrigger, force: true) {
-            lastWakeRefreshAt = dateProvider()
+            lastWakeRefreshMonotonicTime = monotonicTimeProvider()
         }
     }
 
@@ -514,30 +665,54 @@ final class GitActivityRefreshCoordinator {
         force: Bool = false,
         bypassFailureBackoff: Bool = false
     ) -> Bool {
-        let now = dateProvider()
+        let timeContext = timeEnvironment.capture() ?? activeTimeContext
+        let monotonicTime = monotonicTimeProvider()
 
-        guard bypassFailureBackoff || shouldRetryAfterFailure(at: now) else {
+        guard bypassFailureBackoff || shouldRetryAfterFailure(at: monotonicTime) else {
             return false
         }
-
-        guard force || shouldRefresh(at: now) else {
+        guard force || shouldRefresh(at: monotonicTime) else {
             return false
         }
-
         guard !isRefreshing else {
             return false
         }
 
+        if currentTimeScopeFileURL == nil {
+            renewTimeScopeLease()
+        }
+        guard currentTimeScopeFileURL != nil else {
+            lastRefreshAttemptMonotonicTime = monotonicTime
+            lastRefreshFailureMonotonicTime = monotonicTime
+            let diagnostic = GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptExecution,
+                reason: .scriptExecutionFailed
+            )
+            recordRefreshStatus(
+                refreshedAt: timeContext.now,
+                trigger: trigger,
+                outcome: .failed,
+                diagnostic: diagnostic,
+                metrics: GitActivityRefreshMetrics(
+                    durationMilliseconds: 0,
+                    widgetReloaded: false,
+                    reason: diagnostic.stableIdentifier
+                )
+            )
+            return false
+        }
+
         guard let scriptURL = scriptURLProvider() else {
-            lastRefreshAttemptAt = now
-            lastRefreshFailureAt = now
+            lastRefreshAttemptMonotonicTime = monotonicTime
+            lastRefreshFailureMonotonicTime = monotonicTime
             let diagnostic = GitActivityRefreshDiagnostic(
                 source: .gitActivityRefresh,
                 stage: .scriptLookup,
                 reason: .scriptMissing
             )
             recordRefreshStatus(
-                refreshedAt: now,
+                refreshedAt: timeContext.now,
                 trigger: trigger,
                 outcome: .failed,
                 diagnostic: diagnostic,
@@ -555,17 +730,17 @@ final class GitActivityRefreshCoordinator {
         let authorizedRootURLs = scopedRoots.map(\.url)
         if accessResult.issue == .authorizationInvalid,
            authorizedRootURLs.isEmpty {
-            lastRefreshAttemptAt = now
-            lastRefreshFailureAt = now
+            lastRefreshAttemptMonotonicTime = monotonicTime
+            lastRefreshFailureMonotonicTime = monotonicTime
             let diagnostic = diagnostic(for: accessResult.issue)
             recordRefreshStatus(
-                refreshedAt: now,
+                refreshedAt: timeContext.now,
                 trigger: trigger,
                 outcome: .failed,
                 diagnostic: diagnostic,
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
-                    authorizedRootCount: authorizedRootURLs.count,
+                    authorizedRootCount: 0,
                     widgetReloaded: false,
                     reason: diagnostic.stableIdentifier
                 )
@@ -579,7 +754,7 @@ final class GitActivityRefreshCoordinator {
             timer = nil
             let diagnostic = diagnostic(for: accessResult.issue)
             recordRefreshStatus(
-                refreshedAt: now,
+                refreshedAt: timeContext.now,
                 trigger: trigger,
                 outcome: .skipped,
                 diagnostic: diagnostic,
@@ -596,10 +771,18 @@ final class GitActivityRefreshCoordinator {
 
         isRefreshing = true
         didReloadWidgetDuringCurrentRefresh = false
-        statusNotificationCenter.post(name: .gitActivityRefreshDidStart, object: nil)
-        lastRefreshAttemptAt = now
+        statusNotificationCenter.post(
+            name: .gitActivityRefreshDidStart,
+            object: nil,
+            userInfo: lifecycleNotificationUserInfo
+        )
+        lastRefreshAttemptMonotonicTime = monotonicTime
         let lifecycleGeneration = self.lifecycleGeneration
         let scriptRunner = self.scriptRunner
+        let timeScopeLease = GitRefreshTimeScopeLease(
+            token: currentTimeScopeToken,
+            fileURL: currentTimeScopeFileURL
+        )
 
         refreshQueue.async { [weak self] in
             var didStopAccessingRoots = false
@@ -610,223 +793,300 @@ final class GitActivityRefreshCoordinator {
             }
 
             do {
-                let scriptResult = try scriptRunner(scriptURL, authorizedRootURLs)
+                let result = try scriptRunner(
+                    scriptURL,
+                    authorizedRootURLs,
+                    timeContext,
+                    timeScopeLease
+                )
                 scopedRoots.forEach { $0.stopAccessing() }
                 didStopAccessingRoots = true
-                guard let self else {
-                    return
-                }
-                let lifecycleIsCurrent = DispatchQueue.main.sync {
-                    self.lifecycleGeneration == lifecycleGeneration
-                }
-                guard lifecycleIsCurrent else {
-                    return
-                }
-                let scriptOutcome = scriptResult.metrics?.refreshOutcome
+                let scriptOutcome = result.metrics?.refreshOutcome
                 let commitPreparation: ActivityCommitPreparation?
                 if scriptOutcome == .failed || scriptOutcome == .unknown || scriptOutcome == .skipped {
                     commitPreparation = nil
                 } else {
-                    commitPreparation = self.prepareActivityCommit(refreshedAt: now)
+                    let lifecycleIsCurrent = DispatchQueue.main.sync { [weak self] in
+                        self?.lifecycleGeneration == lifecycleGeneration
+                    }
+                    guard lifecycleIsCurrent else {
+                        return
+                    }
+                    let completionContext: TinyBuddyTimeContext? = DispatchQueue.main.sync { [weak self] in
+                        guard let self else {
+                            return nil
+                        }
+                        return self.validatedCompletionContext(
+                            for: timeContext,
+                            startedAtMonotonicTime: monotonicTime
+                        )
+                    }
+                    guard let completionContext else {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.handleDetectedTimeDiscontinuity(trigger: trigger)
+                        }
+                        return
+                    }
+                    self?.beforeActivityCommit()
+                    guard let self,
+                          let currentCommitPreparation = self.prepareActivityCommitIfCurrent(
+                              lifecycleGeneration: lifecycleGeneration,
+                              refreshedAt: completionContext.now
+                          ) else {
+                        return
+                    }
+                    commitPreparation = currentCommitPreparation
                 }
                 DispatchQueue.main.async { [weak self] in
-                    guard let self,
-                          self.lifecycleGeneration == lifecycleGeneration else {
-                        return
-                    }
-
-                    if scriptOutcome == .failed || scriptOutcome == .unknown {
-                        let diagnostic = GitActivityRefreshDiagnostic(
-                            source: .gitActivityRefresh,
-                            stage: .scriptExecution,
-                            reason: .scriptExecutionFailed
-                        )
-                        self.lastRefreshFailureAt = now
-                        self.recordRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: .failed,
-                            diagnostic: diagnostic,
-                            metrics: self.makeMetrics(
-                                startedAt: now,
-                                finishedAt: self.dateProvider(),
-                                authorizedRootCount: authorizedRootURLs.count,
-                                scriptMetrics: scriptResult.metrics,
-                                widgetReloaded: false,
-                                diagnostic: diagnostic
-                            )
-                        )
-                        self.finishRefresh(succeeded: false)
-                        return
-                    }
-
-                    let hasPartialRecovery = accessResult.issue == .authorizationInvalid
-                        || scriptOutcome == .partial
-                        || (scriptOutcome == nil && (scriptResult.metrics?.invalidRepositoryCount ?? 0) > 0)
-                    if scriptOutcome == .skipped {
-                        let diagnostic = hasPartialRecovery
-                            ? self.partialRecoveryDiagnostic(
-                                hasInvalidAuthorization: accessResult.issue == .authorizationInvalid
-                            )
-                            : nil
-                        self.recordRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: hasPartialRecovery ? .partial : .skipped,
-                            diagnostic: diagnostic,
-                            metrics: self.makeMetrics(
-                                startedAt: now,
-                                finishedAt: self.dateProvider(),
-                                authorizedRootCount: authorizedRootURLs.count,
-                                scriptMetrics: scriptResult.metrics,
-                                widgetReloaded: false,
-                                diagnostic: nil
-                            )
-                        )
-                        self.lastRefreshFailureAt = nil
-                        self.finishRefresh(succeeded: true)
-                        return
-                    }
-
-                    guard let commitPreparation else {
-                        return
-                    }
-                    let didPublishCommittedSnapshot: Bool
-                    let didChangePublishedWidgetActivity: Bool
-                    switch commitPreparation {
-                    case .failed(let diagnostic):
-                        self.lastRefreshFailureAt = now
-                        self.recordRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: .failed,
-                            diagnostic: diagnostic,
-                            metrics: self.makeMetrics(
-                                startedAt: now,
-                                finishedAt: self.dateProvider(),
-                                authorizedRootCount: authorizedRootURLs.count,
-                                scriptMetrics: scriptResult.metrics,
-                                widgetReloaded: false,
-                                diagnostic: diagnostic
-                            )
-                        )
-                        self.finishRefresh(succeeded: false)
-                        return
-                    case .prepared(let didPublishSnapshot, let didChangeWidgetActivity):
-                        didPublishCommittedSnapshot = didPublishSnapshot
-                        didChangePublishedWidgetActivity = didChangeWidgetActivity
-                    }
-
-                    if didPublishCommittedSnapshot {
-                        self.statusNotificationCenter.post(name: .gitActivitySnapshotDidChange, object: nil)
-                    }
-                    let refreshOutcome: GitActivityRefreshOutcome
-                    if hasPartialRecovery {
-                        refreshOutcome = .partial
-                    } else {
-                        refreshOutcome = .succeeded
-                    }
-                    let diagnostic = hasPartialRecovery
-                        ? self.partialRecoveryDiagnostic(
-                            hasInvalidAuthorization: accessResult.issue == .authorizationInvalid
-                        )
-                        : nil
-
-                    let baseMetrics = self.makeMetrics(
-                        startedAt: now,
-                        finishedAt: self.dateProvider(),
+                    self?.completeRefresh(
+                        result: result,
+                        commitPreparation: commitPreparation,
+                        accessIssue: accessResult.issue,
                         authorizedRootCount: authorizedRootURLs.count,
-                        scriptMetrics: scriptResult.metrics,
-                        widgetReloaded: false,
-                        diagnostic: nil
-                    )
-                    let nextExperienceState = GitActivityExperienceState(
-                        refreshStatus: GitActivityRefreshStatus(
-                            refreshedAt: now,
-                            trigger: trigger,
-                            outcome: refreshOutcome,
-                            diagnostic: diagnostic,
-                            metrics: baseMetrics
-                        ),
-                        activitySnapshot: self.activityStore.loadTodaySnapshot()
-                    )
-                    let stateWillChange = nextExperienceState != self.lastWidgetExperienceState
-                    let shouldReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
-                        for: trigger,
-                        didChange: didChangePublishedWidgetActivity
-                    )
-                    var didReloadWidget = false
-                    if shouldReloadWidget && !stateWillChange {
-                        do {
-                            try self.widgetReloader()
-                            didReloadWidget = true
-                            self.didReloadWidgetDuringCurrentRefresh = true
-                        } catch {
-                            self.sharedSnapshotDiagnosticRecorder.record(
-                                phase: .timelineReload,
-                                reason: .timelineReloadFailed,
-                                recovery: .stopped
-                            )
-                        }
-                    }
-
-                    self.recordRefreshStatus(
-                        refreshedAt: now,
                         trigger: trigger,
-                        outcome: refreshOutcome,
-                        diagnostic: diagnostic,
-                        metrics: self.metricsByRecordingWidgetReload(
-                            baseMetrics,
-                            didReload: didReloadWidget
-                        )
+                        startedWith: timeContext,
+                        startedAtMonotonicTime: monotonicTime,
+                        lifecycleGeneration: lifecycleGeneration
                     )
-                    self.lastRefreshFailureAt = nil
-                    self.finishRefresh(succeeded: true)
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self,
-                          self.lifecycleGeneration == lifecycleGeneration else {
-                        return
-                    }
-
-                    let scriptMetrics = (error as? GitRefreshScriptExecutionError)?.metrics
-                    if let scriptError = error as? GitRefreshScriptExecutionError {
-                        NSLog(
-                            "TinyBuddy: git refresh script failure %@",
-                            GitActivityRefreshCoordinator.scriptFailureSummary(
-                                terminationStatus: scriptError.terminationStatus,
-                                standardOutput: scriptError.standardOutput,
-                                standardError: scriptError.standardError
-                            )
-                        )
-                    }
-                    let diagnostic = GitActivityRefreshDiagnostic(
-                        source: .gitActivityRefresh,
-                        stage: .scriptExecution,
-                        reason: .scriptExecutionFailed
-                    )
-                    self.lastRefreshFailureAt = now
-                    self.recordRefreshStatus(
-                        refreshedAt: now,
+                    self?.completeFailedRefresh(
+                        error: error,
+                        authorizedRootCount: authorizedRootURLs.count,
                         trigger: trigger,
-                        outcome: .failed,
-                        diagnostic: diagnostic,
-                        metrics: self.makeMetrics(
-                            startedAt: now,
-                            finishedAt: self.dateProvider(),
-                            authorizedRootCount: authorizedRootURLs.count,
-                            scriptMetrics: scriptMetrics,
-                            widgetReloaded: false,
-                            diagnostic: diagnostic
-                        )
+                        startedWith: timeContext,
+                        startedAtMonotonicTime: monotonicTime,
+                        lifecycleGeneration: lifecycleGeneration
                     )
-                    self.finishRefresh(succeeded: false)
                 }
             }
         }
 
         return true
+    }
+
+    private func completeRefresh(
+        result: GitRefreshScriptResult,
+        commitPreparation: ActivityCommitPreparation?,
+        accessIssue: GitScanRootAccessIssue?,
+        authorizedRootCount: Int,
+        trigger: GitTodayActivityRefreshTrigger,
+        startedWith timeContext: TinyBuddyTimeContext,
+        startedAtMonotonicTime: TimeInterval,
+        lifecycleGeneration: Int
+    ) {
+        guard self.lifecycleGeneration == lifecycleGeneration else {
+            return
+        }
+        guard let completionContext = validatedCompletionContext(
+            for: timeContext,
+            startedAtMonotonicTime: startedAtMonotonicTime
+        ) else {
+            handleDetectedTimeDiscontinuity(trigger: trigger)
+            return
+        }
+
+        let completedAtMonotonicTime = monotonicTimeProvider()
+        let scriptOutcome = result.metrics?.refreshOutcome
+        if scriptOutcome == .failed || scriptOutcome == .unknown {
+            let diagnostic = GitActivityRefreshDiagnostic(
+                source: .gitActivityRefresh,
+                stage: .scriptExecution,
+                reason: .scriptExecutionFailed
+            )
+            lastRefreshFailureMonotonicTime = completedAtMonotonicTime
+            recordRefreshStatus(
+                refreshedAt: completionContext.now,
+                trigger: trigger,
+                outcome: .failed,
+                diagnostic: diagnostic,
+                metrics: makeMetrics(
+                    startedAtMonotonicTime: startedAtMonotonicTime,
+                    finishedAtMonotonicTime: completedAtMonotonicTime,
+                    authorizedRootCount: authorizedRootCount,
+                    scriptMetrics: result.metrics,
+                    widgetReloaded: false,
+                    diagnostic: diagnostic
+                )
+            )
+            finishRefresh(succeeded: false)
+            return
+        }
+
+        let hasPartialRecovery = accessIssue == .authorizationInvalid
+            || scriptOutcome == .partial
+            || (scriptOutcome == nil && (result.metrics?.invalidRepositoryCount ?? 0) > 0)
+        if scriptOutcome == .skipped {
+            let diagnostic = hasPartialRecovery
+                ? partialRecoveryDiagnostic(
+                    hasInvalidAuthorization: accessIssue == .authorizationInvalid
+                )
+                : nil
+            recordRefreshStatus(
+                refreshedAt: completionContext.now,
+                trigger: trigger,
+                outcome: hasPartialRecovery ? .partial : .skipped,
+                diagnostic: diagnostic,
+                metrics: makeMetrics(
+                    startedAtMonotonicTime: startedAtMonotonicTime,
+                    finishedAtMonotonicTime: completedAtMonotonicTime,
+                    authorizedRootCount: authorizedRootCount,
+                    scriptMetrics: result.metrics,
+                    widgetReloaded: false,
+                    diagnostic: diagnostic
+                )
+            )
+            lastRefreshFailureMonotonicTime = nil
+            finishRefresh(succeeded: true)
+            return
+        }
+
+        guard let commitPreparation else {
+            return
+        }
+        guard validatedCompletionContext(
+            for: timeContext,
+            startedAtMonotonicTime: startedAtMonotonicTime
+        ) != nil else {
+            handleDetectedTimeDiscontinuity(trigger: trigger)
+            return
+        }
+
+        let didPublishCommittedSnapshot: Bool
+        let didChangePublishedWidgetActivity: Bool
+        switch commitPreparation {
+        case .failed(let diagnostic):
+            lastRefreshFailureMonotonicTime = completedAtMonotonicTime
+            recordRefreshStatus(
+                refreshedAt: completionContext.now,
+                trigger: trigger,
+                outcome: .failed,
+                diagnostic: diagnostic,
+                metrics: makeMetrics(
+                    startedAtMonotonicTime: startedAtMonotonicTime,
+                    finishedAtMonotonicTime: completedAtMonotonicTime,
+                    authorizedRootCount: authorizedRootCount,
+                    scriptMetrics: result.metrics,
+                    widgetReloaded: false,
+                    diagnostic: diagnostic
+                )
+            )
+            finishRefresh(succeeded: false)
+            return
+        case .prepared(let didPublishSnapshot, let didChangeWidgetActivity):
+            didPublishCommittedSnapshot = didPublishSnapshot
+            didChangePublishedWidgetActivity = didChangeWidgetActivity
+        }
+
+        if didPublishCommittedSnapshot {
+            statusNotificationCenter.post(
+                name: .gitActivitySnapshotDidChange,
+                object: nil,
+                userInfo: lifecycleNotificationUserInfo
+            )
+        }
+        let refreshOutcome: GitActivityRefreshOutcome = hasPartialRecovery ? .partial : .succeeded
+        let diagnostic = hasPartialRecovery
+            ? partialRecoveryDiagnostic(
+                hasInvalidAuthorization: accessIssue == .authorizationInvalid
+            )
+            : nil
+        let baseMetrics = makeMetrics(
+            startedAtMonotonicTime: startedAtMonotonicTime,
+            finishedAtMonotonicTime: completedAtMonotonicTime,
+            authorizedRootCount: authorizedRootCount,
+            scriptMetrics: result.metrics,
+            widgetReloaded: false,
+            diagnostic: diagnostic
+        )
+        let nextExperienceState = GitActivityExperienceState(
+            refreshStatus: GitActivityRefreshStatus(
+                refreshedAt: completionContext.now,
+                trigger: trigger,
+                outcome: refreshOutcome,
+                diagnostic: diagnostic,
+                metrics: baseMetrics
+            ),
+            activitySnapshot: activityStore.loadTodaySnapshot()
+        )
+        let stateWillChange = nextExperienceState != lastWidgetExperienceState
+        let shouldReloadWidget = GitTodayActivityRefreshPolicy.shouldReloadWidget(
+            for: trigger,
+            didChange: didChangePublishedWidgetActivity
+        )
+        var didReloadWidget = false
+        if shouldReloadWidget && !stateWillChange {
+            didReloadWidget = reloadWidgetForStateChange()
+            didReloadWidgetDuringCurrentRefresh = didReloadWidget
+        }
+
+        recordRefreshStatus(
+            refreshedAt: completionContext.now,
+            trigger: trigger,
+            outcome: refreshOutcome,
+            diagnostic: diagnostic,
+            metrics: metricsByRecordingWidgetReload(
+                baseMetrics,
+                didReload: didReloadWidget
+            )
+        )
+        lastRefreshFailureMonotonicTime = nil
+        finishRefresh(succeeded: true)
+    }
+
+    private func completeFailedRefresh(
+        error: Error,
+        authorizedRootCount: Int,
+        trigger: GitTodayActivityRefreshTrigger,
+        startedWith timeContext: TinyBuddyTimeContext,
+        startedAtMonotonicTime: TimeInterval,
+        lifecycleGeneration: Int
+    ) {
+        guard self.lifecycleGeneration == lifecycleGeneration else {
+            return
+        }
+        guard let completionContext = validatedCompletionContext(
+            for: timeContext,
+            startedAtMonotonicTime: startedAtMonotonicTime
+        ) else {
+            handleDetectedTimeDiscontinuity(trigger: trigger)
+            return
+        }
+
+        let scriptMetrics = (error as? GitRefreshScriptExecutionError)?.metrics
+        if let scriptError = error as? GitRefreshScriptExecutionError {
+            NSLog(
+                "TinyBuddy: git refresh script failure %@",
+                Self.scriptFailureSummary(
+                    terminationStatus: scriptError.terminationStatus,
+                    standardOutput: scriptError.standardOutput,
+                    standardError: scriptError.standardError
+                )
+            )
+        }
+        let diagnostic = GitActivityRefreshDiagnostic(
+            source: .gitActivityRefresh,
+            stage: .scriptExecution,
+            reason: .scriptExecutionFailed
+        )
+        let completedAtMonotonicTime = monotonicTimeProvider()
+        lastRefreshFailureMonotonicTime = completedAtMonotonicTime
+        recordRefreshStatus(
+            refreshedAt: completionContext.now,
+            trigger: trigger,
+            outcome: .failed,
+            diagnostic: diagnostic,
+            metrics: makeMetrics(
+                startedAtMonotonicTime: startedAtMonotonicTime,
+                finishedAtMonotonicTime: completedAtMonotonicTime,
+                authorizedRootCount: authorizedRootCount,
+                scriptMetrics: scriptMetrics,
+                widgetReloaded: false,
+                diagnostic: diagnostic
+            )
+        )
+        finishRefresh(succeeded: false)
     }
 
     private func prepareActivityCommit(refreshedAt: Date) -> ActivityCommitPreparation {
@@ -844,6 +1104,15 @@ final class GitActivityRefreshCoordinator {
         }
 
         let fallbackSnapshot = dailyStatsStore.loadSnapshot()
+        guard fallbackSnapshot.stats.dayIdentifier == activeTimeContext.dayIdentifier else {
+            return .failed(
+                GitActivityRefreshDiagnostic(
+                    source: .gitActivityRefresh,
+                    stage: .activitySnapshotLoad,
+                    reason: .refreshedActivityUnavailable
+                )
+            )
+        }
         let expectedDayIdentifier = fallbackSnapshot.stats.dayIdentifier
         let previouslyCommittedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
@@ -923,6 +1192,30 @@ final class GitActivityRefreshCoordinator {
         )
     }
 
+    /// Serializes the final semantic commit with lifecycle invalidation. A time
+    /// change that wins this lock advances the generation before an old refresh
+    /// can write; a commit that wins completes atomically before invalidation is
+    /// published, after which its completion notification is discarded.
+    private func prepareActivityCommitIfCurrent(
+        lifecycleGeneration: Int,
+        refreshedAt: Date
+    ) -> ActivityCommitPreparation? {
+        activityCommitLock.lock()
+        defer { activityCommitLock.unlock() }
+
+        guard activityCommitGeneration == lifecycleGeneration else {
+            return nil
+        }
+        return prepareActivityCommit(refreshedAt: refreshedAt)
+    }
+
+    private func advanceLifecycleGeneration() {
+        activityCommitLock.lock()
+        lifecycleGeneration &+= 1
+        activityCommitGeneration = lifecycleGeneration
+        activityCommitLock.unlock()
+    }
+
     private func combinedSnapshotCommitDiagnostic() -> GitActivityRefreshDiagnostic {
         GitActivityRefreshDiagnostic(
             source: .gitActivityRefresh,
@@ -931,20 +1224,135 @@ final class GitActivityRefreshCoordinator {
         )
     }
 
-    private func shouldRefresh(at now: Date) -> Bool {
-        guard let lastRefreshAttemptAt else {
+    private func shouldRefresh(at monotonicTime: TimeInterval) -> Bool {
+        guard let lastRefreshAttemptMonotonicTime else {
             return true
         }
 
-        return now.timeIntervalSince(lastRefreshAttemptAt) >= minimumRefreshSpacing
+        let elapsed = monotonicTime - lastRefreshAttemptMonotonicTime
+        return elapsed < 0 || elapsed >= minimumRefreshSpacing
     }
 
-    private func shouldRetryAfterFailure(at now: Date) -> Bool {
-        guard let lastRefreshFailureAt else {
+    private func shouldRetryAfterFailure(at monotonicTime: TimeInterval) -> Bool {
+        guard let lastRefreshFailureMonotonicTime else {
             return true
         }
 
-        return now.timeIntervalSince(lastRefreshFailureAt) >= refreshInterval
+        let elapsed = monotonicTime - lastRefreshFailureMonotonicTime
+        return elapsed < 0 || elapsed >= refreshInterval
+    }
+
+    private func revalidateTimeContextIfNeeded(
+        trigger: GitTodayActivityRefreshTrigger
+    ) -> Bool {
+        let context = timeEnvironment.capture() ?? activeTimeContext
+        let monotonicTime = monotonicTimeProvider()
+        guard shouldRevalidateTimeContext(context, at: monotonicTime) else {
+            observeTimeContext(context, at: monotonicTime)
+            return false
+        }
+        invalidateTimeEnvironment(
+            adopting: context,
+            trigger: trigger,
+            monotonicTime: monotonicTime
+        )
+        return true
+    }
+
+    private func shouldRevalidateTimeContext(
+        _ context: TinyBuddyTimeContext,
+        at monotonicTime: TimeInterval
+    ) -> Bool {
+        if context.dayIdentifier != activeTimeContext.dayIdentifier
+            || context.signature != activeTimeContext.signature {
+            return true
+        }
+
+        let monotonicElapsed = max(0, monotonicTime - lastObservedMonotonicTime)
+        let expectedNow = lastObservedTimeContext.now.addingTimeInterval(monotonicElapsed)
+        return abs(context.now.timeIntervalSince(expectedNow)) > clockDiscontinuityTolerance
+    }
+
+    private func observeTimeContext(
+        _ context: TinyBuddyTimeContext,
+        at monotonicTime: TimeInterval
+    ) {
+        lastObservedTimeContext = context
+        lastObservedMonotonicTime = monotonicTime
+    }
+
+    private func invalidateTimeEnvironment(
+        adopting context: TinyBuddyTimeContext,
+        trigger: GitTodayActivityRefreshTrigger,
+        monotonicTime: TimeInterval
+    ) {
+        advanceLifecycleGeneration()
+        activeTimeContext = context
+        observeTimeContext(context, at: monotonicTime)
+        isRefreshing = false
+        pendingAuthorizationRefresh = false
+        pendingWakeRefreshTrigger = nil
+        pendingWakeRefreshRequestedAt = nil
+        forceWidgetReloadAfterCurrentRefresh = false
+        didReloadWidgetDuringCurrentRefresh = false
+        renewTimeScopeLease()
+        cancelScript()
+        if isApplicationActive {
+            scheduleTimerIfNeeded()
+        }
+        if isStarted {
+            scheduleDayBoundaryTimer()
+        }
+        statusNotificationCenter.post(
+            name: .tinyBuddyTimeEnvironmentDidChange,
+            object: context,
+            userInfo: lifecycleNotificationUserInfo
+        )
+        _ = reloadWidgetForStateChange()
+        _ = refresh(
+            trigger: trigger,
+            force: true,
+            bypassFailureBackoff: true
+        )
+    }
+
+    private func validatedCompletionContext(
+        for startedContext: TinyBuddyTimeContext,
+        startedAtMonotonicTime: TimeInterval
+    ) -> TinyBuddyTimeContext? {
+        let completionContext = timeEnvironment.capture() ?? activeTimeContext
+        guard completionContext.dayIdentifier == startedContext.dayIdentifier,
+              completionContext.signature == startedContext.signature else {
+            return nil
+        }
+        let elapsed = max(0, monotonicTimeProvider() - startedAtMonotonicTime)
+        let expectedNow = startedContext.now.addingTimeInterval(elapsed)
+        guard abs(completionContext.now.timeIntervalSince(expectedNow))
+            <= clockDiscontinuityTolerance else {
+            return nil
+        }
+        return completionContext
+    }
+
+    private func handleDetectedTimeDiscontinuity(
+        trigger: GitTodayActivityRefreshTrigger
+    ) {
+        let context = timeEnvironment.capture() ?? activeTimeContext
+        invalidateTimeEnvironment(
+            adopting: context,
+            trigger: trigger == .timer ? .timer : .timeEnvironmentChanged,
+            monotonicTime: monotonicTimeProvider()
+        )
+    }
+
+    private func renewTimeScopeLease() {
+        currentTimeScopeToken = UUID().uuidString
+        TinyBuddyTimeScopeState.shared.replaceProcessToken(currentTimeScopeToken)
+        currentTimeScopeFileURL = timeScopePublisher(currentTimeScopeToken)
+    }
+
+    private var lifecycleNotificationUserInfo: [AnyHashable: Any] {
+        [TinyBuddyLifecycleNotification.generationKey: lifecycleGeneration]
     }
 
     private func recordRefreshStatus(
@@ -998,7 +1406,11 @@ final class GitActivityRefreshCoordinator {
         if status != preliminaryStatus {
             refreshStatusStore.save(status)
         }
-        statusNotificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: status)
+        statusNotificationCenter.post(
+            name: .gitActivityRefreshStatusDidChange,
+            object: status,
+            userInfo: lifecycleNotificationUserInfo
+        )
     }
 
     @discardableResult
@@ -1065,15 +1477,17 @@ final class GitActivityRefreshCoordinator {
     }
 
     private func makeMetrics(
-        startedAt: Date,
-        finishedAt: Date,
+        startedAtMonotonicTime: TimeInterval,
+        finishedAtMonotonicTime: TimeInterval,
         authorizedRootCount: Int,
         scriptMetrics: GitRefreshScriptMetrics?,
         widgetReloaded: Bool,
         diagnostic: GitActivityRefreshDiagnostic?
     ) -> GitActivityRefreshMetrics {
-        GitActivityRefreshMetrics(
-            durationMilliseconds: max(0, Int(finishedAt.timeIntervalSince(startedAt) * 1000)),
+        let duration = max(0, finishedAtMonotonicTime - startedAtMonotonicTime)
+        let durationMilliseconds = Int(min(duration * 1_000, Double(Int.max)))
+        return GitActivityRefreshMetrics(
+            durationMilliseconds: durationMilliseconds,
             authorizedRootCount: authorizedRootCount,
             repositoryCount: scriptMetrics?.repositoryCount,
             cacheHitCount: scriptMetrics?.cacheHitCount,
@@ -1118,7 +1532,10 @@ final class GitActivityRefreshCoordinator {
         refreshedAt: Date
     ) {
         let defaults = UserDefaults.standard
-        let dayIdentifier = Self.dayIdentifier(for: refreshedAt)
+        guard let dayIdentifier = activeTimeContext.dayIdentifier(for: refreshedAt),
+              dayIdentifier == activeTimeContext.dayIdentifier else {
+            return
+        }
 
         defaults.set(dayIdentifier, forKey: GitTodayFocusBlockCountStore.Key.dayIdentifier)
         defaults.set(snapshot.focusBlockCount ?? 0, forKey: GitTodayFocusBlockCountStore.Key.count)
@@ -1135,15 +1552,6 @@ final class GitActivityRefreshCoordinator {
         }
 
         defaults.synchronize()
-    }
-
-    private static func dayIdentifier(for date: Date) -> String {
-        let calendar = Calendar.current
-        let components = calendar.dateComponents([.year, .month, .day], from: date)
-        let year = components.year ?? 0
-        let month = components.month ?? 0
-        let day = components.day ?? 0
-        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     private static func locateRefreshScript() -> URL? {
@@ -1163,9 +1571,47 @@ final class GitActivityRefreshCoordinator {
         return fallbackURL
     }
 
+    private static let fallbackTimeContext: TinyBuddyTimeContext = {
+        var calendar = Calendar(identifier: .gregorian)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.timeZone = timeZone
+        return TinyBuddyTimeContext(
+            now: Date(timeIntervalSince1970: 0),
+            timeZone: timeZone,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: calendar
+        )!
+    }()
+
+    private static func publishTimeScopeToken(_ token: String) -> URL? {
+        guard let fileURL = TinyBuddySharedData.timeScopeTokenURL() else {
+            return nil
+        }
+        let directoryURL = fileURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+            let tombstone = "invalid-\(token)\n"
+            do {
+                try Data(tombstone.utf8).write(to: fileURL, options: .atomic)
+            } catch {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+            try Data("\(token)\n".utf8).write(to: fileURL, options: .atomic)
+            return fileURL
+        } catch {
+            try? FileManager.default.removeItem(at: fileURL)
+            return nil
+        }
+    }
+
     private static func runScript(
         at scriptURL: URL,
         scanningRoots rootURLs: [URL],
+        timeContext: TinyBuddyTimeContext,
+        timeScopeLease: GitRefreshTimeScopeLease,
         executionController: GitRefreshScriptExecutionController
     ) throws -> GitRefreshScriptResult {
         let process = Process()
@@ -1177,6 +1623,15 @@ final class GitActivityRefreshCoordinator {
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+        environment["LC_ALL"] = "C"
+        environment["TZ"] = timeContext.timeZone.identifier
+        environment["TINYBUDDY_TODAY"] = timeContext.dayIdentifier
+        environment["TINYBUDDY_REFRESH_EPOCH"] = String(timeContext.epochSeconds)
+        environment["TINYBUDDY_TIME_SCOPE_IDENTIFIER"] = timeContext.signature.portableScopeIdentifier
+        if let timeScopeFileURL = timeScopeLease.fileURL {
+            environment["TINYBUDDY_TIME_SCOPE_FILE"] = timeScopeFileURL.path
+            environment["TINYBUDDY_TIME_SCOPE_TOKEN"] = timeScopeLease.token
+        }
         let temporaryDirectoryURL = FileManager.default.temporaryDirectory
         environment["TMPDIR"] = Self.scriptTemporaryDirectoryEnvironment(temporaryDirectoryURL)
         let userHomePath = resolvedUserHomeDirectoryPath()

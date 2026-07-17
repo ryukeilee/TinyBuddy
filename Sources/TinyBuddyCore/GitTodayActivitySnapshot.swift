@@ -41,19 +41,19 @@ public final class GitTodayActivityStore {
     private let focusBlockCountStore: GitTodayFocusBlockCountStore
     private let commitCountStore: GitTodayCommitCountStore
     private let recentProjectStore: GitTodayRecentProjectStore
-    private let calendar: Calendar
-    private let dateProvider: () -> Date
+    private let timeEnvironment: TinyBuddyTimeEnvironment
+    private let timeScopeTokenProvider: () -> String?
 
-    public convenience init() {
-        let calendar = Calendar.current
-        let dateProvider: () -> Date = { Date() }
+    public convenience init(
+        timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment()
+    ) {
         self.init(
             trustedSnapshotStore: GitTodayActivityTrustedSnapshotStore(),
-            focusBlockCountStore: GitTodayFocusBlockCountStore(calendar: calendar, dateProvider: dateProvider),
-            commitCountStore: GitTodayCommitCountStore(calendar: calendar, dateProvider: dateProvider),
-            recentProjectStore: GitTodayRecentProjectStore(calendar: calendar, dateProvider: dateProvider),
-            calendar: calendar,
-            dateProvider: dateProvider
+            focusBlockCountStore: GitTodayFocusBlockCountStore(timeEnvironment: timeEnvironment),
+            commitCountStore: GitTodayCommitCountStore(timeEnvironment: timeEnvironment),
+            recentProjectStore: GitTodayRecentProjectStore(timeEnvironment: timeEnvironment),
+            timeEnvironment: timeEnvironment,
+            timeScopeTokenProvider: { TinyBuddyTimeScopeState.shared.currentToken() }
         )
     }
 
@@ -62,15 +62,38 @@ public final class GitTodayActivityStore {
         focusBlockCountStore: GitTodayFocusBlockCountStore,
         commitCountStore: GitTodayCommitCountStore,
         recentProjectStore: GitTodayRecentProjectStore,
-        calendar: Calendar = .current,
-        dateProvider: @escaping () -> Date = Date.init
+        timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
+        timeScopeTokenProvider: @escaping () -> String? = {
+            TinyBuddyTimeScopeState.shared.currentToken()
+        }
     ) {
         self.trustedSnapshotStore = trustedSnapshotStore
         self.focusBlockCountStore = focusBlockCountStore
         self.commitCountStore = commitCountStore
         self.recentProjectStore = recentProjectStore
-        self.calendar = calendar
-        self.dateProvider = dateProvider
+        self.timeEnvironment = timeEnvironment
+        self.timeScopeTokenProvider = timeScopeTokenProvider
+    }
+
+    public convenience init(
+        trustedSnapshotStore: GitTodayActivityTrustedSnapshotStore? = nil,
+        focusBlockCountStore: GitTodayFocusBlockCountStore,
+        commitCountStore: GitTodayCommitCountStore,
+        recentProjectStore: GitTodayRecentProjectStore,
+        calendar: Calendar,
+        dateProvider: @escaping () -> Date = Date.init
+    ) {
+        self.init(
+            trustedSnapshotStore: trustedSnapshotStore,
+            focusBlockCountStore: focusBlockCountStore,
+            commitCountStore: commitCountStore,
+            recentProjectStore: recentProjectStore,
+            timeEnvironment: TinyBuddyTimeEnvironment(
+                calendar: calendar,
+                dateProvider: dateProvider
+            ),
+            timeScopeTokenProvider: { TinyBuddyTimeScopeState.shared.currentToken() }
+        )
     }
 
     public func loadTodaySnapshot() -> GitTodayActivitySnapshot {
@@ -78,11 +101,39 @@ public final class GitTodayActivityStore {
     }
 
     public func loadTodaySnapshotRead() -> GitTodayActivitySnapshotRead {
-        if let trustedSnapshot = trustedSnapshotStore?.load(),
-           trustedSnapshot.dayIdentifier == todayIdentifier() {
+        guard let context = timeEnvironment.capture() else {
+            let trustedSnapshot = trustedSnapshotStore?.load()
+            return GitTodayActivitySnapshotRead(
+                snapshot: trustedSnapshot?.activity ?? GitTodayActivitySnapshot(
+                    focusBlockCount: focusBlockCountStore.loadTodayCount(),
+                    commitCount: commitCountStore.loadTodayCount(),
+                    recentProjectName: recentProjectStore.loadTodayProjectName()
+                ),
+                trustedRevision: trustedSnapshot?.revision
+            )
+        }
+        let timeScopeToken = timeScopeTokenProvider()
+        if let trustedSnapshot = trustedSnapshotStore?.load(
+            dayIdentifier: context.dayIdentifier,
+            timeScopeIdentifier: context.signature.portableScopeIdentifier,
+            timeScopeToken: timeScopeToken
+        ) {
             return GitTodayActivitySnapshotRead(
                 snapshot: trustedSnapshot.activity,
                 trustedRevision: trustedSnapshot.revision
+            )
+        }
+
+        if trustedSnapshotStore?.containsEnvironmentScopedSnapshot(
+            dayIdentifier: context.dayIdentifier
+        ) == true {
+            return GitTodayActivitySnapshotRead(
+                snapshot: GitTodayActivitySnapshot(
+                    focusBlockCount: nil,
+                    commitCount: nil,
+                    recentProjectName: nil
+                ),
+                trustedRevision: nil
             )
         }
 
@@ -93,16 +144,6 @@ public final class GitTodayActivityStore {
                 recentProjectName: recentProjectStore.loadTodayProjectName()
             ),
             trustedRevision: nil
-        )
-    }
-
-    private func todayIdentifier() -> String {
-        let components = calendar.dateComponents([.year, .month, .day], from: dateProvider())
-        return String(
-            format: "%04d-%02d-%02d",
-            components.year ?? 0,
-            components.month ?? 0,
-            components.day ?? 0
         )
     }
 

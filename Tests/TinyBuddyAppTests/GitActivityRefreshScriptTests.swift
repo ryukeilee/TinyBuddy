@@ -14,7 +14,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         let harness = try ScriptHarness()
         let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
 
-        XCTAssertTrue(source.contains("REFRESH_REVISION=\"$(/bin/date +%s)\""))
+        XCTAssertTrue(source.contains("REFRESH_EPOCH=\"$(/bin/date +%s)\""))
         XCTAssertFalse(source.contains("/usr/bin/perl -MTime::HiRes"))
     }
 
@@ -183,6 +183,42 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(finalPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
         XCTAssertEqual(finalPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
         XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.snapshotWriteLockURL.path))
+    }
+
+    func testScriptAdvancesAutomaticRevisionAfterWallClockRollback() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first")]
+        )
+        let highRevision: Int64 = 9_000_000_000_000_000_000
+        XCTAssertEqual(
+            try harness.run(
+                scanRoots: [harness.scanRootURL],
+                extraEnvironment: ["TINYBUDDY_REFRESH_REVISION": String(highRevision)]
+            ).exitCode,
+            0
+        )
+
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "commit: second")
+            ]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: Date().addingTimeInterval(2))
+
+        let rollbackResult = try harness.run(scanRoots: [harness.scanRootURL])
+        let encoded = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let snapshot = try XCTUnwrap(GitTodayActivityTrustedSnapshotStore.decode(encoded))
+
+        XCTAssertEqual(rollbackResult.exitCode, 0, rollbackResult.standardError)
+        XCTAssertEqual(snapshot.revision, highRevision + 1)
+        XCTAssertEqual(snapshot.activity.commitCount, 2)
     }
 
     func testScriptPublishesOneAtomicSnapshotAndRejectsNonNewerRefreshResults() throws {
@@ -791,8 +827,8 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             .split(separator: "\n")
             .map { line -> String in
                 var fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-                if fields.count == 14, fields[0] == "v2" {
-                    fields[7] = "1700000000"
+                if fields.count == 15, fields[0] == "v3" {
+                    fields[8] = "1700000000"
                 }
                 return fields.joined(separator: "\t")
             }
@@ -1405,6 +1441,194 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertTrue(diagnostics.allSatisfy { $0.contains("candidate=") })
         XCTAssertFalse(result.standardError.contains(harness.scanRootURL.path))
     }
+
+    func testScriptPreservesCommittedSnapshotAndCacheWhenReflogContainsFutureEvent() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: committed")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+        let committedSnapshot = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let committedCache = try String(contentsOf: harness.repositoryStatsCacheFileURL, encoding: .utf8)
+
+        let futureEpoch = Int(Date().timeIntervalSince1970) + 86_400
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: committed"),
+                harness.reflogLine(epoch: futureEpoch, message: "commit: future")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertEqual(metrics["refresh_outcome"], "failed")
+        XCTAssertTrue(result.standardError.contains("future git reflog activity"))
+        XCTAssertEqual(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
+            committedSnapshot
+        )
+        XCTAssertEqual(
+            try String(contentsOf: harness.repositoryStatsCacheFileURL, encoding: .utf8),
+            committedCache
+        )
+    }
+
+    func testScriptInvalidatesReflogCacheWhenTimeScopeChanges() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let perlProbe = try harness.makePerlProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: current")]
+        )
+
+        let initialEnvironment = [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path,
+            "TINYBUDDY_TIME_SCOPE_IDENTIFIER": "America/Los_Angeles"
+        ]
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: initialEnvironment).exitCode, 0)
+        XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 1)
+        let initialSnapshotValue = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        XCTAssertEqual(
+            GitTodayActivityTrustedSnapshotStore.decode(initialSnapshotValue)?.timeScopeIdentifier,
+            "America/Los_Angeles"
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_PERL_BIN": perlProbe.scriptURL.path,
+            "TINYBUDDY_TIME_SCOPE_IDENTIFIER": "Asia/Shanghai"
+        ])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(try harness.perlInvocationCount(from: perlProbe.logURL), 2)
+        XCTAssertEqual(metrics["reflog_unchanged_skip_count"], "0")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+        let updatedSnapshotValue = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        XCTAssertEqual(
+            GitTodayActivityTrustedSnapshotStore.decode(updatedSnapshotValue)?.timeScopeIdentifier,
+            "Asia/Shanghai"
+        )
+    }
+
+    func testScriptCountsDistinctUTCFocusBucketsAcrossLosAngelesDSTFallback() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let formatter = ISO8601DateFormatter()
+        let firstEpoch = Int(try XCTUnwrap(formatter.date(from: "2026-11-01T01:10:00-07:00")).timeIntervalSince1970)
+        let secondEpoch = Int(try XCTUnwrap(formatter.date(from: "2026-11-01T01:10:00-08:00")).timeIntervalSince1970)
+        let refreshEpoch = Int(try XCTUnwrap(formatter.date(from: "2026-11-02T00:00:00-08:00")).timeIntervalSince1970)
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(epoch: firstEpoch, message: "commit: before fallback"),
+                harness.reflogLine(epoch: secondEpoch, message: "commit: after fallback")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TZ": "America/Los_Angeles",
+            "TINYBUDDY_TODAY": "2026-11-01",
+            "TINYBUDDY_TIME_SCOPE_IDENTIFIER": "America/Los_Angeles",
+            "TINYBUDDY_REFRESH_EPOCH": String(refreshEpoch)
+        ])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+    }
+
+    func testScriptSkipsAllWritesWhenTimeScopeTokenIsNoLongerCurrent() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let tokenURL = harness.rootURL.appendingPathComponent("time-scope-token")
+        try "new-token\n".write(to: tokenURL, atomically: true, encoding: .utf8)
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: current")]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_TIME_SCOPE_FILE": tokenURL.path,
+            "TINYBUDDY_TIME_SCOPE_TOKEN": "old-token"
+        ])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(metrics["refresh_outcome"], "skipped")
+        XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.plistURL.path))
+        XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.repositoryCacheFileURL.path))
+        XCTAssertFalse(harness.fileManager.fileExists(atPath: harness.repositoryStatsCacheFileURL.path))
+    }
+
+    func testScriptEmbedsCurrentLeaseTokenInTrustedSnapshot() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let tokenURL = harness.rootURL.appendingPathComponent("time-scope-token")
+        try "current-token\n".write(to: tokenURL, atomically: true, encoding: .utf8)
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: current")]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_TIME_SCOPE_IDENTIFIER": "scope-current",
+            "TINYBUDDY_TIME_SCOPE_FILE": tokenURL.path,
+            "TINYBUDDY_TIME_SCOPE_TOKEN": "current-token"
+        ])
+        let encoded = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let snapshot = try XCTUnwrap(GitTodayActivityTrustedSnapshotStore.decode(encoded))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(snapshot.timeScopeIdentifier, "scope-current")
+        XCTAssertEqual(snapshot.timeScopeToken, "current-token")
+    }
+
+    func testConcurrentScriptRefreshesLeaveReadableSnapshotAndStableThirdRun() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let slowPerlURL = try harness.makeDelayingPerlProbe(delaySeconds: 1)
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "commit: second")
+            ]
+        )
+
+        let environment = ["TINYBUDDY_PERL_BIN": slowPerlURL.path]
+        let first = try harness.start(scanRoots: [harness.scanRootURL], extraEnvironment: environment)
+        let second = try harness.start(scanRoots: [harness.scanRootURL], extraEnvironment: environment)
+        let firstResult = first.wait()
+        let secondResult = second.wait()
+        let snapshotValue = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let snapshot = try XCTUnwrap(GitTodayActivityTrustedSnapshotStore.decode(snapshotValue))
+        let third = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: environment)
+        let thirdMetrics = try XCTUnwrap(harness.metrics(from: third.standardOutput))
+
+        XCTAssertEqual(firstResult.exitCode, 0, firstResult.standardError)
+        XCTAssertEqual(secondResult.exitCode, 0, secondResult.standardError)
+        XCTAssertEqual(snapshot.activity.commitCount, 2)
+        XCTAssertEqual(snapshot.activity.focusBlockCount, 2)
+        XCTAssertEqual(third.exitCode, 0, third.standardError)
+        XCTAssertEqual(thirdMetrics["shared_data_written"], "0")
+    }
 }
 
 private final class ScriptHarness {
@@ -1650,6 +1874,18 @@ private final class ScriptHarness {
         return scriptURL
     }
 
+    func makeDelayingPerlProbe(delaySeconds: Int) throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("delaying-perl-probe.sh")
+        let script = """
+        #!/bin/bash
+        /bin/sleep \(delaySeconds)
+        exec /usr/bin/perl "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
     func recursiveScanInvocationCount(from logURL: URL) throws -> Int {
         guard fileManager.fileExists(atPath: logURL.path) else {
             return 0
@@ -1690,6 +1926,10 @@ private final class ScriptHarness {
     }
 
     func run(scanRoots: [URL], extraEnvironment: [String: String] = [:]) throws -> ScriptRunResult {
+        try start(scanRoots: scanRoots, extraEnvironment: extraEnvironment).wait()
+    }
+
+    func start(scanRoots: [URL], extraEnvironment: [String: String] = [:]) throws -> RunningScriptRun {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptURL.path]
@@ -1702,6 +1942,8 @@ private final class ScriptHarness {
         environment["TINYBUDDY_APP_GROUP_PREFERENCES_PLIST"] = plistURL.path
         environment["TINYBUDDY_GIT_REPOSITORY_CACHE_DIR"] = cacheDirectoryURL.path
         environment["TINYBUDDY_GIT_SCAN_ROOTS"] = scanRoots.map(\.path).joined(separator: "\n")
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: Date()))!
+        environment["TINYBUDDY_REFRESH_EPOCH"] = String(Int(nextDay.timeIntervalSince1970) - 1)
         for (key, value) in extraEnvironment {
             environment[key] = value
         }
@@ -1713,15 +1955,7 @@ private final class ScriptHarness {
         process.standardError = stderrPipe
 
         try process.run()
-        process.waitUntilExit()
-
-        let standardOutput = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let standardError = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return ScriptRunResult(
-            exitCode: process.terminationStatus,
-            standardOutput: standardOutput,
-            standardError: standardError
-        )
+        return RunningScriptRun(process: process, stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
     }
 
     func reflogLine(daysOffset: Int, hour: Int, minute: Int, message: String) -> String {
@@ -1738,6 +1972,10 @@ private final class ScriptHarness {
         let timezoneOffset = String(format: "%@%02d%02d", offsetSign, abs(offsetHours), offsetMinutes)
 
         return "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 Tiny Buddy <tinybuddy@example.com> \(epoch) \(timezoneOffset)\t\(message)"
+    }
+
+    func reflogLine(epoch: Int, message: String) -> String {
+        "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 Tiny Buddy <tinybuddy@example.com> \(epoch) +0000\t\(message)"
     }
 
     func dayIdentifier(daysOffset: Int) -> String {
@@ -1772,6 +2010,33 @@ private final class ScriptHarness {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
+}
+
+private final class RunningScriptRun {
+    private let process: Process
+    private let stdoutPipe: Pipe
+    private let stderrPipe: Pipe
+
+    init(process: Process, stdoutPipe: Pipe, stderrPipe: Pipe) {
+        self.process = process
+        self.stdoutPipe = stdoutPipe
+        self.stderrPipe = stderrPipe
+    }
+
+    func wait() -> ScriptRunResult {
+        process.waitUntilExit()
+        return ScriptRunResult(
+            exitCode: process.terminationStatus,
+            standardOutput: String(
+                data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? "",
+            standardError: String(
+                data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+        )
+    }
 }
 
 private struct ScriptRunResult {

@@ -223,17 +223,28 @@ public final class GitActivityRefreshStatusStore {
     }
 
     private let userDefaults: UserDefaults
-    private let calendar: Calendar
-    private let dateProvider: () -> Date
+    private let timeEnvironment: TinyBuddyTimeEnvironment
 
     public init(
         userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
-        calendar: Calendar = .current,
-        dateProvider: @escaping () -> Date = Date.init
+        timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment()
     ) {
         self.userDefaults = userDefaults
-        self.calendar = calendar
-        self.dateProvider = dateProvider
+        self.timeEnvironment = timeEnvironment
+    }
+
+    public convenience init(
+        userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
+        calendar: Calendar,
+        dateProvider: @escaping () -> Date = Date.init
+    ) {
+        self.init(
+            userDefaults: userDefaults,
+            timeEnvironment: TinyBuddyTimeEnvironment(
+                calendar: calendar,
+                dateProvider: dateProvider
+            )
+        )
     }
 
     public func load() -> GitActivityRefreshStatus? {
@@ -249,8 +260,11 @@ public final class GitActivityRefreshStatusStore {
             return nil
         }
 
-        guard calendar.isDate(refreshedAt, inSameDayAs: dateProvider()) else {
-            return nil
+        if let context = timeEnvironment.capture() {
+            guard let refreshedDay = context.dayIdentifier(for: refreshedAt),
+                  refreshedDay >= context.dayIdentifier else {
+                return nil
+            }
         }
 
         let legacyReason = userDefaults.string(forKey: Key.reason)?

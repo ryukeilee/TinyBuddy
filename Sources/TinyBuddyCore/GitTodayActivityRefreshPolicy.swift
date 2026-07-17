@@ -7,6 +7,7 @@ public enum GitTodayActivityRefreshTrigger: String, Equatable, Sendable {
     case didWake
     case screensDidWake
     case sessionDidBecomeActive
+    case timeEnvironmentChanged
     case timer
 }
 

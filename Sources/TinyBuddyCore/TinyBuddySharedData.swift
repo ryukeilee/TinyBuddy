@@ -41,6 +41,31 @@ public enum TinyBuddySharedData {
             .appendingPathComponent("\(appGroupIdentifier).plist")
     }
 
+    public static func timeScopeTokenURL(fileManager: FileManager = .default) -> URL? {
+        guard let containerURL = appGroupContainerURL(fileManager: fileManager) else {
+            return nil
+        }
+
+        return containerURL
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Preferences", isDirectory: true)
+            .appendingPathComponent(".tinybuddy-time-scope")
+    }
+
+    public static func loadTimeScopeToken(fileManager: FileManager = .default) -> String? {
+        guard let tokenURL = timeScopeTokenURL(fileManager: fileManager),
+              let value = try? String(contentsOf: tokenURL, encoding: .utf8),
+              let token = value.split(whereSeparator: \.isNewline).first.map(String.init),
+              !token.isEmpty,
+              token.count <= 128,
+              token.unicodeScalars.allSatisfy({
+                  CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_"
+              }) else {
+            return nil
+        }
+        return token
+    }
+
     public static func loadAppGroupPreferencesDictionary(
         fileManager: FileManager = .default
     ) -> [String: Any]? {
@@ -115,6 +140,30 @@ public enum TinyBuddySharedData {
             return .sandboxReadDenied
         }
         return .appGroupUnavailable
+    }
+}
+
+/// Process-local fence for readers in the app process. WidgetKit runs in a
+/// separate process and falls back to the atomically published app-group token.
+public final class TinyBuddyTimeScopeState: @unchecked Sendable {
+    public static let shared = TinyBuddyTimeScopeState()
+
+    private let lock = NSLock()
+    private var processToken: String?
+
+    private init() {}
+
+    public func replaceProcessToken(_ token: String) {
+        lock.lock()
+        processToken = token
+        lock.unlock()
+    }
+
+    public func currentToken() -> String? {
+        lock.lock()
+        let token = processToken
+        lock.unlock()
+        return token ?? TinyBuddySharedData.loadTimeScopeToken()
     }
 }
 

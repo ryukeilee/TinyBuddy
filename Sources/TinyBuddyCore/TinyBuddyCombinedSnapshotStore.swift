@@ -313,6 +313,26 @@ public final class TinyBuddyCombinedSnapshotStore {
         return readStateLocked(repair: false).snapshot
     }
 
+    /// Returns the last valid snapshot only when doing so cannot move the
+    /// displayed business day backward. This is the rollback-safe fallback for
+    /// read-only consumers while a new time scope is being recomputed.
+    public func loadReadOnly(
+        minimumDayIdentifier: String
+    ) -> TinyBuddyCombinedSnapshot? {
+        guard TinyBuddyTimeContext.isValidDayIdentifier(minimumDayIdentifier) else {
+            return nil
+        }
+
+        Self.writerLock.lock()
+        defer { Self.writerLock.unlock() }
+        guard let snapshot = readStateLocked(repair: false).snapshot,
+              TinyBuddyTimeContext.isValidDayIdentifier(snapshot.dayIdentifier),
+              snapshot.dayIdentifier >= minimumDayIdentifier else {
+            return nil
+        }
+        return snapshot
+    }
+
     /// Repairs redundant local copies for a snapshot that was already validated
     /// by `readValidated`. This is intentionally unavailable to read-only
     /// WidgetKit callers through their use of `readValidated` alone.
@@ -341,7 +361,22 @@ public final class TinyBuddyCombinedSnapshotStore {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
 
-        let first = readStateLocked(repair: false)
+        if let expectedDayIdentifier,
+           !TinyBuddyTimeContext.isValidDayIdentifier(expectedDayIdentifier) {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                snapshot: nil,
+                observation: observation(
+                    reason: .staleData,
+                    recovery: .stopped,
+                    attemptCount: 1
+                )
+            )
+        }
+
+        let first = readStateLocked(
+            repair: false,
+            expectedDayIdentifier: expectedDayIdentifier
+        )
         let firstReason = readFailureProvider() ?? first.diagnosticReason
         guard let firstReason else {
             return validatedRead(
@@ -369,7 +404,10 @@ public final class TinyBuddyCombinedSnapshotStore {
         // A second source read is deliberately the only recovery attempt. In
         // particular, unknown formats and permission failures observed on this
         // read are not overwritten or retried.
-        let second = readStateLocked(repair: false)
+        let second = readStateLocked(
+            repair: false,
+            expectedDayIdentifier: expectedDayIdentifier
+        )
         let secondReason = readFailureProvider() ?? second.diagnosticReason
         let secondSnapshot = safeSnapshot(
             second.snapshot,
@@ -532,7 +570,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         let fields = value.split(separator: "\t", omittingEmptySubsequences: false)
         guard (fields.count == 9 || fields.count == 10),
               let revision = Int64(fields[0]), revision >= 0,
-              !fields[1].isEmpty,
+              TinyBuddyTimeContext.isValidDayIdentifier(String(fields[1])),
               let status = PetStatus(rawValue: String(fields[2])),
               fields[1] == fields[3],
               let focusCount = Int(fields[4]), focusCount >= 0,
@@ -638,12 +676,15 @@ public final class TinyBuddyCombinedSnapshotStore {
         return version
     }
 
-    private func readStateLocked(repair: Bool) -> ReadState {
+    private func readStateLocked(
+        repair: Bool,
+        expectedDayIdentifier: String? = nil
+    ) -> ReadState {
         synchronizeReads()
         fallbackDefaults?.synchronize()
 
         let sources = sourceValues()
-        let diagnosticReason = Self.diagnosticReason(in: sources)
+        var diagnosticReason = Self.diagnosticReason(in: sources)
         if diagnosticReason == .versionIncompatible {
             return ReadState(snapshot: nil, revisionFloor: 0, diagnosticReason: diagnosticReason)
         }
@@ -702,12 +743,25 @@ public final class TinyBuddyCombinedSnapshotStore {
             }
         }
 
-        let candidates = committedV2Candidates + legacyCandidates
+        let allCandidates = committedV2Candidates + legacyCandidates
+        let candidates = allCandidates.filter {
+            expectedDayIdentifier == nil || $0.dayIdentifier == expectedDayIdentifier
+        }
+        let scopedStagedCandidates = stagedV2Candidates.filter {
+            expectedDayIdentifier == nil || $0.dayIdentifier == expectedDayIdentifier
+        }
         let selected = Self.newestSnapshot(in: candidates)
-        let newestStaged = Self.newestSnapshot(in: stagedV2Candidates)
+        let newestStaged = Self.newestSnapshot(in: scopedStagedCandidates)
+        if diagnosticReason == nil,
+           expectedDayIdentifier != nil,
+           selected == nil,
+           newestStaged == nil,
+           (!allCandidates.isEmpty || !stagedV2Candidates.isEmpty) {
+            diagnosticReason = .staleData
+        }
         let durableRevisionFloor = max(
             committedMarkerRevision ?? 0,
-            candidates.map(\.revision).max() ?? 0
+            allCandidates.map(\.revision).max() ?? 0
         )
 
         var revisionFloor = durableRevisionFloor
@@ -1230,6 +1284,13 @@ public final class TinyBuddyCombinedSnapshotStore {
         highestRevision: Int64,
         current: TinyBuddyCombinedSnapshot?
     ) -> UpdateResult {
+        guard TinyBuddyTimeContext.isValidDayIdentifier(snapshot.stats.dayIdentifier) else {
+            return UpdateResult(
+                snapshot: current,
+                outcome: .persistenceFailed,
+                didPersist: false
+            )
+        }
         guard highestRevision < Int64.max else {
             return UpdateResult(
                 snapshot: current,
