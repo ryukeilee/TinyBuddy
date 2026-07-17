@@ -5,195 +5,346 @@ private typealias HUDTheme = TinyBuddyHUDTheme
 
 @MainActor
 struct PetView: View {
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     @StateObject private var viewModel: PetViewModel
+    @State private var lowPowerModeEnabled: Bool
 
     private let fixedWidth: CGFloat = 284
     private let hudHeight: CGFloat = 520
 
     init(viewModel: PetViewModel? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel ?? PetViewModel())
+        _lowPowerModeEnabled = State(
+            initialValue: ProcessInfo.processInfo.isLowPowerModeEnabled
+        )
+    }
+
+    private var presentation: TinyBuddyDisplayPresentation {
+        viewModel.displayPresentation
+    }
+
+    private var increasedContrast: Bool {
+        colorSchemeContrast == .increased
+    }
+
+    private var displayLayout: TinyBuddyDisplayLayout {
+        TinyBuddyDisplayLayout(
+            presentation: presentation,
+            environment: TinyBuddyDisplayEnvironment(
+                size: .standard,
+                textScale: dynamicTypeSize.isAccessibilitySize ? .accessibility : .standard,
+                increasedContrast: increasedContrast,
+                reduceMotion: accessibilityReduceMotion,
+                lowPower: lowPowerModeEnabled
+            )
+        )
     }
 
     private var statusAccent: Color {
-        HUDTheme.statusAccent(for: viewModel.hudPresentation.displayState)
+        HUDTheme.statusAccent(
+            for: presentation.accentRole,
+            colorScheme: colorScheme,
+            increasedContrast: increasedContrast
+        )
     }
 
-    private var hudPanelFill: some ShapeStyle {
-        HUDTheme.panelFill
+    private var primaryText: Color {
+        HUDTheme.primaryTextColor(
+            for: colorScheme,
+            increasedContrast: increasedContrast
+        )
+    }
+
+    private var secondaryText: Color {
+        HUDTheme.secondaryTextColor(
+            for: colorScheme,
+            increasedContrast: increasedContrast
+        )
+    }
+
+    private var semanticAnimation: Animation? {
+        displayLayout.allowsMotion ? .easeOut(duration: 0.18) : nil
     }
 
     var body: some View {
-        VStack(spacing: 14) {
-            Capsule()
-                .fill(HUDTheme.hudGold.opacity(0.45))
-                .frame(width: 48, height: 5)
-                .padding(.top, 4)
+        ScrollView(.vertical) {
+            VStack(spacing: 10) {
+                Capsule()
+                    .fill(HUDTheme.hudGold.opacity(increasedContrast ? 0.82 : 0.45))
+                    .frame(width: 48, height: 5)
+                    .padding(.top, 2)
+                    .accessibilityHidden(true)
 
-            header
-            heroPanel
-
-            if viewModel.gitActivityExperience.state.showsActivityMetrics {
-                HStack(spacing: 8) {
-                    CounterView(
-                        title: "今日专注",
-                        value: viewModel.hudPresentation.focusCount,
-                        accent: HUDTheme.energyBlueWhite,
-                        hudGold: HUDTheme.hudGold,
-                        hudPanelFill: hudPanelFill
-                    )
-                    CounterView(
-                        title: "今日完成",
-                        value: viewModel.hudPresentation.completionCount,
-                        accent: statusAccent,
-                        hudGold: HUDTheme.hudGold,
-                        hudPanelFill: hudPanelFill
-                    )
+                header
+                heroPanel
+                if displayLayout.showsMetrics {
+                    metricsPanel
                 }
-
-                if viewModel.gitActivityExperience.state == .partial {
-                    GitActivityExperienceView(
-                        presentation: viewModel.gitActivityExperience,
-                        hudGold: HUDTheme.hudGold,
-                        panelFill: hudPanelFill,
-                        action: viewModel.performGitActivityAction
-                    )
-                } else {
-                    RefreshDiagnosticsView(
-                        diagnostics: viewModel.refreshDiagnostics,
-                        hudGold: HUDTheme.hudGold,
-                        panelFill: hudPanelFill
-                    )
-                }
-            } else {
-                GitActivityExperienceView(
-                    presentation: viewModel.gitActivityExperience,
-                    hudGold: HUDTheme.hudGold,
-                    panelFill: hudPanelFill,
-                    action: viewModel.performGitActivityAction
-                )
+                displayStatePanel
+                statusButtons
             }
-
-            HStack(spacing: 8) {
-                ForEach(PetStatus.allCases) { status in
-                    Button {
-                        viewModel.select(status)
-                    } label: {
-                        Text(status.title)
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .frame(maxWidth: .infinity)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                    }
-                    .buttonStyle(
-                        StatusButtonStyle(
-                            isSelected: viewModel.selectedStatus == status,
-                            accent: accentColor(for: status),
-                            hudGold: HUDTheme.hudGold
-                        )
-                    )
-                }
-            }
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 14)
+            .frame(maxWidth: .infinity, minHeight: hudHeight, alignment: .top)
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 12)
-        .padding(.bottom, 14)
+        .scrollIndicators(.hidden)
         .frame(width: fixedWidth, height: hudHeight, alignment: .top)
         .background(hudBackground)
         .overlay(hudChrome)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .background(WindowConfigurator())
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .NSProcessInfoPowerStateDidChange
+            )
+        ) { _ in
+            updateLowPowerMode()
+        }
+        .transaction { transaction in
+            if displayLayout.allowsMotion == false {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        }
+    }
+
+    private func updateLowPowerMode() {
+        let currentValue = ProcessInfo.processInfo.isLowPowerModeEnabled
+        guard lowPowerModeEnabled != currentValue else {
+            return
+        }
+        lowPowerModeEnabled = currentValue
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text("TINYBUDDY")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(HUDTheme.hudGold.opacity(0.92))
+                    .font(.caption2.weight(.bold).monospaced())
+                    .foregroundStyle(HUDTheme.brandTextColor(
+                        for: colorScheme,
+                        increasedContrast: increasedContrast
+                    ))
                 Text("COMPANION HUD")
-                    .font(.system(size: 18, weight: .heavy, design: .rounded))
-                    .foregroundStyle(HUDTheme.warmWhite)
+                    .font(.headline.weight(.heavy))
+                    .foregroundStyle(primaryText)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.82)
+                    .minimumScaleFactor(0.78)
             }
+            .layoutPriority(1)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 4)
 
             SettingsLink {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(HUDTheme.hudGold.opacity(0.9))
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Color.black.opacity(0.22)))
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(statusAccent)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(HUDTheme.panelFill(
+                        for: colorScheme,
+                        increasedContrast: increasedContrast
+                    )))
                     .overlay(
-                        Circle()
-                            .stroke(HUDTheme.hudGold.opacity(0.42), lineWidth: 1)
+                        Circle().stroke(
+                            HUDTheme.panelBorder(
+                                for: colorScheme,
+                                increasedContrast: increasedContrast
+                            ),
+                            lineWidth: increasedContrast ? 2 : 1
+                        )
                     )
             }
             .buttonStyle(.plain)
             .help("打开设置")
 
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusAccent)
-                        .frame(width: 8, height: 8)
-                        .shadow(color: statusAccent.opacity(0.8), radius: 5)
-                    Text("STATUS")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(HUDTheme.hudGold.opacity(0.82))
-                }
-
-                Text(viewModel.hudPresentation.statusTitle)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(statusAccent)
-                    .lineLimit(1)
-            }
+            Label(presentation.statusTitle, systemImage: presentation.systemImage)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(statusAccent)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .accessibilityLabel("当前状态：\(presentation.statusTitle)")
         }
     }
 
     private var heroPanel: some View {
-        HStack(alignment: .center, spacing: 14) {
-            TinyBuddyArcReactorCore()
-                .frame(width: 112, height: 112)
+        HStack(alignment: .center, spacing: 12) {
+            if displayLayout.showsExpression {
+                TinyBuddyArcReactorCore(showsLabel: false)
+                    .frame(width: 104, height: 104)
+                    .overlay {
+                        Text(presentation.expression)
+                            .font(.caption2.weight(.heavy))
+                            .foregroundStyle(HUDTheme.darkMetal.opacity(0.86))
+                            .lineLimit(1)
+                    }
+                    .accessibilityHidden(true)
+            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                hudLabel("MOOD")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("CURRENT STATE")
+                    .font(.caption2.weight(.semibold).monospaced())
+                    .foregroundStyle(HUDTheme.brandTextColor(
+                        for: colorScheme,
+                        increasedContrast: increasedContrast
+                    ))
 
-                Text(viewModel.hudPresentation.statusDisplayTitle)
-                    .font(.system(size: 15, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
+                Text(presentation.statusTitle)
+                    .font(.headline.weight(.heavy))
+                    .foregroundStyle(primaryText)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
+                    .minimumScaleFactor(0.78)
 
-                Text(heroMessage)
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.68))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineLimit(3)
-
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusAccent)
-                        .frame(width: 6, height: 6)
-                    Text(viewModel.hudPresentation.statusTitle)
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(statusAccent)
+                if displayLayout.showsProject,
+                   let recentProjectName = presentation.recentProjectName {
+                    Text(recentProjectName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(secondaryText)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
+
+                Label(presentation.statusTitle, systemImage: presentation.systemImage)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(statusAccent)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
+        .padding(10)
+        .background(panelFill)
+        .overlay(panelBorder)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(semanticAnimation, value: presentation.transitionIdentity)
+    }
+
+    @ViewBuilder
+    private var metricsPanel: some View {
+        let metrics = Group {
+            CounterView(
+                title: "今日专注",
+                value: presentation.focusCountText,
+                numericValue: presentation.focusCount,
+                accent: HUDTheme.energyBlueWhite,
+                primaryText: primaryText,
+                secondaryText: secondaryText,
+                panelFill: panelFill,
+                border: HUDTheme.panelBorder(
+                    for: colorScheme,
+                    increasedContrast: increasedContrast
+                ),
+                animation: semanticAnimation
+            )
+            CounterView(
+                title: "今日完成",
+                value: presentation.completionCountText,
+                numericValue: presentation.completionCount,
+                accent: statusAccent,
+                primaryText: primaryText,
+                secondaryText: secondaryText,
+                panelFill: panelFill,
+                border: HUDTheme.panelBorder(
+                    for: colorScheme,
+                    increasedContrast: increasedContrast
+                ),
+                animation: semanticAnimation
+            )
+        }
+
+        if displayLayout.stacksMetricsVertically {
+            VStack(spacing: 8) {
+                metrics
+            }
+        } else {
+            HStack(spacing: 8) {
+                metrics
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(hudPanelFill)
+    }
+
+    private var displayStatePanel: some View {
+        ZStack(alignment: .topLeading) {
+            UnifiedDisplayStateView(
+                presentation: presentation,
+                layout: displayLayout,
+                accent: statusAccent,
+                primaryText: primaryText,
+                secondaryText: secondaryText,
+                action: viewModel.performGitActivityAction
+            )
+            .id(presentation.transitionIdentity)
+            .transition(.opacity)
+        }
+        .frame(
+            maxWidth: .infinity,
+            minHeight: dynamicTypeSize.isAccessibilitySize ? 138 : 122,
+            alignment: .topLeading
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(statusAccent.opacity(0.42), lineWidth: 1)
+        .padding(10)
+        .background(panelFill)
+        .overlay(panelBorder)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(semanticAnimation, value: presentation.transitionIdentity)
+    }
+
+    @ViewBuilder
+    private var statusButtons: some View {
+        let buttons = ForEach(PetStatus.allCases) { status in
+            Button {
+                viewModel.select(status)
+            } label: {
+                Text(status.title)
+                    .font(.caption.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.72)
+            }
+            .buttonStyle(
+                StatusButtonStyle(
+                    isSelected: viewModel.selectedStatus == status,
+                    accent: accentColor(for: status),
+                    primaryText: primaryText,
+                    border: HUDTheme.panelBorder(
+                        for: colorScheme,
+                        increasedContrast: increasedContrast
+                    )
+                )
+            )
+            .accessibilityAddTraits(
+                viewModel.selectedStatus == status ? .isSelected : []
+            )
+        }
+
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(spacing: 8) {
+                buttons
+            }
+        } else {
+            HStack(spacing: 8) {
+                buttons
+            }
+        }
+    }
+
+    private var panelFill: some ShapeStyle {
+        HUDTheme.panelFill(
+            for: colorScheme,
+            increasedContrast: increasedContrast
         )
+    }
+
+    private var panelBorder: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(
+                statusAccent.opacity(increasedContrast ? 0.88 : 0.48),
+                lineWidth: increasedContrast ? 2 : 1
+            )
     }
 
     private var hudBackground: some View {
@@ -202,334 +353,173 @@ struct PetView: View {
             blueGlowCenter: .topLeading,
             redGlowRadius: 260,
             blueGlowRadius: 140,
-            redGlowOpacity: 0.34,
-            blueGlowOpacity: 0.16,
-            scanLineCount: 5
+            redGlowOpacity: colorScheme == .dark ? 0.34 : 0.12,
+            blueGlowOpacity: colorScheme == .dark ? 0.16 : 0.08,
+            scanLineCount: increasedContrast ? 3 : 5
         )
-            .shadow(color: .black.opacity(0.38), radius: 20, x: 0, y: 12)
+        .shadow(color: .black.opacity(0.24), radius: 20, x: 0, y: 12)
     }
 
     private var hudChrome: some View {
         RoundedRectangle(cornerRadius: 22, style: .continuous)
-            .stroke(HUDTheme.chromeBorder, lineWidth: 1)
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
-                    .padding(4)
-            }
-    }
-
-    private func hudLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundStyle(HUDTheme.hudGold.opacity(0.78))
-    }
-
-    private var heroMessage: String {
-        switch viewModel.displayState {
-        case .idle:
-            return "今天还没开始，选个状态让 TinyBuddy 陪你进入节奏。"
-        case .focusing:
-            return "保持当前专注，今天的投入会持续累积到专注统计。"
-        case .completed:
-            return "今天已经有完成记录，继续推进下一项也不错。"
-        case .active:
-            return "今天既有专注也有完成，继续保持当前节奏。"
-        }
+            .stroke(
+                HUDTheme.panelBorder(
+                    for: colorScheme,
+                    increasedContrast: increasedContrast
+                ),
+                lineWidth: increasedContrast ? 2 : 1
+            )
     }
 
     private func accentColor(for status: PetStatus) -> Color {
         switch status {
         case .idle:
-            return HUDTheme.hudGold
+            return HUDTheme.statusAccent(
+                for: .neutral,
+                colorScheme: colorScheme,
+                increasedContrast: increasedContrast
+            )
         case .focusing:
-            return HUDTheme.energyBlueWhite
+            return HUDTheme.statusAccent(
+                for: .focus,
+                colorScheme: colorScheme,
+                increasedContrast: increasedContrast
+            )
         case .completedOnce:
-            return Color(red: 0.47, green: 0.82, blue: 0.57)
+            return HUDTheme.statusAccent(
+                for: .success,
+                colorScheme: colorScheme,
+                increasedContrast: increasedContrast
+            )
         }
     }
 }
 
-private struct GitActivityExperienceView: View {
-    let presentation: GitActivityExperiencePresentation
-    let hudGold: Color
-    let panelFill: AnyShapeStyle
+private struct UnifiedDisplayStateView: View {
+    let presentation: TinyBuddyDisplayPresentation
+    let layout: TinyBuddyDisplayLayout
+    let accent: Color
+    let primaryText: Color
+    let secondaryText: Color
     let action: () -> Void
 
-    init(
-        presentation: GitActivityExperiencePresentation,
-        hudGold: Color,
-        panelFill: some ShapeStyle,
-        action: @escaping () -> Void
-    ) {
-        self.presentation = presentation
-        self.hudGold = hudGold
-        self.panelFill = AnyShapeStyle(panelFill)
-        self.action = action
-    }
-
-    private var accent: Color {
-        switch presentation.state {
-        case .loading:
-            return HUDTheme.energyBlueWhite
-        case .authorizationRequired, .authorizationInvalid, .noRepositories, .partial:
-            return Color(red: 0.89, green: 0.66, blue: 0.23)
-        case .failed:
-            return Color(red: 0.84, green: 0.34, blue: 0.29)
-        case .noActivity:
-            return hudGold
-        case .ready:
-            return Color(red: 0.31, green: 0.68, blue: 0.44)
-        }
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                if presentation.state == .loading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(accent)
-                } else {
-                    Image(systemName: presentation.systemImage)
-                        .foregroundStyle(accent)
-                }
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: presentation.systemImage)
+                    .foregroundStyle(accent)
+                Text(presentation.title)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(primaryText)
+                    .lineLimit(2)
 
-                Text("GIT ACTIVITY")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(hudGold.opacity(0.78))
+                Spacer(minLength: 4)
+
+                Text("刷新中")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(accent)
+                    .opacity(presentation.isRefreshing ? 1 : 0)
+                    .accessibilityHidden(presentation.isRefreshing == false)
+                    .accessibilityLabel("数据正在刷新")
             }
 
-            Text(presentation.title)
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text(presentation.message)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.72))
-                .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(4)
-
-            if let actionTitle = presentation.actionTitle {
-                Button(actionTitle, action: action)
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Capsule(style: .continuous).fill(accent.opacity(0.35)))
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .stroke(accent.opacity(0.75), lineWidth: 1)
-                    )
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(panelFill)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(accent.opacity(0.48), lineWidth: 1)
-        )
-    }
-}
-
-private struct RefreshDiagnosticsView: View {
-    let diagnostics: PetViewModel.RefreshDiagnostics
-    let hudGold: Color
-    let panelFill: AnyShapeStyle
-
-    init(
-        diagnostics: PetViewModel.RefreshDiagnostics,
-        hudGold: Color,
-        panelFill: some ShapeStyle
-    ) {
-        self.diagnostics = diagnostics
-        self.hudGold = hudGold
-        self.panelFill = AnyShapeStyle(panelFill)
-    }
-
-    private var badgeColor: Color {
-        switch diagnostics.outcome {
-        case .succeeded:
-            return Color(red: 0.31, green: 0.68, blue: 0.44)
-        case .partial:
-            return Color(red: 0.89, green: 0.66, blue: 0.23)
-        case .skipped:
-            return Color(red: 0.89, green: 0.66, blue: 0.23)
-        case .failed:
-            return Color(red: 0.84, green: 0.34, blue: 0.29)
-        case nil:
-            return Color.white.opacity(0.42)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("REFRESH DIAGNOSTICS")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(hudGold.opacity(0.78))
-
-                Spacer(minLength: 8)
-
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(badgeColor)
-                        .frame(width: 7, height: 7)
-                        .shadow(color: badgeColor.opacity(0.75), radius: 5)
-                    Text(diagnostics.badgeTitle)
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color.black.opacity(0.26))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(badgeColor.opacity(0.62), lineWidth: 1)
-                )
-            }
-
-            Text(diagnostics.summary)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(diagnostics.detail)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.64))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-
-            if let reason = diagnostics.reason {
-                Text(reason)
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(badgeColor.opacity(0.92))
-                    .lineLimit(3)
+            if layout.showsMessage {
+                Text(presentation.message)
+                    .font(.caption)
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(layout.messageLineLimit)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let actionTitle = diagnostics.actionTitle {
-                SettingsLink {
-                    Text(actionTitle)
+            HStack(alignment: .center, spacing: 8) {
+                if let actionTitle = presentation.actionTitle {
+                    Button(actionTitle, action: action)
+                        .buttonStyle(.borderless)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(accent)
+                        .accessibilityHint(presentation.message)
                 }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color.black.opacity(0.3))
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .stroke(badgeColor.opacity(0.7), lineWidth: 1)
-                    )
+
+                Spacer(minLength: 0)
+
+                if layout.showsDataDate,
+                   let dataDateText = presentation.dataDateText {
+                    Text(dataDateText)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(secondaryText)
+                        .lineLimit(1)
+                }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(panelFill)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(badgeColor.opacity(0.42), lineWidth: 1)
-        )
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .contain)
     }
 }
 
-private struct CounterView: View {
+private struct CounterView<PanelFill: ShapeStyle>: View {
     let title: String
-    let value: Int
+    let value: String
+    let numericValue: Int
     let accent: Color
-    let hudGold: Color
-    let hudPanelFill: AnyShapeStyle
-
-    init(title: String, value: Int, accent: Color, hudGold: Color, hudPanelFill: some ShapeStyle) {
-        self.title = title
-        self.value = value
-        self.accent = accent
-        self.hudGold = hudGold
-        self.hudPanelFill = AnyShapeStyle(hudPanelFill)
-    }
+    let primaryText: Color
+    let secondaryText: Color
+    let panelFill: PanelFill
+    let border: Color
+    let animation: Animation?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(hudGold.opacity(0.78))
+                .font(.caption2.weight(.semibold).monospaced())
+                .foregroundStyle(secondaryText)
                 .lineLimit(1)
-                .minimumScaleFactor(0.76)
-            Text("\(value)")
-                .font(.system(size: 21, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-                .monospacedDigit()
+            Text(value)
+                .font(.title3.weight(.heavy).monospacedDigit())
+                .foregroundStyle(primaryText)
+                .contentTransition(.numericText())
                 .lineLimit(1)
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(accent)
-                    .frame(width: 6, height: 6)
-                Text("TODAY")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(accent.opacity(0.92))
-            }
+                .minimumScaleFactor(0.7)
+            Label("TODAY", systemImage: "circle.fill")
+                .font(.caption2.weight(.bold).monospaced())
+                .foregroundStyle(accent)
+                .labelStyle(.titleAndIcon)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(hudPanelFill)
-        )
+        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(panelFill)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(accent.opacity(0.36), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(border, lineWidth: 1)
         )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .animation(animation, value: numericValue)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title) \(value)")
     }
 }
 
 private struct StatusButtonStyle: ButtonStyle {
     let isSelected: Bool
     let accent: Color
-    let hudGold: Color
+    let primaryText: Color
+    let border: Color
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .padding(.vertical, 9)
-            .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.76))
+            .padding(.vertical, 8)
+            .foregroundStyle(primaryText.opacity(isSelected ? 1 : 0.78))
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(
                         isSelected
-                        ? AnyShapeStyle(
-                            LinearGradient(
-                                colors: [
-                                    accent.opacity(configuration.isPressed ? 0.72 : 0.88),
-                                    Color.black.opacity(0.30)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        : AnyShapeStyle(Color.white.opacity(configuration.isPressed ? 0.12 : 0.08))
+                            ? accent.opacity(configuration.isPressed ? 0.54 : 0.38)
+                            : border.opacity(configuration.isPressed ? 0.20 : 0.10)
                     )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(
-                        isSelected ? accent.opacity(0.72) : hudGold.opacity(0.22),
-                        lineWidth: 1
-                    )
+                    .stroke(isSelected ? accent : border, lineWidth: isSelected ? 2 : 1)
             )
     }
 }

@@ -621,7 +621,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertFalse(processIDsFunction.contains("pgrep"))
     }
 
-    func testWidgetSnapshotConsumptionRequiresExactRevisionAndDay() throws {
+    func testWidgetSnapshotConsumptionRequiresExactRevisionAfterChangeAndCompatibleRevisionWhenStable() throws {
         let verificationFunction = try XCTUnwrap(
             shellFunction(named: "verify_widget_snapshot_consumption", in: try buildAndRunScript())
         )
@@ -630,22 +630,29 @@ final class BuildAndRunScriptTests: XCTestCase {
         let fakeLog = temporaryDirectory.appendingPathComponent("fake-log.sh")
         try Data("""
         #!/bin/bash
-        echo "snapshot consumed schema=2 revision=$FAKE_REVISION day=2026-07-17"
+        echo "snapshot consumed schema=$FAKE_SCHEMA revision=$FAKE_REVISION day=$FAKE_DAY"
         """.utf8).write(to: fakeLog)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: fakeLog.path
         )
 
-        func run(revision: String) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
+        func run(
+            revision: String,
+            schema: String = "2",
+            day: String = "2026-07-17",
+            contentChanged: Bool = true
+        ) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
             try runBash("""
             set -euo pipefail
             LOG_BIN=\(shellQuote(fakeLog.path))
+            FAKE_SCHEMA=\(shellQuote(schema))
             FAKE_REVISION=\(shellQuote(revision))
-            export FAKE_REVISION
+            FAKE_DAY=\(shellQuote(day))
+            export FAKE_SCHEMA FAKE_REVISION FAKE_DAY
             WIDGET_RUNTIME_TIMEOUT=0
             \(verificationFunction)
-            verify_widget_snapshot_consumption 999 2 4 2026-07-17
+            verify_widget_snapshot_consumption 999 2 4 2026-07-17 \(contentChanged)
             """)
         }
 
@@ -656,6 +663,21 @@ final class BuildAndRunScriptTests: XCTestCase {
         let exactMatch = try run(revision: "4")
         XCTAssertEqual(exactMatch.exitCode, 0)
         XCTAssertTrue(exactMatch.standardOutput.contains("revision=4 day=2026-07-17"))
+
+        let stablePriorRevision = try run(revision: "3", contentChanged: false)
+        XCTAssertEqual(stablePriorRevision.exitCode, 0)
+        XCTAssertTrue(stablePriorRevision.standardOutput.contains("consumed_revision=3"))
+        XCTAssertTrue(stablePriorRevision.standardOutput.contains("current_revision=4"))
+
+        let futureRevision = try run(revision: "5", contentChanged: false)
+        XCTAssertEqual(futureRevision.exitCode, 1)
+        XCTAssertTrue(futureRevision.standardError.contains("compatible stable shared snapshot"))
+
+        let wrongSchema = try run(revision: "3", schema: "3", contentChanged: false)
+        XCTAssertEqual(wrongSchema.exitCode, 1)
+
+        let wrongDay = try run(revision: "3", day: "2026-07-16", contentChanged: false)
+        XCTAssertEqual(wrongDay.exitCode, 1)
     }
 
     func testHUDSnapshotConsumptionRequiresExactRevisionAndDay() throws {
@@ -904,6 +926,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertTrue(verificationFunction.contains("verify_shared_snapshot_contract"))
         XCTAssertTrue(verificationFunction.contains("verify_hud_snapshot_consumption"))
         XCTAssertTrue(verificationFunction.contains("verify_widget_snapshot_consumption"))
+        XCTAssertTrue(verificationFunction.contains("$RELEASE_REFRESH_WIDGET_CONTENT_CHANGED"))
         XCTAssertTrue(verificationFunction.contains("verify_running_bundle_process"))
         let appWaitOffset = try XCTUnwrap(
             verificationFunction.range(of: "wait_for_running_bundle_process \"$APP_NAME\"")
@@ -1046,13 +1069,19 @@ final class BuildAndRunScriptTests: XCTestCase {
             baselineDate: Date(timeIntervalSince1970: 1_700_000_050),
             outcome: "partial",
             authorizedRootCount: 2,
-            savedRecordCount: 2
+            savedRecordCount: 2,
+            trigger: "reopen",
+            widgetContentChanged: false,
+            widgetReloaded: false
         )
 
         XCTAssertEqual(successful.exitCode, 0)
         XCTAssertTrue(successful.standardOutput.contains("verified sandbox bookmark recovery"))
         XCTAssertTrue(successful.standardOutput.contains("authorized_roots=2"))
         XCTAssertTrue(successful.standardOutput.contains("outcome=partial"))
+        XCTAssertTrue(successful.standardOutput.contains("trigger=reopen"))
+        XCTAssertTrue(successful.standardOutput.contains("widget_content_changed=false"))
+        XCTAssertTrue(successful.standardOutput.contains("widget_reloaded=false"))
 
         let firstLaunch = try runSandboxRecoveryProbe(
             executableDate: Date(timeIntervalSince1970: 1_700_000_000),
@@ -1080,6 +1109,37 @@ final class BuildAndRunScriptTests: XCTestCase {
 
         XCTAssertEqual(reusedBaseline.exitCode, 1)
         XCTAssertTrue(reusedBaseline.standardError.contains("did not publish a fresh"))
+
+        let unrelatedTrigger = try runSandboxRecoveryProbe(
+            executableDate: Date(timeIntervalSince1970: 1_700_000_000),
+            statusDate: statusDate,
+            baselineDate: Date(timeIntervalSince1970: 1_700_000_050),
+            outcome: "succeeded",
+            authorizedRootCount: 2,
+            savedRecordCount: 2,
+            trigger: "timer",
+            widgetContentChanged: false,
+            widgetReloaded: false
+        )
+
+        XCTAssertEqual(unrelatedTrigger.exitCode, 1)
+        XCTAssertTrue(unrelatedTrigger.standardError.contains("did not publish a fresh"))
+
+        let failedRequiredReload = try runSandboxRecoveryProbe(
+            executableDate: Date(timeIntervalSince1970: 1_700_000_000),
+            statusDate: statusDate,
+            baselineDate: Date(timeIntervalSince1970: 1_700_000_050),
+            outcome: "succeeded",
+            authorizedRootCount: 2,
+            savedRecordCount: 2,
+            trigger: "launch",
+            widgetContentChanged: true,
+            widgetReloaded: false
+        )
+
+        XCTAssertEqual(failedRequiredReload.exitCode, 1)
+        XCTAssertTrue(failedRequiredReload.standardError.contains("observed_widget_content_changed=true"))
+        XCTAssertTrue(failedRequiredReload.standardError.contains("observed_widget_reloaded=false"))
 
         let corruptSavedAuthorization = try runSandboxRecoveryProbe(
             executableDate: Date(timeIntervalSince1970: 1_700_000_000),
@@ -1179,7 +1239,10 @@ final class BuildAndRunScriptTests: XCTestCase {
         outcome: String,
         authorizedRootCount: Int,
         savedRecordCount: Int,
-        diagnosticReason: String = ""
+        diagnosticReason: String = "",
+        trigger: String = "launch",
+        widgetContentChanged: Bool = true,
+        widgetReloaded: Bool = true
     ) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
         let script = try buildAndRunScript()
         let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddySandboxRecoveryTests")
@@ -1200,7 +1263,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         let groupPreferences = temporaryDirectory.appendingPathComponent("group.plist")
         try writePropertyList([
             "tinybuddy.gitRefreshStatus.refreshedAt": statusDate,
-            "tinybuddy.gitRefreshStatus.trigger": "launch",
+            "tinybuddy.gitRefreshStatus.trigger": trigger,
             "tinybuddy.gitRefreshStatus.outcome": outcome,
             "tinybuddy.gitRefreshStatus.diagnostic.reason": diagnosticReason,
             "tinybuddy.gitRefreshStatus.metrics.authorizedRootCount": authorizedRootCount,
@@ -1209,7 +1272,8 @@ final class BuildAndRunScriptTests: XCTestCase {
             "tinybuddy.gitRefreshStatus.metrics.recomputedRepositoryCount": 2,
             "tinybuddy.gitRefreshStatus.metrics.invalidRepositoryCount": 0,
             "tinybuddy.gitRefreshStatus.metrics.sharedDataWritten": true,
-            "tinybuddy.gitRefreshStatus.metrics.widgetReloaded": true
+            "tinybuddy.gitRefreshStatus.metrics.widgetContentChanged": widgetContentChanged,
+            "tinybuddy.gitRefreshStatus.metrics.widgetReloaded": widgetReloaded
         ], to: groupPreferences)
 
         let functions = try [
@@ -1234,6 +1298,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         GIT_REFRESH_STATUS_RECOMPUTED_REPOSITORY_COUNT_KEY=tinybuddy.gitRefreshStatus.metrics.recomputedRepositoryCount
         GIT_REFRESH_STATUS_INVALID_REPOSITORY_COUNT_KEY=tinybuddy.gitRefreshStatus.metrics.invalidRepositoryCount
         GIT_REFRESH_STATUS_SHARED_DATA_WRITTEN_KEY=tinybuddy.gitRefreshStatus.metrics.sharedDataWritten
+        GIT_REFRESH_STATUS_WIDGET_CONTENT_CHANGED_KEY=tinybuddy.gitRefreshStatus.metrics.widgetContentChanged
         GIT_REFRESH_STATUS_WIDGET_RELOADED_KEY=tinybuddy.gitRefreshStatus.metrics.widgetReloaded
         SANDBOX_RECOVERY_TIMEOUT=0
         \(functions)

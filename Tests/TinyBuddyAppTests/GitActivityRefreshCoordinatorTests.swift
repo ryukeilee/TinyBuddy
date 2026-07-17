@@ -166,6 +166,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 0,
+                    widgetContentChanged: true,
                     widgetReloaded: true,
                     reason: "gitActivityRefresh.authorizationResolution.authorizationRequired"
                 )
@@ -201,6 +202,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 0,
+                    widgetContentChanged: true,
                     widgetReloaded: true,
                     reason: "gitActivityRefresh.authorizationResolution.authorizationInvalid"
                 )
@@ -252,6 +254,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 ),
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
+                    widgetContentChanged: true,
                     widgetReloaded: true,
                     reason: "gitActivityRefresh.scriptLookup.scriptMissing"
                 )
@@ -299,6 +302,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 1,
+                    widgetContentChanged: true,
                     widgetReloaded: true
                 )
             )
@@ -328,6 +332,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             )
         )
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetContentChanged, true)
         XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, true)
     }
 
@@ -350,6 +355,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 0)
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
         XCTAssertNil(harness.lastRefreshStatus?.diagnostic)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetContentChanged, true)
         XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, false)
         XCTAssertEqual(
             harness.latestHiddenDiagnosticSummary?.identifier,
@@ -436,12 +442,13 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 reflogUnchangedSkipCount: 2,
                 recomputedRepositoryCount: 3,
                 sharedDataWritten: true,
+                widgetContentChanged: true,
                 widgetReloaded: true
             )
         )
     }
 
-    func testSharedDataWriteReloadsWidgetWhenPresentationIsUnchanged() {
+    func testSharedWriteAndRefreshTimestampDoNotReloadUnchangedWidgetPresentation() {
         let harness = makeHarness()
         harness.setScriptMetrics(unchangedScriptMetrics)
         harness.performAndWaitForRefresh {
@@ -451,13 +458,14 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         harness.advanceCurrentDate(by: 61)
         harness.setScriptMetrics(changedScriptMetrics)
-        harness.performAndWaitForWidgetReloadCount(2) {
+        harness.performAndWaitForStatusCount(2) {
             harness.coordinator.handleManualRefresh()
         }
 
-        XCTAssertEqual(harness.widgetReloadCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.lastRefreshStatus?.metrics?.sharedDataWritten, true)
-        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, true)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetContentChanged, false)
+        XCTAssertEqual(harness.lastRefreshStatus?.metrics?.widgetReloaded, false)
     }
 
     func testPartialScriptRefreshPropagatesWarningWithoutFalseSuccess() {
@@ -841,6 +849,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 1,
+                    widgetContentChanged: true,
                     widgetReloaded: true,
                     reason: "gitActivityRefresh.scriptExecution.scriptExecutionFailed"
                 )
@@ -1713,6 +1722,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
                 metrics: GitActivityRefreshMetrics(
                     durationMilliseconds: 0,
                     authorizedRootCount: 1,
+                    widgetContentChanged: true,
                     widgetReloaded: true,
                     reason: "gitActivityRefresh.scriptExecution.scriptExecutionFailed"
                 )

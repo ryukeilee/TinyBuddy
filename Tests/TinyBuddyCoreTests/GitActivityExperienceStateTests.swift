@@ -8,7 +8,7 @@ final class GitActivityExperienceStateTests: XCTestCase {
         recentProjectName: nil
     )
 
-    func testMissingStatusAndActiveRefreshAreLoading() {
+    func testMissingStatusLoadsButRefreshWithUsableDataKeepsCurrentState() {
         XCTAssertEqual(
             GitActivityExperienceState(refreshStatus: nil, activitySnapshot: emptyActivity),
             .loading
@@ -19,7 +19,7 @@ final class GitActivityExperienceStateTests: XCTestCase {
                 activitySnapshot: emptyActivity,
                 isRefreshing: true
             ),
-            .loading
+            .noActivity
         )
     }
 

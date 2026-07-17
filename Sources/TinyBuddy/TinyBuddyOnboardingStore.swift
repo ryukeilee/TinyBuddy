@@ -8,18 +8,34 @@ final class TinyBuddyOnboardingStore {
     }
 
     enum Key {
-        static let state = "tinybuddy.onboarding.state.v1"
+        static let state = TinyBuddyDisplaySharedState.onboardingStateKey
     }
 
     private let userDefaults: UserDefaults
+    private let sharedDefaults: UserDefaults
 
     init(
         userDefaults: UserDefaults = .standard,
         sharedDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults()
     ) {
         self.userDefaults = userDefaults
+        self.sharedDefaults = sharedDefaults
 
-        guard userDefaults.string(forKey: Key.state).flatMap(State.init(rawValue:)) == nil else {
+        if let persistedState = userDefaults.string(forKey: Key.state).flatMap(State.init(rawValue:)) {
+            TinyBuddyDisplaySharedState.saveOnboardingCompleted(
+                persistedState == .completed,
+                userDefaults: sharedDefaults
+            )
+            return
+        }
+
+        if let sharedState = TinyBuddyDisplaySharedState.onboardingCompleted(
+            userDefaults: sharedDefaults
+        ) {
+            userDefaults.set(
+                sharedState ? State.completed.rawValue : State.pending.rawValue,
+                forKey: Key.state
+            )
             return
         }
 
@@ -28,6 +44,10 @@ final class TinyBuddyOnboardingStore {
             sharedDefaults: sharedDefaults
         ) ? .completed : .pending
         userDefaults.set(initialState.rawValue, forKey: Key.state)
+        TinyBuddyDisplaySharedState.saveOnboardingCompleted(
+            initialState == .completed,
+            userDefaults: sharedDefaults
+        )
     }
 
     var state: State {
@@ -44,6 +64,10 @@ final class TinyBuddyOnboardingStore {
             return false
         }
         userDefaults.set(State.completed.rawValue, forKey: Key.state)
+        TinyBuddyDisplaySharedState.saveOnboardingCompleted(
+            true,
+            userDefaults: sharedDefaults
+        )
         return true
     }
 

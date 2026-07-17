@@ -1,15 +1,13 @@
+import OSLog
 import SwiftUI
 import TinyBuddyCore
 import WidgetKit
-import OSLog
 
 private typealias HUDTheme = TinyBuddyHUDTheme
 
 struct TinyBuddyEntry: TimelineEntry {
     let date: Date
-    let snapshot: TinyBuddySnapshot
-    let activitySnapshot: GitTodayActivitySnapshot
-    let refreshStatus: GitActivityRefreshStatus?
+    let presentation: TinyBuddyDisplayPresentation
 }
 
 struct TinyBuddyProvider: TimelineProvider {
@@ -17,6 +15,7 @@ struct TinyBuddyProvider: TimelineProvider {
     private let store: DailyStatsStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
+    private let sharedDefaults: UserDefaults
     private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
 
     init() {
@@ -27,12 +26,13 @@ struct TinyBuddyProvider: TimelineProvider {
         self.refreshStatusStore = GitActivityRefreshStatusStore(
             timeEnvironment: timeEnvironment
         )
+        self.sharedDefaults = TinyBuddySharedData.makeUserDefaults()
     }
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
-        let now = timeEnvironment.capture()?.now ?? Date(timeIntervalSince1970: 0)
-        return TinyBuddyEntry(
-            date: now,
+        let timeContext = currentTimeContext()
+        return entry(
+            at: timeContext.now,
             snapshot: TinyBuddySnapshot(
                 status: .idle,
                 stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 0, completionCount: 0)
@@ -43,11 +43,13 @@ struct TinyBuddyProvider: TimelineProvider {
                 recentProjectName: "TinyBuddy"
             ),
             refreshStatus: GitActivityRefreshStatus(
-                refreshedAt: now,
+                refreshedAt: timeContext.now,
                 trigger: .launch,
                 outcome: .succeeded,
                 metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
-            )
+            ),
+            dataAvailability: .available,
+            timeContext: timeContext
         )
     }
 
@@ -74,23 +76,20 @@ struct TinyBuddyProvider: TimelineProvider {
     }
 
     private func makeRolloverEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
-        TinyBuddyEntry(
-            date: timeContext.now,
+        entry(
+            at: timeContext.now,
             snapshot: neutralSnapshot(dayIdentifier: timeContext.dayIdentifier),
             activitySnapshot: neutralActivitySnapshot,
-            refreshStatus: nil
+            refreshStatus: nil,
+            dataAvailability: .available,
+            timeContext: timeContext
         )
     }
 
     private func makeEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
-        let date = timeContext.now
         let expectedDayIdentifier = timeContext.dayIdentifier
-        let refreshStatus: GitActivityRefreshStatus? = refreshStatusStore.load().flatMap { status in
-            guard timeContext.dayIdentifier(for: status.refreshedAt)
-                == expectedDayIdentifier else {
-                return nil
-            }
-            return status
+        let refreshStatus = refreshStatusStore.load().flatMap { status in
+            status.isForDisplayDay(in: timeContext) ? status : nil
         }
         let combinedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
@@ -104,11 +103,16 @@ struct TinyBuddyProvider: TimelineProvider {
             Self.logger.notice(
                 "snapshot consumed schema=\(TinyBuddyCombinedSnapshotStore.currentSchemaVersion, privacy: .public) revision=\(combinedSnapshot.revision, privacy: .public) day=\(combinedSnapshot.dayIdentifier, privacy: .public)"
             )
-            return TinyBuddyEntry(
-                date: date,
+            return entry(
+                at: timeContext.now,
                 snapshot: combinedSnapshot.snapshot,
                 activitySnapshot: combinedSnapshot.activitySnapshot,
-                refreshStatus: refreshStatus
+                refreshStatus: refreshStatus,
+                dataAvailability: TinyBuddyDisplayDataAvailability(
+                    observation: combinedRead.observation,
+                    hasSnapshot: true
+                ),
+                timeContext: timeContext
             )
         }
 
@@ -117,32 +121,68 @@ struct TinyBuddyProvider: TimelineProvider {
            let retainedSnapshot = combinedSnapshotStore.loadReadOnly(
                minimumDayIdentifier: expectedDayIdentifier
            ) {
-            return TinyBuddyEntry(
-                date: date,
+            return entry(
+                at: timeContext.now,
                 snapshot: retainedSnapshot.snapshot,
                 activitySnapshot: retainedSnapshot.activitySnapshot,
-                refreshStatus: refreshStatus
+                refreshStatus: refreshStatus,
+                dataAvailability: .stale,
+                timeContext: timeContext
             )
         }
 
         if let observation = combinedRead.observation,
            observation.reason == .staleData || observation.reason == .snapshotCorrupt {
             let fallbackSnapshot = store.loadSnapshot()
-            return TinyBuddyEntry(
-                date: date,
+            return entry(
+                at: timeContext.now,
                 snapshot: fallbackSnapshot.stats.dayIdentifier == expectedDayIdentifier
                     ? fallbackSnapshot
                     : neutralSnapshot(dayIdentifier: expectedDayIdentifier),
                 activitySnapshot: neutralActivitySnapshot,
-                refreshStatus: refreshStatus
+                refreshStatus: refreshStatus,
+                dataAvailability: TinyBuddyDisplayDataAvailability(
+                    observation: observation,
+                    hasSnapshot: false
+                ),
+                timeContext: timeContext
             )
         }
 
-        return TinyBuddyEntry(
-            date: date,
+        return entry(
+            at: timeContext.now,
             snapshot: neutralSnapshot(dayIdentifier: expectedDayIdentifier),
             activitySnapshot: neutralActivitySnapshot,
-            refreshStatus: refreshStatus
+            refreshStatus: refreshStatus,
+            dataAvailability: TinyBuddyDisplayDataAvailability(
+                observation: combinedRead.observation,
+                hasSnapshot: false
+            ),
+            timeContext: timeContext
+        )
+    }
+
+    private func entry(
+        at date: Date,
+        snapshot: TinyBuddySnapshot,
+        activitySnapshot: GitTodayActivitySnapshot,
+        refreshStatus: GitActivityRefreshStatus?,
+        dataAvailability: TinyBuddyDisplayDataAvailability,
+        timeContext: TinyBuddyTimeContext
+    ) -> TinyBuddyEntry {
+        TinyBuddyEntry(
+            date: date,
+            presentation: TinyBuddyDisplayPresentation(
+                snapshot: snapshot,
+                activitySnapshot: activitySnapshot,
+                refreshStatus: refreshStatus,
+                dataAvailability: dataAvailability,
+                onboardingCompleted: TinyBuddyDisplaySharedState.onboardingCompleted(
+                    userDefaults: sharedDefaults
+                ) ?? true,
+                locale: Locale(identifier: timeContext.signature.localeIdentifier),
+                timeZone: timeContext.timeZone
+            )
         )
     }
 
@@ -193,295 +233,248 @@ struct TinyBuddyProvider: TimelineProvider {
 
 struct TinyBuddyWidgetView: View {
     @Environment(\.widgetFamily) private var family
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     let entry: TinyBuddyEntry
 
-    private var presentation: TinyBuddyWidgetPresentation {
-        TinyBuddyWidgetPresentation(
-            snapshot: entry.snapshot,
-            activitySnapshot: entry.activitySnapshot
+    private var presentation: TinyBuddyDisplayPresentation {
+        entry.presentation
+    }
+
+    private var displayEnvironment: TinyBuddyDisplayEnvironment {
+        TinyBuddyDisplayEnvironment(
+            size: family == .systemMedium ? .expanded : .compact,
+            textScale: dynamicTypeSize.isAccessibilitySize ? .accessibility : .standard,
+            increasedContrast: colorSchemeContrast == .increased,
+            reduceMotion: accessibilityReduceMotion,
+            lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled
         )
     }
 
-    private var gitActivityState: GitActivityExperienceState {
-        GitActivityExperienceState(
-            refreshStatus: entry.refreshStatus,
-            activitySnapshot: entry.activitySnapshot
+    private var layout: TinyBuddyDisplayLayout {
+        TinyBuddyDisplayLayout(presentation: presentation, environment: displayEnvironment)
+    }
+
+    private var statusAccent: Color {
+        HUDTheme.statusAccent(
+            for: presentation.accentRole,
+            colorScheme: colorScheme,
+            increasedContrast: layout.usesEnhancedContrast
         )
     }
 
-    private var recentProjectName: String {
-        let trimmedName = entry.activitySnapshot.recentProjectName?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    private var primaryText: Color {
+        HUDTheme.primaryTextColor(
+            for: colorScheme,
+            increasedContrast: layout.usesEnhancedContrast
+        )
+    }
 
-        if let trimmedName, !trimmedName.isEmpty {
-            return trimmedName
-        }
+    private var secondaryText: Color {
+        HUDTheme.secondaryTextColor(
+            for: colorScheme,
+            increasedContrast: layout.usesEnhancedContrast
+        )
+    }
 
-        return "最近无活跃项目"
+    private var panelFill: LinearGradient {
+        HUDTheme.panelFill(
+            for: colorScheme,
+            increasedContrast: layout.usesEnhancedContrast
+        )
     }
 
     var body: some View {
         Group {
-            if gitActivityState.showsActivityMetrics {
-                switch family {
-                case .systemMedium:
-                    mediumBody
-                default:
-                    smallBody
-                }
-            } else {
-                stateBody
+            switch family {
+            case .systemMedium:
+                mediumBody
+            default:
+                smallBody
             }
         }
-    }
-
-    private var stateBody: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 8) {
-                Image(systemName: stateContent.systemImage)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(stateAccent)
-                Text("GIT ACTIVITY")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(HUDTheme.hudGold.opacity(0.88))
-            }
-
-            Text(stateContent.title)
-                .font(.system(size: family == .systemMedium ? 16 : 13, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-
-            Text(stateContent.message)
-                .font(.system(size: family == .systemMedium ? 11 : 9, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.7))
-                .lineLimit(family == .systemMedium ? 3 : 4)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding(12)
         .containerBackground(for: .widget) {
-            TinyBuddyHUDBackground(
-                blueGlowCenter: .topLeading,
-                redGlowRadius: 190,
-                blueGlowRadius: 90,
-                scanLineCount: 3
+            HUDTheme.backgroundFill(
+                for: colorScheme,
+                increasedContrast: layout.usesEnhancedContrast
             )
         }
-    }
-
-    private var stateContent: (title: String, message: String, systemImage: String) {
-        switch gitActivityState {
-        case .loading:
-            return ("正在加载 Git 活动", "扫描完成后会自动更新。", "arrow.triangle.2.circlepath")
-        case .authorizationRequired:
-            return ("需要仓库目录授权", "打开 TinyBuddy 选择仓库目录。", "folder.badge.questionmark")
-        case .authorizationInvalid:
-            return ("仓库授权已失效", "打开 TinyBuddy 直接重新授权。", "lock.trianglebadge.exclamationmark")
-        case .noRepositories:
-            return ("未发现 Git 仓库", "已授权目录中没有可识别的仓库。", "folder.badge.minus")
-        case .noActivity:
-            return ("今日暂无 Git 活动", "仓库读取正常，今天还没有活动。", "moon.zzz")
-        case .failed:
-            return ("仓库读取失败", "打开 TinyBuddy 重试扫描。", "exclamationmark.triangle")
-        case .partial:
-            if entry.refreshStatus?.diagnostic?.reason == .partialAuthorizationRecovery {
-                return ("部分目录授权已失效", "可用仓库已更新；打开 TinyBuddy 重新授权。", "lock.trianglebadge.exclamationmark")
+        .transaction { transaction in
+            if layout.allowsMotion == false {
+                transaction.disablesAnimations = true
             }
-            return ("部分仓库读取失败", "可用仓库已更新。", "exclamationmark.circle")
-        case .ready:
-            return ("Git 活动已更新", "", "checkmark.circle")
-        }
-    }
-
-    private var stateAccent: Color {
-        switch gitActivityState {
-        case .loading:
-            return HUDTheme.energyBlueWhite
-        case .failed:
-            return Color(red: 0.84, green: 0.34, blue: 0.29)
-        case .noActivity:
-            return HUDTheme.hudGold
-        default:
-            return Color(red: 0.89, green: 0.66, blue: 0.23)
         }
     }
 
     private var smallBody: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 7) {
-                TinyBuddyArcReactorCore(showsLabel: false)
-                    .scaleEffect(0.58)
-                    .frame(width: 56, height: 56)
-                    .overlay {
-                        Text(presentation.expression)
-                            .font(.system(size: 8, weight: .heavy, design: .rounded))
-                            .foregroundStyle(HUDTheme.darkMetal.opacity(0.82))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                    }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("TINYBUDDY")
-                        .font(.system(size: 7, weight: .bold, design: .monospaced))
-                        .foregroundStyle(HUDTheme.hudGold.opacity(0.92))
-                    Text("HUD CORE")
-                        .font(.system(size: 9, weight: .heavy, design: .rounded))
-                        .foregroundStyle(HUDTheme.warmWhite)
-                        .lineLimit(1)
-
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(statusAccent)
-                            .frame(width: 6, height: 6)
-                            .shadow(color: statusAccent.opacity(0.8), radius: 4)
-
-                        Text(presentation.statusTitle)
-                            .font(.system(size: 11, weight: .heavy, design: .rounded))
-                            .foregroundStyle(statusAccent)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                    }
+            HStack(alignment: .center, spacing: 8) {
+                if layout.showsExpression {
+                    TinyBuddyArcReactorCore(showsLabel: false)
+                        .scaleEffect(0.58)
+                        .frame(width: 56, height: 56)
+                        .overlay {
+                            Text(presentation.expression)
+                                .font(.caption2.weight(.heavy))
+                                .foregroundStyle(HUDTheme.darkMetal.opacity(0.82))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                        }
                 }
-                .layoutPriority(1)
+
+                statusContent(compact: true)
             }
 
-            HStack(spacing: 6) {
-                hudMetric(title: "今日专注", value: presentation.focusCount)
-                hudMetric(title: "今日完成", value: presentation.completionCount)
+            if layout.showsMetrics {
+                metrics
+            }
+
+            if layout.showsDataDate, let dataDateText = presentation.dataDateText {
+                Text(dataDateText)
+                    .font(.caption2)
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .containerBackground(for: .widget) {
-            TinyBuddyHUDBackground(
-                blueGlowCenter: UnitPoint(x: 0.34, y: 0.36),
-                redGlowRadius: 168,
-                blueGlowRadius: 84,
-                redGlowOpacity: 0.44,
-                blueGlowOpacity: 0.15,
-                scanLineCount: 3
-            )
-        }
+        .padding(12)
     }
 
     private var mediumBody: some View {
         HStack(alignment: .center, spacing: 10) {
-            TinyBuddyArcReactorCore()
-                .frame(width: 94, height: 94)
+            if layout.showsExpression {
+                TinyBuddyArcReactorCore()
+                    .frame(width: 94, height: 94)
+            }
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .center, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("TINYBUDDY")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(HUDTheme.hudGold.opacity(0.88))
-                        Text("COMPANION HUD")
-                            .font(.system(size: 11, weight: .heavy, design: .rounded))
-                            .foregroundStyle(HUDTheme.warmWhite)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.78)
+            VStack(alignment: .leading, spacing: 7) {
+                statusContent(compact: false)
+
+                if layout.showsMetrics {
+                    metrics
+                }
+
+                if layout.showsProject || layout.showsDataDate {
+                    HStack(spacing: 8) {
+                        if layout.showsProject, let recentProjectName = presentation.recentProjectName {
+                            Text(recentProjectName)
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(primaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .layoutPriority(1)
+                        }
+
+                        if layout.showsDataDate, let dataDateText = presentation.dataDateText {
+                            Text(dataDateText)
+                                .font(.caption2)
+                                .foregroundStyle(secondaryText)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                     }
-                    .layoutPriority(1)
-
-                    Spacer(minLength: 4)
-
-                    Circle()
-                        .fill(statusAccent)
-                        .frame(width: 7, height: 7)
-                        .shadow(color: statusAccent.opacity(0.8), radius: 5)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(panelFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(
+                                HUDTheme.panelBorder(
+                                    for: colorScheme,
+                                    increasedContrast: layout.usesEnhancedContrast
+                                ),
+                                lineWidth: 1
+                            )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-
-                HStack(spacing: 8) {
-                    hudMetric(title: "今日专注", value: presentation.focusCount)
-                    hudMetric(title: "今日完成", value: presentation.completionCount)
-                }
-
-                VStack(alignment: .leading, spacing: 5) {
-                    hudStatusRow
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        hudPanelLabel("RECENT PROJECT")
-
-                        Text(recentProjectName)
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.white.opacity(0.92))
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                            .lineSpacing(0)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .layoutPriority(1)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
-                .background(HUDTheme.panelFill)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(statusAccent.opacity(0.42), lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .containerBackground(for: .widget) {
-            TinyBuddyHUDBackground(
-                blueGlowCenter: UnitPoint(x: 0.26, y: 0.48),
-                redGlowRadius: 220,
-                blueGlowRadius: 104,
-                scanLineCount: 4
-            )
+        .padding(12)
+    }
+
+    private func statusContent(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 3 : 4) {
+            if layout.showsBrandLabel {
+                Text("TINYBUDDY")
+                    .font(.caption2.weight(.bold).monospaced())
+                    .foregroundStyle(secondaryText)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: presentation.systemImage)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(statusAccent)
+
+                Text(presentation.statusTitle)
+                    .font(compact ? .headline.weight(.heavy) : .title3.weight(.heavy))
+                    .foregroundStyle(statusAccent)
+                    .lineLimit(layout.titleLineLimit)
+                    .minimumScaleFactor(0.72)
+                    .layoutPriority(2)
+            }
+
+            if layout.showsMessage {
+                Text(presentation.message)
+                    .font(.caption)
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(layout.messageLineLimit)
+                    .layoutPriority(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var metrics: some View {
+        if layout.stacksMetricsVertically {
+            VStack(spacing: 6) {
+                metric(title: "今日专注", value: presentation.focusCountText)
+                metric(title: "今日完成", value: presentation.completionCountText)
+            }
+        } else {
+            HStack(spacing: 6) {
+                metric(title: "今日专注", value: presentation.focusCountText)
+                metric(title: "今日完成", value: presentation.completionCountText)
+            }
         }
     }
 
-    private var statusAccent: Color {
-        HUDTheme.statusAccent(for: presentation.displayState)
-    }
-
-    private func hudMetric(title: String, value: Int) -> some View {
+    private func metric(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                .foregroundStyle(HUDTheme.hudGold.opacity(0.78))
+                .font(.caption2.weight(.semibold).monospaced())
+                .foregroundStyle(secondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            Text("\(value)")
-                .font(.system(size: 20, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
+            Text(value)
+                .font(.title3.weight(.heavy))
+                .foregroundStyle(primaryText)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
-        .background(HUDTheme.panelFill)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+        .background(panelFill)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(HUDTheme.metricBorder, lineWidth: 1)
+                .stroke(statusAccent.opacity(layout.usesEnhancedContrast ? 0.76 : 0.42), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private var hudStatusRow: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            hudPanelLabel("STATUS")
-
-            Text(presentation.statusTitle)
-                .font(.system(size: 12, weight: .heavy, design: .rounded))
-                .foregroundStyle(statusAccent)
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
-
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func hudPanelLabel(
-        _ text: String
-    ) -> some View {
+    private func panelLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundStyle(HUDTheme.hudGold.opacity(0.82))
+            .font(.caption2.weight(.semibold).monospaced())
+            .foregroundStyle(secondaryText)
     }
 }
 
@@ -525,8 +518,8 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                     )
                 )
             )
-                .previewContext(WidgetPreviewContext(family: .systemMedium))
-                .previewDisplayName("Medium HUD")
+            .previewContext(WidgetPreviewContext(family: .systemMedium))
+            .previewDisplayName("Medium HUD")
 
             TinyBuddyWidgetView(
                 entry: previewEntry(
@@ -540,8 +533,8 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
                     )
                 )
             )
-                .previewContext(WidgetPreviewContext(family: .systemMedium))
-                .previewDisplayName("Medium Long Project")
+            .previewContext(WidgetPreviewContext(family: .systemMedium))
+            .previewDisplayName("Medium Long Project")
         }
     }
 
@@ -555,22 +548,27 @@ struct TinyBuddyWidgetView_Previews: PreviewProvider {
             recentProjectName: nil
         )
     ) -> TinyBuddyEntry {
-        TinyBuddyEntry(
-            date: Date(),
-            snapshot: TinyBuddySnapshot(
-                status: status,
-                stats: DailyStats(
-                    dayIdentifier: "2026-07-01",
-                    focusCount: focusCount,
-                    completionCount: completionCount
-                )
-            ),
-            activitySnapshot: activitySnapshot,
-            refreshStatus: GitActivityRefreshStatus(
-                refreshedAt: Date(),
-                trigger: .launch,
-                outcome: .succeeded,
-                metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
+        let date = Date()
+        return TinyBuddyEntry(
+            date: date,
+            presentation: TinyBuddyDisplayPresentation(
+                snapshot: TinyBuddySnapshot(
+                    status: status,
+                    stats: DailyStats(
+                        dayIdentifier: "2026-07-01",
+                        focusCount: focusCount,
+                        completionCount: completionCount
+                    )
+                ),
+                activitySnapshot: activitySnapshot,
+                refreshStatus: GitActivityRefreshStatus(
+                    refreshedAt: date,
+                    trigger: .launch,
+                    outcome: .succeeded,
+                    metrics: GitActivityRefreshMetrics(authorizedRootCount: 1, repositoryCount: 1)
+                ),
+                locale: Locale(identifier: "zh_CN"),
+                timeZone: .current
             )
         )
     }

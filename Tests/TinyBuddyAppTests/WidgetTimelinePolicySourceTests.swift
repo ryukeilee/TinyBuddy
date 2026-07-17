@@ -14,7 +14,7 @@ final class WidgetTimelinePolicySourceTests: XCTestCase {
     func testFutureRolloverEntryRejectsPreviousDayStatusAndFallbackSnapshot() throws {
         let source = try String(contentsOf: widgetSourceURL(), encoding: .utf8)
 
-        XCTAssertTrue(source.contains("timeContext.dayIdentifier(for: status.refreshedAt)"))
+        XCTAssertTrue(source.contains("status.isForDisplayDay(in: timeContext) ? status : nil"))
         XCTAssertTrue(source.contains("fallbackSnapshot.stats.dayIdentifier == expectedDayIdentifier"))
     }
 

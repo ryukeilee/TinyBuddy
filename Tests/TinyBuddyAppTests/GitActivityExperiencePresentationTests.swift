@@ -87,7 +87,7 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
                     isRefreshing: false,
                     onboardingCompleted: true
                 ),
-                "今日暂无 Git 活动",
+                "今日无活动",
                 .rescan
             ),
             (
@@ -97,7 +97,7 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
                     isRefreshing: false,
                     onboardingCompleted: true
                 ),
-                "仓库读取失败",
+                "数据读取失败",
                 .rescan
             ),
             (
@@ -107,7 +107,7 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
                     isRefreshing: true,
                     onboardingCompleted: true
                 ),
-                "正在加载 Git 活动",
+                "数据加载中",
                 nil
             )
         ]

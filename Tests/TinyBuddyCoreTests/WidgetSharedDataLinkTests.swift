@@ -1513,14 +1513,14 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(widgetSnapshot.stats.focusCount, 2)
         XCTAssertEqual(widgetSnapshot.stats.completionCount, 1)
         XCTAssertEqual(smallPresentation.expression, "★ᴗ★")
-        XCTAssertEqual(smallPresentation.statusTitle, "活跃")
+        XCTAssertEqual(smallPresentation.statusTitle, "今日完成")
         XCTAssertEqual(smallPresentation.focusCount, 3)
         XCTAssertEqual(smallPresentation.completionCount, 4)
-        XCTAssertEqual(smallPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(smallPresentation.statusDisplayTitle, "今日完成 · TinyBuddy")
         XCTAssertEqual(mediumPresentation.focusCount, 3)
         XCTAssertEqual(mediumPresentation.completionCount, 4)
-        XCTAssertEqual(mediumPresentation.statusTitle, "活跃")
-        XCTAssertEqual(mediumPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(mediumPresentation.statusTitle, "今日完成")
+        XCTAssertEqual(mediumPresentation.statusDisplayTitle, "今日完成 · TinyBuddy")
     }
 
     func testWidgetSnapshotDoesNotCarryYesterdayStatusIntoToday() {
@@ -1571,11 +1571,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(presentation.focusCount, 8)
         XCTAssertEqual(presentation.completionCount, 13)
-        XCTAssertEqual(presentation.statusTitle, "活跃")
-        XCTAssertEqual(presentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(presentation.statusTitle, "今日完成")
+        XCTAssertEqual(presentation.statusDisplayTitle, "今日完成 · TinyBuddy")
     }
 
-    func testUnifiedWidgetPresentationUsesZeroWhenGitActivityCountsAreUnavailable() {
+    func testUnifiedWidgetPresentationFallsBackToSnapshotStateWhenGitActivityIsUnavailable() {
         let snapshot = TinyBuddySnapshot(
             status: .focusing,
             stats: DailyStats(dayIdentifier: "2026-07-01", focusCount: 2, completionCount: 1)
@@ -1593,10 +1593,10 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(presentation.focusCount, 0)
         XCTAssertEqual(presentation.completionCount, 0)
-        XCTAssertEqual(presentation.statusTitle, "待机")
-        XCTAssertEqual(presentation.statusDisplayTitle, "待机")
-        XCTAssertEqual(presentation.displayState, .idle)
-        XCTAssertEqual(presentation.expression, "•ᴗ•")
+        XCTAssertEqual(presentation.statusTitle, "专注中")
+        XCTAssertEqual(presentation.statusDisplayTitle, "专注中")
+        XCTAssertEqual(presentation.displayState, .focusing)
+        XCTAssertEqual(presentation.expression, "–_–")
     }
 
     func testWidgetPresentationCanOverrideFocusAndCompletionCountWithGitCounts() {
@@ -1614,7 +1614,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(presentation.focusCount, 6)
         XCTAssertEqual(presentation.completionCount, 9)
-        XCTAssertEqual(presentation.statusTitle, "活跃")
+        XCTAssertEqual(presentation.statusTitle, "今日完成")
     }
 
     func testWidgetPresentationUsesZeroWhenGitCountsAreUnavailable() {
@@ -1634,7 +1634,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(presentation.focusCount, 0)
         XCTAssertEqual(presentation.completionCount, 0)
-        XCTAssertEqual(presentation.statusTitle, "待机")
+        XCTAssertEqual(presentation.statusTitle, "今日无活动")
     }
 
     func testWidgetPresentationDefaultsToSnapshotStatusTitle() {
@@ -1649,7 +1649,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             completionCountOverride: 9
         )
 
-        XCTAssertEqual(presentation.statusTitle, "完成一次")
+        XCTAssertEqual(presentation.statusTitle, "今日完成")
     }
 
     func testWidgetPresentationMapsGitTodayActivityStatusTitle() {
@@ -1660,7 +1660,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(
             makeGitActivityPresentation(snapshot: snapshot, focusCount: 0, completionCount: 0).statusTitle,
-            "待机"
+            "今日无活动"
         )
         XCTAssertEqual(
             makeGitActivityPresentation(snapshot: snapshot, focusCount: 3, completionCount: 0).statusTitle,
@@ -1668,11 +1668,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         )
         XCTAssertEqual(
             makeGitActivityPresentation(snapshot: snapshot, focusCount: 0, completionCount: 4).statusTitle,
-            "已完成"
+            "今日完成"
         )
         XCTAssertEqual(
             makeGitActivityPresentation(snapshot: snapshot, focusCount: 5, completionCount: 6).statusTitle,
-            "活跃"
+            "今日完成"
         )
     }
 
@@ -1690,8 +1690,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             statusTitleSource: .gitTodayActivity
         )
 
-        XCTAssertEqual(presentation.statusTitle, "活跃")
-        XCTAssertEqual(presentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(presentation.statusTitle, "今日完成")
+        XCTAssertEqual(presentation.statusDisplayTitle, "今日完成 · TinyBuddy")
     }
 
     func testWidgetPresentationAppendsRecentProjectNameForFocusingStatus() {
@@ -1726,8 +1726,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             statusTitleSource: .gitTodayActivity
         )
 
-        XCTAssertEqual(presentation.statusTitle, "已完成")
-        XCTAssertEqual(presentation.statusDisplayTitle, "已完成 · TinyBuddy")
+        XCTAssertEqual(presentation.statusTitle, "今日完成")
+        XCTAssertEqual(presentation.statusDisplayTitle, "今日完成 · TinyBuddy")
     }
 
     func testWidgetPresentationKeepsOriginalStatusDisplayWhenProjectNameIsUnavailable() {
@@ -1781,8 +1781,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             statusTitleSource: .gitTodayActivity
         )
 
-        XCTAssertEqual(firstPresentation.statusDisplayTitle, "活跃 · Project A")
-        XCTAssertEqual(updatedPresentation.statusDisplayTitle, "活跃 · Project B")
+        XCTAssertEqual(firstPresentation.statusDisplayTitle, "今日完成 · Project A")
+        XCTAssertEqual(updatedPresentation.statusDisplayTitle, "今日完成 · Project B")
     }
 
     private func makeGitActivityPresentation(

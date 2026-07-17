@@ -24,6 +24,10 @@ final class PetViewModelSharedSnapshotTelemetryTests: XCTestCase {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
         let today = makeDate(year: 2026, month: 7, day: 17, hour: 9)
+        let timeEnvironment = TinyBuddyTimeEnvironment(
+            calendar: calendar,
+            dateProvider: { today }
+        )
         let notificationCenter = NotificationCenter()
         let store = DailyStatsStore(
             userDefaults: defaults,
@@ -52,6 +56,7 @@ final class PetViewModelSharedSnapshotTelemetryTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: notificationCenter,
+            timeEnvironment: timeEnvironment,
             widgetReloader: {},
             hudSnapshotConsumptionRecorder: { consumptions.append($0) }
         )
@@ -88,13 +93,17 @@ final class PetViewModelSharedSnapshotTelemetryTests: XCTestCase {
             evidence(for: reloadedCommittedSnapshot)
         ])
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 4)
-        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · Reloaded Project")
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "今日完成 · Reloaded Project")
     }
 
     func testDoesNotRecordWhenNoCombinedSnapshotWasCommitted() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
         let today = makeDate(year: 2026, month: 7, day: 17, hour: 9)
+        let timeEnvironment = TinyBuddyTimeEnvironment(
+            calendar: calendar,
+            dateProvider: { today }
+        )
         let store = DailyStatsStore(
             userDefaults: defaults,
             calendar: calendar,
@@ -118,6 +127,7 @@ final class PetViewModelSharedSnapshotTelemetryTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: timeEnvironment,
             widgetReloader: {},
             hudSnapshotConsumptionRecorder: { consumptions.append($0) }
         )

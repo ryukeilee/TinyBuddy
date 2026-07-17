@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class GitScanRootAuthorizationControllerTests: XCTestCase {
-    func testRequestAuthorizationCancelReturnsFalseWithoutChangingStore() {
+    func testInitialAuthorizationCancelCompletesOnboardingAndRequiresOneWidgetReload() {
         let defaults = makeDefaults()
         let sharedDefaults = makeDefaults()
         let onboardingStore = TinyBuddyOnboardingStore(
@@ -18,9 +18,34 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
             authorizationSelectionProvider: { _ in nil }
         )
 
-        XCTAssertFalse(controller.requestAuthorization())
+        let result = controller.requestAuthorizationResult()
+
+        XCTAssertFalse(result.didChangeAuthorization)
+        XCTAssertTrue(result.didCompleteOnboarding)
+        XCTAssertTrue(result.requiresStandaloneWidgetReload)
         XCTAssertFalse(store.hasAuthorizedRoots)
         XCTAssertTrue(onboardingStore.isCompleted)
+    }
+
+    func testRepeatedAuthorizationCancelDoesNotRequireAnotherWidgetReload() {
+        let defaults = makeDefaults()
+        let sharedDefaults = makeDefaults()
+        let onboardingStore = TinyBuddyOnboardingStore(
+            userDefaults: defaults,
+            sharedDefaults: sharedDefaults
+        )
+        let controller = GitScanRootAuthorizationController(
+            store: makeStore(userDefaults: defaults),
+            onboardingStore: onboardingStore,
+            authorizationSelectionProvider: { _ in nil }
+        )
+
+        XCTAssertTrue(controller.requestAuthorizationResult().requiresStandaloneWidgetReload)
+
+        let repeatedResult = controller.requestAuthorizationResult()
+        XCTAssertFalse(repeatedResult.didChangeAuthorization)
+        XCTAssertFalse(repeatedResult.didCompleteOnboarding)
+        XCTAssertFalse(repeatedResult.requiresStandaloneWidgetReload)
     }
 
     func testRequestAuthorizationAddsWithoutReplacingExistingRoot() throws {

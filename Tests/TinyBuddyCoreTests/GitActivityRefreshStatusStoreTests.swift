@@ -91,6 +91,7 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
                     reflogUnchangedSkipCount: 3,
                     recomputedRepositoryCount: 4,
                     sharedDataWritten: true,
+                    widgetContentChanged: true,
                     widgetReloaded: false,
                     reason: diagnostic.stableIdentifier
                 )
@@ -112,6 +113,7 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
                     reflogUnchangedSkipCount: 3,
                     recomputedRepositoryCount: 4,
                     sharedDataWritten: true,
+                    widgetContentChanged: true,
                     widgetReloaded: false,
                     reason: diagnostic.stableIdentifier
                 )
@@ -236,6 +238,23 @@ final class GitActivityRefreshStatusStoreTests: XCTestCase {
         currentDate = makeDate(year: 2026, month: 7, day: 5, hour: 8, minute: 0, second: 0)
 
         XCTAssertNil(store.load())
+    }
+
+    func testFutureRetainedStatusIsExcludedFromTheCurrentDisplayDay() throws {
+        let currentDate = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let futureStatus = GitActivityRefreshStatus(
+            refreshedAt: makeDate(year: 2026, month: 7, day: 5, hour: 8, minute: 0, second: 0),
+            trigger: .launch,
+            outcome: .failed
+        )
+        let timeContext = try XCTUnwrap(TinyBuddyTimeContext(
+            now: currentDate,
+            timeZone: TimeZone(secondsFromGMT: 0)!,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: makeCalendar()
+        ))
+
+        XCTAssertFalse(futureStatus.isForDisplayDay(in: timeContext))
     }
 
     private func makeDefaults() -> UserDefaults {

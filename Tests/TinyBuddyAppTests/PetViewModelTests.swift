@@ -58,12 +58,13 @@ final class PetViewModelTests: XCTestCase {
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             combinedSnapshotStore: combinedStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
 
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
-        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · Persisted")
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "数据读取失败 · Persisted")
         XCTAssertEqual(combinedStore.load(), persisted)
     }
 
@@ -103,6 +104,7 @@ final class PetViewModelTests: XCTestCase {
             activityStore: activityStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: { widgetReloadCount += 1 }
         )
         let expectedPresentation = TinyBuddyWidgetPresentation(
@@ -116,8 +118,8 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.hudPresentation, expectedPresentation)
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
-        XCTAssertEqual(viewModel.hudPresentation.statusTitle, "活跃")
-        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(viewModel.hudPresentation.statusTitle, "今日完成")
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "今日完成 · TinyBuddy")
         XCTAssertEqual(viewModel.displayState, .active)
         XCTAssertNil(viewModel.displayState.selectedStatus)
         XCTAssertEqual(widgetReloadCount, 1)
@@ -148,12 +150,16 @@ final class PetViewModelTests: XCTestCase {
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
             refreshStatusStore: refreshStatusStore,
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: refreshedAt)
         )
 
         XCTAssertEqual(viewModel.refreshDiagnostics.badgeTitle, "失败")
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "系统唤醒触发 刷新失败")
-        XCTAssertEqual(viewModel.refreshDiagnostics.detail, formattedDetail(for: refreshedAt))
+        XCTAssertEqual(
+            viewModel.refreshDiagnostics.detail,
+            formattedDetail(for: refreshedAt, calendar: calendar)
+        )
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "刷新组件缺失，暂时无法读取 Git 活动。")
         XCTAssertNil(viewModel.refreshDiagnostics.actionTitle)
     }
@@ -188,7 +194,11 @@ final class PetViewModelTests: XCTestCase {
                 dateProvider: { currentDate }
             ),
             refreshStatusStore: refreshStatusStore,
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: TinyBuddyTimeEnvironment(
+                calendar: calendar,
+                dateProvider: { currentDate }
+            )
         )
 
         XCTAssertEqual(viewModel.refreshDiagnostics.badgeTitle, "未刷新")
@@ -219,7 +229,8 @@ final class PetViewModelTests: XCTestCase {
             activityStore: activityStore,
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: refreshStatusStore,
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
         _ = combinedSnapshotStore.updateActivitySlice(
             GitTodayActivitySnapshot(focusBlockCount: 3, commitCount: 1, recentProjectName: "Project B"),
@@ -249,13 +260,16 @@ final class PetViewModelTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 1.0)
 
         XCTAssertEqual(viewModel.refreshDiagnostics.badgeTitle, "跳过")
-        XCTAssertEqual(viewModel.refreshDiagnostics.detail, formattedDetail(for: refreshedAt))
+        XCTAssertEqual(
+            viewModel.refreshDiagnostics.detail,
+            formattedDetail(for: refreshedAt, calendar: calendar)
+        )
         XCTAssertEqual(viewModel.refreshDiagnostics.reason, "刚刚刷新过，稍后会自动再次尝试。")
         XCTAssertNil(viewModel.refreshDiagnostics.actionTitle)
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 3)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 1)
-        XCTAssertEqual(viewModel.hudPresentation.statusTitle, "活跃")
-        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · Project B")
+        XCTAssertEqual(viewModel.hudPresentation.statusTitle, "今日完成")
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "今日完成 · Project B")
         XCTAssertEqual(viewModel.displayState, .active)
         XCTAssertEqual(combinedSnapshotStore.load()?.revision, committedRevision)
     }
@@ -273,7 +287,8 @@ final class PetViewModelTests: XCTestCase {
             activityStore: activityStore,
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
         _ = combinedSnapshotStore.updateActivitySlice(
             GitTodayActivitySnapshot(focusBlockCount: 5, commitCount: 8, recentProjectName: "TinyBuddy"),
@@ -287,7 +302,7 @@ final class PetViewModelTests: XCTestCase {
         Task { @MainActor in
             while viewModel.hudPresentation.focusCount != 5
                 || viewModel.hudPresentation.completionCount != 8
-                || viewModel.hudPresentation.statusDisplayTitle != "活跃 · TinyBuddy"
+                || viewModel.hudPresentation.statusDisplayTitle != "今日完成 · TinyBuddy"
             {
                 await Task.yield()
             }
@@ -296,7 +311,7 @@ final class PetViewModelTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 1.0)
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 5)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 8)
-        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "活跃 · TinyBuddy")
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "今日完成 · TinyBuddy")
         XCTAssertEqual(combinedSnapshotStore.load()?.revision, committedRevision)
     }
 
@@ -336,6 +351,7 @@ final class PetViewModelTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: refreshStatusStore,
             notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: {}
         )
         let committedRevision = combinedSnapshotStore.load()?.revision
@@ -433,7 +449,8 @@ final class PetViewModelTests: XCTestCase {
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
 
         XCTAssertNil(combinedSnapshotStore.loadReadOnly())
@@ -492,7 +509,8 @@ final class PetViewModelTests: XCTestCase {
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
             refreshStatusStore: refreshStatusStore,
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: refreshedAt)
         )
 
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "等待 Git 目录授权")
@@ -525,7 +543,8 @@ final class PetViewModelTests: XCTestCase {
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
             refreshStatusStore: refreshStatusStore,
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: refreshedAt)
         )
 
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "Git 目录授权已失效")
@@ -561,7 +580,8 @@ final class PetViewModelTests: XCTestCase {
         let viewModel = PetViewModel(
             store: DailyStatsStore(userDefaults: defaults),
             refreshStatusStore: refreshStatusStore,
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: refreshedAt)
         )
 
         XCTAssertEqual(viewModel.refreshDiagnostics.summary, "Git 活动已部分刷新")
@@ -592,7 +612,7 @@ final class PetViewModelTests: XCTestCase {
         wait(for: [expectation], timeout: 1.0)
     }
 
-    func testAuthorizationFailureCanTransitionThroughLoadingAndDirectReauthorization() async {
+    func testAuthorizationFailureRemainsActionableDuringRefreshAndCanRecover() async {
         let defaults = makeDefaults()
         let onboardingDefaults = makeDefaults()
         let onboardingStore = TinyBuddyOnboardingStore(
@@ -642,7 +662,7 @@ final class PetViewModelTests: XCTestCase {
 
         notificationCenter.post(name: .gitActivityRefreshDidStart, object: nil)
         await Task.yield()
-        XCTAssertEqual(viewModel.gitActivityExperience.state, .loading)
+        XCTAssertEqual(viewModel.gitActivityExperience.state, .authorizationInvalid)
 
         let recoveredStatus = GitActivityRefreshStatus(
             refreshedAt: Date(),
@@ -672,7 +692,8 @@ final class PetViewModelTests: XCTestCase {
             store: store,
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
 
         firstViewModel.select(.focusing)
@@ -686,7 +707,8 @@ final class PetViewModelTests: XCTestCase {
             ),
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
 
         XCTAssertEqual(recreatedViewModel.status, .completedOnce)
@@ -720,7 +742,8 @@ final class PetViewModelTests: XCTestCase {
             store: store,
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
 
         viewModel.select(.focusing)
@@ -743,7 +766,8 @@ final class PetViewModelTests: XCTestCase {
             store: store,
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
         XCTAssertEqual(viewModel.status, .idle)
 
@@ -761,7 +785,7 @@ final class PetViewModelTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 1.0)
     }
 
-    func testSelectingStatusSkipsWidgetReloadWhenWidgetPresentationIsUnchanged() {
+    func testSelectingStatusReloadsWidgetWhenFallbackSemanticStatusChanges() {
         let defaults = makeDefaults()
         var widgetReloadCount = 0
         let viewModel = PetViewModel(
@@ -774,7 +798,7 @@ final class PetViewModelTests: XCTestCase {
 
         viewModel.select(.focusing)
 
-        XCTAssertEqual(widgetReloadCount, 0)
+        XCTAssertEqual(widgetReloadCount, 1)
         XCTAssertEqual(viewModel.selectedStatus, .focusing)
     }
 
@@ -840,6 +864,7 @@ final class PetViewModelTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: { widgetReloadCount += 1 }
         )
 
@@ -858,6 +883,87 @@ final class PetViewModelTests: XCTestCase {
         }
         await fulfillment(of: [expectation], timeout: 1.0)
 
+        XCTAssertEqual(widgetReloadCount, 1)
+    }
+
+    func testBecameActiveReloadsWidgetOnceWhenAvailabilityFailsWithoutPersistence() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 14, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        var readFailure: TinyBuddySharedSnapshotReason?
+        let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: { true },
+            readFailureProvider: { readFailure }
+        )
+        var widgetReloadCount = 0
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+        let initialReloadCount = widgetReloadCount
+
+        readFailure = .appGroupUnavailable
+        notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.displayPresentation.state, .readFailed)
+        XCTAssertEqual(widgetReloadCount, initialReloadCount + 1)
+
+        notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await Task.yield()
+
+        XCTAssertEqual(widgetReloadCount, initialReloadCount + 1)
+    }
+
+    func testInitialUnavailableDisplayReloadsCachedWidgetTimeline() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 14, minute: 0, second: 0)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let combinedSnapshotStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            writeValue: { value, key in
+                defaults.set(value, forKey: key)
+                return true
+            },
+            synchronizeWrites: { true },
+            readFailureProvider: { .appGroupUnavailable }
+        )
+        var widgetReloadCount = 0
+
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        XCTAssertEqual(viewModel.displayPresentation.state, .readFailed)
         XCTAssertEqual(widgetReloadCount, 1)
     }
 
@@ -890,7 +996,8 @@ final class PetViewModelTests: XCTestCase {
                 today: today
             ),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: restartedDefaults),
-            notificationCenter: NotificationCenter()
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
         )
 
         XCTAssertEqual(restartedViewModel.status, .completedOnce)
@@ -902,10 +1009,10 @@ final class PetViewModelTests: XCTestCase {
         let calendar = makeCalendar()
         let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
         let cases: [(focus: Int?, completion: Int?, projectName: String?, statusTitle: String, displayState: PetViewModel.DisplayState)] = [
-            (0, 0, nil, "待机", .idle),
+            (0, 0, nil, "今日无活动", .idle),
             (2, 0, " Focus Repo ", "专注中", .focusing),
-            (0, 3, "ShipIt", "已完成", .completed),
-            (2, 3, "TinyBuddy", "活跃", .active)
+            (0, 3, "ShipIt", "今日完成", .completed),
+            (2, 3, "TinyBuddy", "今日完成", .active)
         ]
 
         for testCase in cases {
@@ -947,7 +1054,8 @@ final class PetViewModelTests: XCTestCase {
                 store: store,
                 activityStore: activityStore,
                 refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
-                notificationCenter: NotificationCenter()
+                notificationCenter: NotificationCenter(),
+                timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
             )
             let expectedPresentation = TinyBuddyWidgetPresentation(
                 snapshot: store.loadSnapshot(),
@@ -999,6 +1107,7 @@ final class PetViewModelTests: XCTestCase {
             ),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: {},
             sharedSnapshotDiagnosticRecorder: recorder
         )
@@ -1048,6 +1157,7 @@ final class PetViewModelTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: {},
             sharedSnapshotDiagnosticRecorder: recorder
         )
@@ -1103,6 +1213,7 @@ final class PetViewModelTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: {},
             sharedSnapshotDiagnosticRecorder: recorder
         )
@@ -1141,6 +1252,7 @@ final class PetViewModelTests: XCTestCase {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: {},
             sharedSnapshotDiagnosticRecorder: recorder
         )
@@ -1170,6 +1282,7 @@ final class PetViewModelTests: XCTestCase {
             activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: { throw ReloadError.unavailable },
             sharedSnapshotDiagnosticRecorder: recorder
         )
@@ -1192,6 +1305,7 @@ final class PetViewModelTests: XCTestCase {
             ),
             refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
             notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
             widgetReloader: {},
             sharedSnapshotDiagnosticRecorder: recorder
         )
@@ -1260,6 +1374,10 @@ final class PetViewModelTests: XCTestCase {
         return calendar
     }
 
+    private func makeTimeEnvironment(calendar: Calendar, now: Date) -> TinyBuddyTimeEnvironment {
+        TinyBuddyTimeEnvironment(calendar: calendar, dateProvider: { now })
+    }
+
     private func makeDate(
         year: Int,
         month: Int,
@@ -1283,9 +1401,10 @@ final class PetViewModelTests: XCTestCase {
         return components.date!
     }
 
-    private func formattedDetail(for date: Date) -> String {
+    private func formattedDetail(for date: Date, calendar: Calendar) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "MM-dd HH:mm:ss"
         return formatter.string(from: date)
     }

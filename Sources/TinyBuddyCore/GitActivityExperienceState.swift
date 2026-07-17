@@ -15,49 +15,52 @@ public enum GitActivityExperienceState: Equatable, Sendable {
         activitySnapshot: GitTodayActivitySnapshot,
         isRefreshing: Bool = false
     ) {
-        if isRefreshing {
-            self = .loading
-            return
+        let focusCount = max(0, activitySnapshot.focusBlockCount ?? 0)
+        let completionCount = max(0, activitySnapshot.commitCount ?? 0)
+        let petStatus: PetStatus
+        if completionCount > 0 {
+            petStatus = .completedOnce
+        } else if focusCount > 0 {
+            petStatus = .focusing
+        } else {
+            petStatus = .idle
         }
+        let availability: TinyBuddyDisplayDataAvailability = refreshStatus == nil
+            ? .loading
+            : .available
+        let presentation = TinyBuddyDisplayPresentation(
+            snapshot: TinyBuddySnapshot(
+                status: petStatus,
+                stats: DailyStats(
+                    dayIdentifier: "",
+                    focusCount: focusCount,
+                    completionCount: completionCount
+                )
+            ),
+            activitySnapshot: activitySnapshot,
+            refreshStatus: refreshStatus,
+            dataAvailability: availability,
+            isRefreshing: isRefreshing
+        )
 
-        guard let refreshStatus else {
+        switch presentation.state {
+        case .loading:
             self = .loading
-            return
-        }
-
-        switch refreshStatus.diagnostic?.reason {
         case .authorizationRequired:
             self = .authorizationRequired
-            return
         case .authorizationInvalid:
             self = .authorizationInvalid
-            return
-        case .partialAuthorizationRecovery, .partialRecovery:
-            self = .partial
-            return
-        default:
-            break
-        }
-
-        if refreshStatus.outcome == .failed {
-            self = .failed
-            return
-        }
-
-        if refreshStatus.metrics?.authorizedRootCount ?? 0 > 0,
-           refreshStatus.metrics?.repositoryCount == 0 {
+        case .noRepositories:
             self = .noRepositories
-            return
-        }
-
-        if refreshStatus.metrics?.repositoryCount ?? 0 > 0,
-           activitySnapshot.focusBlockCount == 0,
-           activitySnapshot.commitCount == 0 {
+        case .noActivity:
             self = .noActivity
-            return
+        case .readFailed, .stale:
+            self = .failed
+        case .partial:
+            self = .partial
+        case .idle, .focusing, .completedToday:
+            self = .ready
         }
-
-        self = refreshStatus.outcome == .partial ? .partial : .ready
     }
 
     public var showsActivityMetrics: Bool {

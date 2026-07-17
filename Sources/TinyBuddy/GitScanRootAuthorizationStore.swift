@@ -501,6 +501,16 @@ final class GitScanRootAuthorizationStore {
 }
 
 @MainActor
+struct GitScanRootAuthorizationRequestResult: Equatable {
+    let didChangeAuthorization: Bool
+    let didCompleteOnboarding: Bool
+
+    var requiresStandaloneWidgetReload: Bool {
+        didCompleteOnboarding && !didChangeAuthorization
+    }
+}
+
+@MainActor
 final class GitScanRootAuthorizationController {
     typealias AuthorizationSelectionProvider = @MainActor (_ allowsMultipleSelection: Bool) -> [URL]?
 
@@ -531,17 +541,30 @@ final class GitScanRootAuthorizationController {
 
     @discardableResult
     func requestAuthorization() -> Bool {
+        requestAuthorizationResult().didChangeAuthorization
+    }
+
+    func requestAuthorizationResult() -> GitScanRootAuthorizationRequestResult {
         let urls = requestedURLs(allowsMultipleSelection: true)
-        onboardingStore.markCompleted()
+        let didCompleteOnboarding = onboardingStore.markCompleted()
         guard let urls else {
-            return false
+            return GitScanRootAuthorizationRequestResult(
+                didChangeAuthorization: false,
+                didCompleteOnboarding: didCompleteOnboarding
+            )
         }
 
         do {
-            return try store.addAuthorizedRoots(urls)
+            return GitScanRootAuthorizationRequestResult(
+                didChangeAuthorization: try store.addAuthorizedRoots(urls),
+                didCompleteOnboarding: didCompleteOnboarding
+            )
         } catch {
             NSLog("TinyBuddy: failed to save Git scan root authorization (details redacted)")
-            return false
+            return GitScanRootAuthorizationRequestResult(
+                didChangeAuthorization: false,
+                didCompleteOnboarding: didCompleteOnboarding
+            )
         }
     }
 

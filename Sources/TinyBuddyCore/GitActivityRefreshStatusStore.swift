@@ -142,6 +142,7 @@ public struct GitActivityRefreshMetrics: Equatable, Sendable {
     public let recomputedRepositoryCount: Int?
     public let invalidRepositoryCount: Int?
     public let sharedDataWritten: Bool?
+    public let widgetContentChanged: Bool?
     public let widgetReloaded: Bool?
     public let reason: String?
 
@@ -154,6 +155,7 @@ public struct GitActivityRefreshMetrics: Equatable, Sendable {
         recomputedRepositoryCount: Int? = nil,
         invalidRepositoryCount: Int? = nil,
         sharedDataWritten: Bool? = nil,
+        widgetContentChanged: Bool? = nil,
         widgetReloaded: Bool? = nil,
         reason: String? = nil
     ) {
@@ -165,6 +167,7 @@ public struct GitActivityRefreshMetrics: Equatable, Sendable {
         self.recomputedRepositoryCount = recomputedRepositoryCount
         self.invalidRepositoryCount = invalidRepositoryCount
         self.sharedDataWritten = sharedDataWritten
+        self.widgetContentChanged = widgetContentChanged
         self.widgetReloaded = widgetReloaded
         self.reason = reason?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -201,6 +204,16 @@ public struct GitActivityRefreshStatus: Equatable, Sendable {
     }
 }
 
+public extension GitActivityRefreshStatus {
+    /// Display surfaces accept only the captured local day. The persistence
+    /// store may deliberately retain a future-day status across a westward
+    /// clock or time-zone rollback, but that retained value must not make one
+    /// surface describe a different day than another.
+    func isForDisplayDay(in timeContext: TinyBuddyTimeContext) -> Bool {
+        timeContext.dayIdentifier(for: refreshedAt) == timeContext.dayIdentifier
+    }
+}
+
 public final class GitActivityRefreshStatusStore {
     public enum Key {
         public static let refreshedAt = "tinybuddy.gitRefreshStatus.refreshedAt"
@@ -218,6 +231,7 @@ public final class GitActivityRefreshStatusStore {
         public static let recomputedRepositoryCount = "tinybuddy.gitRefreshStatus.metrics.recomputedRepositoryCount"
         public static let invalidRepositoryCount = "tinybuddy.gitRefreshStatus.metrics.invalidRepositoryCount"
         public static let sharedDataWritten = "tinybuddy.gitRefreshStatus.metrics.sharedDataWritten"
+        public static let widgetContentChanged = "tinybuddy.gitRefreshStatus.metrics.widgetContentChanged"
         public static let widgetReloaded = "tinybuddy.gitRefreshStatus.metrics.widgetReloaded"
         public static let metricsReason = "tinybuddy.gitRefreshStatus.metrics.reason"
     }
@@ -315,6 +329,7 @@ public final class GitActivityRefreshStatusStore {
         let recomputedRepositoryCount = integer(forKey: Key.recomputedRepositoryCount)
         let invalidRepositoryCount = integer(forKey: Key.invalidRepositoryCount)
         let sharedDataWritten = bool(forKey: Key.sharedDataWritten)
+        let widgetContentChanged = bool(forKey: Key.widgetContentChanged)
         let widgetReloaded = bool(forKey: Key.widgetReloaded)
         let legacyReason = userDefaults.string(forKey: Key.metricsReason)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -331,6 +346,7 @@ public final class GitActivityRefreshStatusStore {
             recomputedRepositoryCount != nil ||
             invalidRepositoryCount != nil ||
             sharedDataWritten != nil ||
+            widgetContentChanged != nil ||
             widgetReloaded != nil ||
             reason != nil
         else {
@@ -347,6 +363,7 @@ public final class GitActivityRefreshStatusStore {
                 recomputedRepositoryCount: recomputedRepositoryCount,
                 invalidRepositoryCount: invalidRepositoryCount,
                 sharedDataWritten: sharedDataWritten,
+                widgetContentChanged: widgetContentChanged,
                 widgetReloaded: widgetReloaded,
                 reason: reason
             ),
@@ -408,6 +425,7 @@ public final class GitActivityRefreshStatusStore {
         writeInteger(metrics?.recomputedRepositoryCount, forKey: Key.recomputedRepositoryCount)
         writeInteger(metrics?.invalidRepositoryCount, forKey: Key.invalidRepositoryCount)
         writeBool(metrics?.sharedDataWritten, forKey: Key.sharedDataWritten)
+        writeBool(metrics?.widgetContentChanged, forKey: Key.widgetContentChanged)
         writeBool(metrics?.widgetReloaded, forKey: Key.widgetReloaded)
 
         if let reason = metrics?.reason {

@@ -16,6 +16,7 @@ extension Notification.Name {
 
 enum TinyBuddyLifecycleNotification {
     static let generationKey = "TinyBuddy.lifecycleGeneration"
+    static let sequenceKey = "TinyBuddy.lifecycleNotificationSequence"
 }
 
 enum GitRefreshScriptOutcome: String, Equatable {
@@ -207,7 +208,7 @@ final class GitActivityRefreshCoordinator {
         let requestedAt: Date
     }
 
-    private struct PublishedWidgetActivity: Equatable {
+    private struct RefreshActivityContent: Equatable {
         let focusBlockCount: Int
         let commitCount: Int
         let recentProjectName: String?
@@ -221,24 +222,48 @@ final class GitActivityRefreshCoordinator {
         }
     }
 
+    private struct StableWidgetPresentation: Equatable {
+        let transitionIdentity: String
+        let message: String
+        let actionTitle: String?
+        let focusCountText: String
+        let completionCountText: String
+        let recentProjectName: String?
+        let dataDateText: String?
+        let showsActivityMetrics: Bool
+
+        init(_ presentation: TinyBuddyDisplayPresentation) {
+            transitionIdentity = presentation.transitionIdentity
+            message = presentation.message
+            actionTitle = presentation.actionTitle
+            focusCountText = presentation.focusCountText
+            completionCountText = presentation.completionCountText
+            recentProjectName = presentation.recentProjectName
+            dataDateText = presentation.dataDateText
+            showsActivityMetrics = presentation.showsActivityMetrics
+        }
+    }
+
     private struct PublishedWidgetContent: Equatable {
         let dayIdentifier: String
-        let activity: PublishedWidgetActivity
-        let experienceState: GitActivityExperienceState
-        let diagnosticReason: GitActivityRefreshDiagnosticReason?
+        let presentation: StableWidgetPresentation
 
         init(
             dayIdentifier: String,
+            snapshot: TinyBuddySnapshot,
             refreshStatus: GitActivityRefreshStatus?,
-            activitySnapshot: GitTodayActivitySnapshot
+            activitySnapshot: GitTodayActivitySnapshot,
+            timeContext: TinyBuddyTimeContext
         ) {
             self.dayIdentifier = dayIdentifier
-            activity = PublishedWidgetActivity(activitySnapshot)
-            experienceState = GitActivityExperienceState(
+            presentation = StableWidgetPresentation(TinyBuddyDisplayPresentation(
+                snapshot: snapshot,
+                activitySnapshot: activitySnapshot,
                 refreshStatus: refreshStatus,
-                activitySnapshot: activitySnapshot
-            )
-            diagnosticReason = refreshStatus?.diagnostic?.reason
+                dataAvailability: refreshStatus == nil ? .loading : .available,
+                locale: Locale(identifier: timeContext.signature.localeIdentifier),
+                timeZone: timeContext.timeZone
+            ))
         }
     }
 
@@ -287,6 +312,7 @@ final class GitActivityRefreshCoordinator {
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
     private var isStarted = false
     private var lifecycleGeneration = 0
+    private var lifecycleNotificationSequence = 0
     private var activityCommitGeneration = 0
     private var activeTimeContext: TinyBuddyTimeContext
     private var lastObservedTimeContext: TinyBuddyTimeContext
@@ -413,8 +439,10 @@ final class GitActivityRefreshCoordinator {
         self.lastObservedMonotonicTime = initialMonotonicTime
         self.lastWidgetContent = PublishedWidgetContent(
             dayIdentifier: initialTimeContext.dayIdentifier,
+            snapshot: dailyStatsStore.loadSnapshot(),
             refreshStatus: refreshStatusStore.load(),
-            activitySnapshot: activityStore.loadTodaySnapshot()
+            activitySnapshot: activityStore.loadTodaySnapshot(),
+            timeContext: initialTimeContext
         )
     }
 
@@ -1088,7 +1116,7 @@ final class GitActivityRefreshCoordinator {
         statusNotificationCenter.post(
             name: .gitActivityRefreshDidStart,
             object: nil,
-            userInfo: lifecycleNotificationUserInfo
+            userInfo: nextLifecycleNotificationUserInfo()
         )
         lastRefreshAttemptMonotonicTime = monotonicTime
         let lifecycleGeneration = self.lifecycleGeneration
@@ -1303,7 +1331,7 @@ final class GitActivityRefreshCoordinator {
             statusNotificationCenter.post(
                 name: .gitActivitySnapshotDidChange,
                 object: nil,
-                userInfo: lifecycleNotificationUserInfo
+                userInfo: nextLifecycleNotificationUserInfo()
             )
         }
         let refreshOutcome: GitActivityRefreshOutcome = hasPartialRecovery ? .partial : .succeeded
@@ -1489,8 +1517,8 @@ final class GitActivityRefreshCoordinator {
         }
         return .prepared(
             didPublishSnapshot: didPublishCommittedSnapshot,
-            didChangeWidgetActivity: PublishedWidgetActivity(previouslyPublishedActivity)
-                != PublishedWidgetActivity(committedSnapshotAfterUpdate.activitySnapshot)
+            didChangeWidgetActivity: RefreshActivityContent(previouslyPublishedActivity)
+                != RefreshActivityContent(committedSnapshotAfterUpdate.activitySnapshot)
         )
     }
 
@@ -1729,7 +1757,7 @@ final class GitActivityRefreshCoordinator {
         statusNotificationCenter.post(
             name: .tinyBuddyTimeEnvironmentDidChange,
             object: context,
-            userInfo: lifecycleNotificationUserInfo
+            userInfo: nextLifecycleNotificationUserInfo()
         )
         if !refresh(
             trigger: trigger,
@@ -1775,8 +1803,16 @@ final class GitActivityRefreshCoordinator {
         currentTimeScopeFileURL = timeScopePublisher(currentTimeScopeToken)
     }
 
-    private var lifecycleNotificationUserInfo: [AnyHashable: Any] {
-        [TinyBuddyLifecycleNotification.generationKey: lifecycleGeneration]
+    private func nextLifecycleNotificationUserInfo() -> [AnyHashable: Any] {
+        if lifecycleNotificationSequence == Int.max {
+            advanceLifecycleGeneration()
+            lifecycleNotificationSequence = 0
+        }
+        lifecycleNotificationSequence += 1
+        return [
+            TinyBuddyLifecycleNotification.generationKey: lifecycleGeneration,
+            TinyBuddyLifecycleNotification.sequenceKey: lifecycleNotificationSequence
+        ]
     }
 
     private func recordRefreshStatus(
@@ -1804,11 +1840,14 @@ final class GitActivityRefreshCoordinator {
         let activitySnapshot = activityStore.loadTodaySnapshot()
         let nextWidgetContent = PublishedWidgetContent(
             dayIdentifier: activeTimeContext.dayIdentifier,
+            snapshot: dailyStatsStore.loadSnapshot(),
             refreshStatus: preliminaryStatus,
-            activitySnapshot: activitySnapshot
+            activitySnapshot: activitySnapshot,
+            timeContext: activeTimeContext
         )
+        let didChangeWidgetContent = nextWidgetContent != lastWidgetContent
         var didReloadForStateChange = false
-        if nextWidgetContent != lastWidgetContent || metrics?.sharedDataWritten == true {
+        if didChangeWidgetContent {
             didReloadForStateChange = reloadWidgetForStateChange()
             if didReloadForStateChange {
                 didReloadWidgetDuringCurrentRefresh = true
@@ -1817,8 +1856,9 @@ final class GitActivityRefreshCoordinator {
         lastWidgetContent = nextWidgetContent
 
         let finalMetrics = metrics.map {
-            metricsByRecordingWidgetReload(
+            metricsByRecordingWidgetState(
                 $0,
+                contentChanged: didChangeWidgetContent,
                 didReload: didReloadForStateChange
             )
         }
@@ -1835,7 +1875,7 @@ final class GitActivityRefreshCoordinator {
         statusNotificationCenter.post(
             name: .gitActivityRefreshStatusDidChange,
             object: status,
-            userInfo: lifecycleNotificationUserInfo
+            userInfo: nextLifecycleNotificationUserInfo()
         )
     }
 
@@ -1854,8 +1894,9 @@ final class GitActivityRefreshCoordinator {
         }
     }
 
-    private func metricsByRecordingWidgetReload(
+    private func metricsByRecordingWidgetState(
         _ metrics: GitActivityRefreshMetrics,
+        contentChanged: Bool,
         didReload: Bool
     ) -> GitActivityRefreshMetrics {
         GitActivityRefreshMetrics(
@@ -1867,6 +1908,7 @@ final class GitActivityRefreshCoordinator {
             recomputedRepositoryCount: metrics.recomputedRepositoryCount,
             invalidRepositoryCount: metrics.invalidRepositoryCount,
             sharedDataWritten: metrics.sharedDataWritten,
+            widgetContentChanged: contentChanged,
             widgetReloaded: didReload || metrics.widgetReloaded == true,
             reason: metrics.reason
         )

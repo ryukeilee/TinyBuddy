@@ -14,6 +14,7 @@
 		1060574F0B79D8E25972A3CB /* TinyBuddyReleaseSnapshotVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CEC43F9881806974CF24117 /* TinyBuddyReleaseSnapshotVerifier.swift */; };
 		1AB9E1537339F26F6ECB65BF /* update_git_completion_count.sh in Resources */ = {isa = PBXBuildFile; fileRef = E8F8EEF00869149828C56CC9 /* update_git_completion_count.sh */; };
 		2843A6CB9249E5D895D87DAF /* TinyBuddySharedSnapshotObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 580BF2840D1985E0FFF8198E /* TinyBuddySharedSnapshotObservation.swift */; };
+		2E81072E58BBDF305492D472 /* TinyBuddyDisplayPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 827D60AA48DCEA79FCE594AB /* TinyBuddyDisplayPresentation.swift */; };
 		36F026DF35A5348262813360 /* GitTodayActivityTrustedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA56754AC9F584945B58E161 /* GitTodayActivityTrustedSnapshotStore.swift */; };
 		407EDCD3CF74BB4793E8EADF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */; };
 		426D23164B320789E304896C /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */; };
@@ -109,6 +110,7 @@
 		7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStatsStore.swift; sourceTree = "<group>"; };
 		7DDCB1D3B981C8D2317455D9 /* GitActivityRefreshStatusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitActivityRefreshStatusStore.swift; sourceTree = "<group>"; };
 		7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetView.swift; sourceTree = "<group>"; };
+		827D60AA48DCEA79FCE594AB /* TinyBuddyDisplayPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyDisplayPresentation.swift; sourceTree = "<group>"; };
 		8583569262F912DC0B518C8E /* TinyBuddyAppGroupPreferencesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyAppGroupPreferencesStore.swift; sourceTree = "<group>"; };
 		876BF9E3494E8DAA5CE1FFD8 /* TinyBuddyCombinedSnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyCombinedSnapshotStore.swift; sourceTree = "<group>"; };
 		96B45C0592764EBEE0461F5C /* GitTodayActivityRefreshPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayActivityRefreshPolicy.swift; sourceTree = "<group>"; };
@@ -246,6 +248,7 @@
 				8583569262F912DC0B518C8E /* TinyBuddyAppGroupPreferencesStore.swift */,
 				F621E187E17E0739A05B14B2 /* TinyBuddyArcReactorCore.swift */,
 				876BF9E3494E8DAA5CE1FFD8 /* TinyBuddyCombinedSnapshotStore.swift */,
+				827D60AA48DCEA79FCE594AB /* TinyBuddyDisplayPresentation.swift */,
 				5EC84F073149D17E2CC8AEA5 /* TinyBuddyHUDTheme.swift */,
 				6CEC43F9881806974CF24117 /* TinyBuddyReleaseSnapshotVerifier.swift */,
 				21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */,
@@ -464,6 +467,7 @@
 				CFBBB584FCAF298FBB95DE04 /* TinyBuddyAppGroupPreferencesStore.swift in Sources */,
 				C3753687BCDB329534ED24B5 /* TinyBuddyArcReactorCore.swift in Sources */,
 				FBDA6882DEF17849CDBAA5EE /* TinyBuddyCombinedSnapshotStore.swift in Sources */,
+				2E81072E58BBDF305492D472 /* TinyBuddyDisplayPresentation.swift in Sources */,
 				CF008D49FBAE8C9D0ACA7811 /* TinyBuddyHUDTheme.swift in Sources */,
 				1060574F0B79D8E25972A3CB /* TinyBuddyReleaseSnapshotVerifier.swift in Sources */,
 				6A2048F95FCCF8BC71FFA2C4 /* TinyBuddySharedData.swift in Sources */,

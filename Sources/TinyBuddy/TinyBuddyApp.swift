@@ -168,7 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             gitActivityRefreshCoordinator.handleReopen()
         } else {
             handleAuthorizationRequest(
-                didChange: gitScanRootAuthorizationController.requestAuthorization()
+                result: gitScanRootAuthorizationController.requestAuthorizationResult()
             )
         }
         restoreHUDWindow(from: sender)
@@ -183,17 +183,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         authorizationCommandObservers = [
             observeAuthorizationCommand(named: .gitScanRootAuthorizationRequested) { [weak self] _ in
                 self?.handleAuthorizationRequest(
-                    didChange: self?.gitScanRootAuthorizationController.requestAuthorization() ?? false
+                    result: self?.gitScanRootAuthorizationController.requestAuthorizationResult()
+                        ?? GitScanRootAuthorizationRequestResult(
+                            didChangeAuthorization: false,
+                            didCompleteOnboarding: false
+                        )
                 )
             },
             observeAuthorizationCommand(named: .gitScanRootAuthorizationAddRequested) { [weak self] _ in
                 self?.handleAuthorizationRequest(
-                    didChange: self?.gitScanRootAuthorizationController.requestAuthorization() ?? false
+                    result: self?.gitScanRootAuthorizationController.requestAuthorizationResult()
+                        ?? GitScanRootAuthorizationRequestResult(
+                            didChangeAuthorization: false,
+                            didCompleteOnboarding: false
+                        )
                 )
             },
             observeAuthorizationCommand(named: .gitScanRootAuthorizationRepairRequested) { [weak self] _ in
                 self?.handleAuthorizationRequest(
-                    didChange: self?.gitScanRootAuthorizationController.requestReauthorizationForFirstUnavailableRoot() ?? false
+                    result: GitScanRootAuthorizationRequestResult(
+                        didChangeAuthorization: self?.gitScanRootAuthorizationController.requestReauthorizationForFirstUnavailableRoot() ?? false,
+                        didCompleteOnboarding: false
+                    )
                 )
             },
             observeAuthorizationCommand(named: .gitScanRootAuthorizationReauthorizationRequested) { [weak self] notification in
@@ -248,13 +259,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restoreHUDWindow(from: NSApp)
     }
 
-    private func handleAuthorizationRequest(didChange: Bool) {
+    private func handleAuthorizationRequest(result: GitScanRootAuthorizationRequestResult) {
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
-        guard didChange else {
+        if result.didChangeAuthorization {
+            gitActivityRefreshCoordinator.handleAuthorizationChanged()
+            restoreHUDWindow(from: NSApp)
             return
         }
-        gitActivityRefreshCoordinator.handleAuthorizationChanged()
-        restoreHUDWindow(from: NSApp)
+
+        if result.requiresStandaloneWidgetReload {
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
 
     private func restoreHUDWindow(from application: NSApplication, shouldPresent: Bool = true) {

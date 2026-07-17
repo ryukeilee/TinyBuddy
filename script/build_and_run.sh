@@ -85,6 +85,7 @@ GIT_REFRESH_STATUS_CACHE_HIT_COUNT_KEY="tinybuddy.gitRefreshStatus.metrics.cache
 GIT_REFRESH_STATUS_RECOMPUTED_REPOSITORY_COUNT_KEY="tinybuddy.gitRefreshStatus.metrics.recomputedRepositoryCount"
 GIT_REFRESH_STATUS_INVALID_REPOSITORY_COUNT_KEY="tinybuddy.gitRefreshStatus.metrics.invalidRepositoryCount"
 GIT_REFRESH_STATUS_SHARED_DATA_WRITTEN_KEY="tinybuddy.gitRefreshStatus.metrics.sharedDataWritten"
+GIT_REFRESH_STATUS_WIDGET_CONTENT_CHANGED_KEY="tinybuddy.gitRefreshStatus.metrics.widgetContentChanged"
 GIT_REFRESH_STATUS_WIDGET_RELOADED_KEY="tinybuddy.gitRefreshStatus.metrics.widgetReloaded"
 RELEASE_TRANSACTION_DIR=""
 RELEASE_STAGED_APP=""
@@ -100,6 +101,8 @@ RELEASE_VERIFIED_WIDGET_PID=""
 RELEASE_SNAPSHOT_SCHEMA=""
 RELEASE_SNAPSHOT_REVISION=""
 RELEASE_SNAPSHOT_DAY=""
+RELEASE_REFRESH_WIDGET_CONTENT_CHANGED=""
+RELEASE_REFRESH_WIDGET_RELOADED=""
 RELEASE_AUTHORIZATION_RECORD_COUNT_BEFORE=""
 RELEASE_AUTHORIZATION_RECORD_IDENTITY_BEFORE=""
 RELEASE_EVIDENCE_DIR=""
@@ -385,6 +388,7 @@ verify_installed_sandbox_bookmark_recovery() {
   local recomputed_repository_count
   local invalid_repository_count
   local shared_data_written
+  local widget_content_changed
   local widget_reloaded
 
   if [ -z "$saved_record_count" ]; then
@@ -422,6 +426,7 @@ verify_installed_sandbox_bookmark_recovery() {
     recomputed_repository_count="$(git_refresh_status_value "$GIT_REFRESH_STATUS_RECOMPUTED_REPOSITORY_COUNT_KEY" 2>/dev/null || true)"
     invalid_repository_count="$(git_refresh_status_value "$GIT_REFRESH_STATUS_INVALID_REPOSITORY_COUNT_KEY" 2>/dev/null || true)"
     shared_data_written="$(git_refresh_status_value "$GIT_REFRESH_STATUS_SHARED_DATA_WRITTEN_KEY" 2>/dev/null || true)"
+    widget_content_changed="$(git_refresh_status_value "$GIT_REFRESH_STATUS_WIDGET_CONTENT_CHANGED_KEY" 2>/dev/null || true)"
     widget_reloaded="$(git_refresh_status_value "$GIT_REFRESH_STATUS_WIDGET_RELOADED_KEY" 2>/dev/null || true)"
 
     case "$refreshed_epoch:$authorized_root_count" in
@@ -430,8 +435,9 @@ verify_installed_sandbox_bookmark_recovery() {
       *)
         if [ "$refreshed_epoch" -ge "$minimum_refresh_epoch" ] \
           && [ "$refreshed_epoch" -gt "$baseline_refresh_epoch" ] \
-          && [ "$trigger" = "launch" ] \
-          && [ "$widget_reloaded" = "true" ]
+          && { [ "$trigger" = "launch" ] || [ "$trigger" = "reopen" ]; } \
+          && { [ "$widget_content_changed" = "true" ] || [ "$widget_content_changed" = "false" ]; } \
+          && { [ "$widget_reloaded" = "true" ] || [ "$widget_reloaded" = "false" ]; }
         then
           case "$repository_count" in ''|*[!0-9]*) repository_count="unknown" ;; esac
           case "$cache_hit_count" in ''|*[!0-9]*) cache_hit_count="unknown" ;; esac
@@ -441,18 +447,24 @@ verify_installed_sandbox_bookmark_recovery() {
 
           if [ "$saved_record_count" -gt 0 ] \
             && [ "$authorized_root_count" -gt 0 ] \
-            && { [ "$outcome" = "succeeded" ] || [ "$outcome" = "partial" ]; }
+            && { [ "$outcome" = "succeeded" ] || [ "$outcome" = "partial" ]; } \
+            && { [ "$widget_content_changed" = "false" ] || [ "$widget_reloaded" = "true" ]; }
           then
-            echo "verified sandbox bookmark recovery: trigger=$trigger authorized_roots=$authorized_root_count repositories=$repository_count outcome=$outcome cache_hits=$cache_hit_count recomputed=$recomputed_repository_count invalid=$invalid_repository_count shared_data_written=$shared_data_written widget_reloaded=$widget_reloaded refreshed_epoch=$refreshed_epoch"
+            RELEASE_REFRESH_WIDGET_CONTENT_CHANGED="$widget_content_changed"
+            RELEASE_REFRESH_WIDGET_RELOADED="$widget_reloaded"
+            echo "verified sandbox bookmark recovery: trigger=$trigger authorized_roots=$authorized_root_count repositories=$repository_count outcome=$outcome cache_hits=$cache_hit_count recomputed=$recomputed_repository_count invalid=$invalid_repository_count shared_data_written=$shared_data_written widget_content_changed=$widget_content_changed widget_reloaded=$widget_reloaded refreshed_epoch=$refreshed_epoch"
             return 0
           fi
 
           if [ "$saved_record_count" -eq 0 ] \
             && [ "$authorized_root_count" -eq 0 ] \
             && [ "$outcome" = "skipped" ] \
-            && [ "$diagnostic_reason" = "authorizationRequired" ]
+            && [ "$diagnostic_reason" = "authorizationRequired" ] \
+            && { [ "$widget_content_changed" = "false" ] || [ "$widget_reloaded" = "true" ]; }
           then
-            echo "verified first-launch authorization state: trigger=$trigger authorized_roots=0 outcome=$outcome reason=$diagnostic_reason widget_reloaded=$widget_reloaded refreshed_epoch=$refreshed_epoch"
+            RELEASE_REFRESH_WIDGET_CONTENT_CHANGED="$widget_content_changed"
+            RELEASE_REFRESH_WIDGET_RELOADED="$widget_reloaded"
+            echo "verified first-launch authorization state: trigger=$trigger authorized_roots=0 outcome=$outcome reason=$diagnostic_reason widget_content_changed=$widget_content_changed widget_reloaded=$widget_reloaded refreshed_epoch=$refreshed_epoch"
             return 0
           fi
         fi
@@ -466,11 +478,11 @@ verify_installed_sandbox_bookmark_recovery() {
   done
 
   if [ "$saved_record_count" -gt 0 ]; then
-    echo "installed app did not publish a fresh launch-scoped successful or partial Git refresh from saved sandbox bookmarks" >&2
+    echo "installed app did not publish a fresh post-install successful or partial Git refresh from saved sandbox bookmarks" >&2
   else
-    echo "installed app did not publish a fresh launch-scoped authorization-required first-scan status" >&2
+    echo "installed app did not publish a fresh post-install authorization-required first-scan status" >&2
   fi
-  echo "saved_authorization_records=$saved_record_count minimum_refresh_epoch=$minimum_refresh_epoch observed_trigger=${trigger:-unknown} observed_outcome=${outcome:-unknown} observed_widget_reloaded=${widget_reloaded:-unknown}" >&2
+  echo "saved_authorization_records=$saved_record_count minimum_refresh_epoch=$minimum_refresh_epoch observed_trigger=${trigger:-unknown} observed_outcome=${outcome:-unknown} observed_widget_content_changed=${widget_content_changed:-unknown} observed_widget_reloaded=${widget_reloaded:-unknown}" >&2
   return 1
 }
 
@@ -1579,8 +1591,11 @@ verify_widget_snapshot_consumption() {
   local schema="$2"
   local revision="$3"
   local snapshot_day="$4"
+  local content_changed="${5:-true}"
   local deadline
+  local log_output
   local message
+  local observed_revision
   local predicate
 
   case "$widget_pid" in ''|*[!0-9]*) echo "invalid Widget process identity" >&2; return 2 ;; esac
@@ -1590,20 +1605,42 @@ verify_widget_snapshot_consumption() {
     ????-??-??) ;;
     *) echo "invalid Widget snapshot verification day" >&2; return 2 ;;
   esac
+  case "$content_changed" in
+    true|false) ;;
+    *) echo "invalid Widget content-change state" >&2; return 2 ;;
+  esac
 
   message="snapshot consumed schema=$schema revision=$revision day=$snapshot_day"
-  predicate="processIdentifier == $widget_pid AND subsystem == \"local.tinybuddy\" AND category == \"SharedSnapshot\" AND eventMessage CONTAINS \"$message\""
+  if [ "$content_changed" = "true" ]; then
+    predicate="processIdentifier == $widget_pid AND subsystem == \"local.tinybuddy\" AND category == \"SharedSnapshot\" AND eventMessage CONTAINS \"$message\""
+  else
+    predicate="processIdentifier == $widget_pid AND subsystem == \"local.tinybuddy\" AND category == \"SharedSnapshot\" AND eventMessage CONTAINS \"snapshot consumed schema=$schema revision=\" AND eventMessage CONTAINS \"day=$snapshot_day\""
+  fi
   deadline=$((SECONDS + WIDGET_RUNTIME_TIMEOUT))
   while [ "$SECONDS" -le "$deadline" ]; do
-    if "$LOG_BIN" show \
+    log_output="$("$LOG_BIN" show \
       --last "${WIDGET_RUNTIME_TIMEOUT}s" \
       --info \
       --style compact \
-      --predicate "$predicate" 2>/dev/null \
-      | /usr/bin/grep -F "$message" >/dev/null
-    then
+      --predicate "$predicate" 2>/dev/null || true)"
+    if printf '%s\n' "$log_output" | /usr/bin/grep -F "$message" >/dev/null; then
       echo "verified Widget shared snapshot consumption: pid=$widget_pid schema=$schema revision=$revision day=$snapshot_day"
       return 0
+    fi
+    if [ "$content_changed" = "false" ]; then
+      observed_revision="$(
+        printf '%s\n' "$log_output" \
+          | /usr/bin/sed -nE "s/.*snapshot consumed schema=$schema revision=([0-9]+) day=$snapshot_day.*/\\1/p" \
+          | /usr/bin/sort -n \
+          | /usr/bin/awk -v current="$revision" '$1 <= current { observed = $1 } END { if (observed != "") print observed }'
+      )"
+      case "$observed_revision" in
+        ''|*[!0-9]*) ;;
+        *)
+          echo "verified Widget stable shared snapshot consumption: pid=$widget_pid schema=$schema consumed_revision=$observed_revision current_revision=$revision day=$snapshot_day"
+          return 0
+          ;;
+      esac
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
       break
@@ -1611,7 +1648,11 @@ verify_widget_snapshot_consumption() {
     sleep 1
   done
 
-  echo "Widget did not log consumption of the committed shared snapshot: pid=$widget_pid schema=$schema revision=$revision day=$snapshot_day" >&2
+  if [ "$content_changed" = "true" ]; then
+    echo "Widget did not log consumption of the committed shared snapshot: pid=$widget_pid schema=$schema revision=$revision day=$snapshot_day" >&2
+  else
+    echo "Widget did not log consumption of a compatible stable shared snapshot: pid=$widget_pid schema=$schema maximum_revision=$revision day=$snapshot_day" >&2
+  fi
   return 1
 }
 
@@ -2394,6 +2435,8 @@ verify_release_app() {
   RELEASE_SNAPSHOT_SCHEMA=""
   RELEASE_SNAPSHOT_REVISION=""
   RELEASE_SNAPSHOT_DAY=""
+  RELEASE_REFRESH_WIDGET_CONTENT_CHANGED=""
+  RELEASE_REFRESH_WIDGET_RELOADED=""
   /usr/bin/open -n "$INSTALLED_APP" || return $?
   wait_for_running_bundle_process "$APP_NAME" "$app_executable" "$rejected_app_pids" "$APP_RUNTIME_TIMEOUT" || return $?
   verify_hud_window "$RELEASE_VERIFIED_APP_PID" || return $?
@@ -2420,7 +2463,8 @@ verify_release_app() {
     "$RELEASE_VERIFIED_WIDGET_PID" \
     "$RELEASE_SNAPSHOT_SCHEMA" \
     "$RELEASE_SNAPSHOT_REVISION" \
-    "$RELEASE_SNAPSHOT_DAY" || return $?
+    "$RELEASE_SNAPSHOT_DAY" \
+    "$RELEASE_REFRESH_WIDGET_CONTENT_CHANGED" || return $?
   verify_running_bundle_process \
     "$RELEASE_VERIFIED_APP_PID" \
     "$APP_NAME" \

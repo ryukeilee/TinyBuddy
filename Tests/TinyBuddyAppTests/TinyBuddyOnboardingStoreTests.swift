@@ -20,6 +20,10 @@ final class TinyBuddyOnboardingStoreTests: XCTestCase {
 
         XCTAssertEqual(first.state, .pending)
         XCTAssertEqual(recreated.state, .pending)
+        XCTAssertEqual(
+            TinyBuddyDisplaySharedState.onboardingCompleted(userDefaults: sharedDefaults),
+            false
+        )
     }
 
     func testUpgradeWithExistingConfigurationCompletesMigrationWithoutOverwritingValues() {
@@ -41,6 +45,10 @@ final class TinyBuddyOnboardingStoreTests: XCTestCase {
 
         XCTAssertEqual(store.state, .completed)
         XCTAssertEqual(
+            TinyBuddyDisplaySharedState.onboardingCompleted(userDefaults: sharedDefaults),
+            true
+        )
+        XCTAssertEqual(
             (defaults.array(forKey: GitScanRootAuthorizationStore.Constants.authorizationRecordsKey) as? [[String: Any]])?.first?["id"] as? String,
             "existing-id"
         )
@@ -61,6 +69,27 @@ final class TinyBuddyOnboardingStoreTests: XCTestCase {
         )
         XCTAssertEqual(recreated.state, .completed)
         XCTAssertFalse(recreated.markCompleted())
+        XCTAssertEqual(
+            TinyBuddyDisplaySharedState.onboardingCompleted(userDefaults: sharedDefaults),
+            true
+        )
+    }
+
+    func testAppRestoresOnboardingStateFromSharedDisplayMirror() {
+        let defaults = makeDefaults(prefix: "onboarding")
+        let sharedDefaults = makeDefaults(prefix: "shared")
+        TinyBuddyDisplaySharedState.saveOnboardingCompleted(
+            true,
+            userDefaults: sharedDefaults
+        )
+
+        let store = TinyBuddyOnboardingStore(
+            userDefaults: defaults,
+            sharedDefaults: sharedDefaults
+        )
+
+        XCTAssertEqual(store.state, .completed)
+        XCTAssertEqual(defaults.string(forKey: TinyBuddyOnboardingStore.Key.state), "completed")
     }
 
     private func makeDefaults(prefix: String) -> UserDefaults {
