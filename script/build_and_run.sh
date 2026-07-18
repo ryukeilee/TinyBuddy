@@ -103,12 +103,18 @@ RELEASE_SNAPSHOT_REVISION=""
 RELEASE_SNAPSHOT_DAY=""
 RELEASE_REFRESH_WIDGET_CONTENT_CHANGED=""
 RELEASE_REFRESH_WIDGET_RELOADED=""
+RELEASE_WIDGET_REGISTRATION_PRESERVED=0
+RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
 RELEASE_AUTHORIZATION_RECORD_COUNT_BEFORE=""
 RELEASE_AUTHORIZATION_RECORD_IDENTITY_BEFORE=""
 RELEASE_EVIDENCE_DIR=""
 RELEASE_STAGE_INDEX=0
 RELEASE_COMPLETION_MARKER=""
+RELEASE_EXCHANGE_STATUS_FILE=""
+RELEASE_EXCHANGE_IN_PROGRESS=0
+RELEASE_STAGED_APP_IDENTITY=""
 RELEASE_VERIFIER_BINARY="${TINYBUDDY_RELEASE_VERIFIER_BINARY:-}"
+RELEASE_INSTALLER_BINARY="${TINYBUDDY_RELEASE_INSTALLER_BINARY:-}"
 RELEASE_CANONICAL_INSTALL_DIR=""
 RELEASE_LOCK_DIR=""
 RELEASE_LOCK_FILE=""
@@ -744,6 +750,7 @@ build_current_app() {
   case "$MODE" in
     release-install|--release-install|release-verify|--release-verify|release-acceptance|--release-acceptance)
       build_release_verifier || return $?
+      build_release_installer || return $?
       ;;
   esac
 }
@@ -756,6 +763,18 @@ build_release_verifier() {
   RELEASE_VERIFIER_BINARY="$binary_directory/TinyBuddyReleaseVerifier"
   if [ ! -x "$RELEASE_VERIFIER_BINARY" ]; then
     echo "missing TinyBuddyReleaseVerifier executable after SwiftPM build" >&2
+    return 1
+  fi
+}
+
+build_release_installer() {
+  local binary_directory
+
+  "$ROOT_DIR/script/swiftpm.sh" build --product TinyBuddyReleaseInstaller || return $?
+  binary_directory="$("$ROOT_DIR/script/swiftpm.sh" build --show-bin-path)" || return $?
+  RELEASE_INSTALLER_BINARY="$binary_directory/TinyBuddyReleaseInstaller"
+  if [ ! -x "$RELEASE_INSTALLER_BINARY" ]; then
+    echo "missing TinyBuddyReleaseInstaller executable after SwiftPM build" >&2
     return 1
   fi
 }
@@ -774,12 +793,94 @@ resolve_release_verifier_binary() {
   fi
 }
 
+resolve_release_installer_binary() {
+  local binary_directory
+
+  if [ -n "$RELEASE_INSTALLER_BINARY" ] && [ -x "$RELEASE_INSTALLER_BINARY" ]; then
+    return 0
+  fi
+  binary_directory="$("$ROOT_DIR/script/swiftpm.sh" build --show-bin-path)" || return $?
+  RELEASE_INSTALLER_BINARY="$binary_directory/TinyBuddyReleaseInstaller"
+  if [ ! -x "$RELEASE_INSTALLER_BINARY" ]; then
+    echo "missing TinyBuddyReleaseInstaller executable after Release build stage" >&2
+    return 1
+  fi
+}
+
+atomic_exchange_release_apps() {
+  local first_path="$1"
+  local second_path="$2"
+  local installer_status
+
+  resolve_release_installer_binary || return 69
+  if "$RELEASE_INSTALLER_BINARY" \
+    exchange \
+    --path-a "$first_path" \
+    --path-b "$second_path"
+  then
+    return 0
+  else
+    installer_status="$?"
+  fi
+  # Exit 69 is reserved by this wrapper for a pre-exchange resolver failure.
+  # Remap the same status from an overridden helper to the unknown-state path.
+  if [ "$installer_status" -eq 69 ]; then
+    return 76
+  fi
+  return "$installer_status"
+}
+
+atomic_place_release_candidate() {
+  local source_path="$1"
+  local destination_path="$2"
+  local installer_status
+
+  resolve_release_installer_binary || return 69
+  if "$RELEASE_INSTALLER_BINARY" \
+    install \
+    --source "$source_path" \
+    --destination "$destination_path"
+  then
+    return 0
+  else
+    installer_status="$?"
+  fi
+  if [ "$installer_status" -eq 69 ]; then
+    return 76
+  fi
+  return "$installer_status"
+}
+
+release_path_identity() {
+  /usr/bin/stat -f '%d:%i' "$1"
+}
+
 run_release_regression_tests() {
   "$ROOT_DIR/script/swiftpm.sh" test
 }
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
+}
+
+launch_installed_release_app() {
+  if [ "$RELEASE_WIDGET_REGISTRATION_PRESERVED" -eq 1 ]; then
+    local app_executable="$INSTALLED_APP/Contents/MacOS/$APP_NAME"
+
+    if [ ! -x "$app_executable" ]; then
+      echo "missing installed app executable: $app_executable" >&2
+      return 1
+    fi
+
+    (
+      trap - INT TERM
+      trap '' HUP
+      exec 9>&-
+      exec "$app_executable"
+    ) </dev/null >/dev/null 2>&1 &
+  else
+    /usr/bin/open -n "$INSTALLED_APP"
+  fi
 }
 
 find_widget_extension() {
@@ -834,32 +935,39 @@ verify_widget_extension_bundle() {
 
 register_widget_extension() {
   local app_bundle="$1"
+  local allow_registration_add="${2:-0}"
   local appex
-  local registered_path
   local registered_paths
   local registered_count
   local deadline
 
+  RELEASE_WIDGET_REGISTRATION_PRESERVED=0
+  RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
   appex="$(find_widget_extension "$app_bundle")"
   if [ -z "$appex" ]; then
     echo "missing $WIDGET_EXTENSION_NAME.appex in $app_bundle" >&2
     return 1
   fi
 
-  "$PLUGINKIT_BIN" -a "$appex" || return $?
-
   registered_paths="$(registered_widget_paths)" || return $?
-  while IFS= read -r registered_path; do
-    if [ -z "$registered_path" ] || [ "$registered_path" = "$appex" ]; then
-      continue
-    fi
-    if ! "$PLUGINKIT_BIN" -r "$registered_path" >/dev/null 2>&1; then
-      echo "failed to unregister stale Widget record: $registered_path" >&2
-      return 1
-    fi
-  done <<EOF
-$(printf '%s\n' "$registered_paths" | /usr/bin/awk 'NF && !seen[$0]++')
-EOF
+  registered_count="$(printf '%s\n' "$registered_paths" | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }')"
+  if [ "$registered_count" -eq 1 ] && [ "$registered_paths" = "$appex" ]; then
+    RELEASE_WIDGET_REGISTRATION_PRESERVED=1
+    echo "preserved existing widget extension registration: $appex"
+    return 0
+  fi
+  if [ "$registered_count" -ne 0 ]; then
+    echo "refusing to replace existing Widget registrations automatically" >&2
+    echo "expected_widget_path=$appex registered_count=$registered_count" >&2
+    return 1
+  fi
+  if [ "$allow_registration_add" -ne 1 ]; then
+    echo "missing Widget registration; automatic registration is allowed only during a clean install" >&2
+    return 1
+  fi
+
+  RELEASE_WIDGET_REGISTRATION_ATTEMPTED=1
+  "$PLUGINKIT_BIN" -a "$appex" || return $?
 
   deadline=$((SECONDS + WIDGET_RUNTIME_TIMEOUT))
   while [ "$SECONDS" -le "$deadline" ]; do
@@ -877,7 +985,6 @@ EOF
 
   echo "$WIDGET_BUNDLE_ID registration is not unique or does not point to the installed extension" >&2
   echo "expected_widget_path=$appex registered_count=${registered_count:-0}" >&2
-  printf '%s\n' "$registered_paths" >&2
   return 1
 }
 
@@ -928,6 +1035,32 @@ registered_widget_paths() {
           if (path ~ /\.appex$/) print path
         }
       '
+}
+
+verify_widget_registration_preflight() {
+  local expected_appex="$INSTALLED_APP/Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex"
+  local registered_paths
+  local registered_count
+
+  registered_paths="$(registered_widget_paths)" || return $?
+  registered_count="$(printf '%s\n' "$registered_paths" | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }')"
+  if [ "$registered_count" -eq 0 ]; then
+    if [ ! -e "$INSTALLED_APP" ] && [ ! -L "$INSTALLED_APP" ]; then
+      return 0
+    fi
+    echo "existing installation is missing its Widget registration; refusing automatic repair" >&2
+    return 1
+  fi
+  if [ -d "$INSTALLED_APP" ] \
+    && [ "$registered_count" -eq 1 ] \
+    && [ "$registered_paths" = "$expected_appex" ]
+  then
+    return 0
+  fi
+
+  echo "existing Widget registrations cannot be preserved safely" >&2
+  echo "expected_widget_path=$expected_appex registered_count=$registered_count" >&2
+  return 1
 }
 
 widget_executable_hash() {
@@ -1756,7 +1889,7 @@ restore_release_runtime() {
   widget_executable="$installed_appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
 
   if [ "$RELEASE_PREVIOUS_APP_WAS_RUNNING" -eq 1 ]; then
-    /usr/bin/open -n "$INSTALLED_APP" || return $?
+    launch_installed_release_app || return $?
     wait_for_running_bundle_process "$APP_NAME" "$app_executable" "" "$APP_RUNTIME_TIMEOUT" || return $?
   fi
   if [ -n "$RELEASE_PREVIOUS_WIDGET_PIDS" ]; then
@@ -2312,7 +2445,9 @@ run_release_stage() {
 rollback_release_install() {
   local rollback_status=0
   local restored_previous=0
+  local installed_identity=""
   local switched_before_rollback="$RELEASE_SWITCHED"
+  local registration_attempted_before_rollback="${RELEASE_WIDGET_REGISTRATION_ATTEMPTED:-0}"
 
   trap - EXIT
   trap '' HUP INT TERM
@@ -2336,30 +2471,65 @@ rollback_release_install() {
     return 1
   fi
 
-  if [ "$RELEASE_SWITCHED" -eq 1 ]; then
-    if ! stop_release_runtime; then
-      rollback_status=1
-    elif ! /bin/rm -rf "$INSTALLED_APP"; then
-      rollback_status=1
-    fi
+  if [ "$RELEASE_SWITCHED" -eq 0 ] \
+    && [ "$RELEASE_HAD_PREVIOUS" -eq 1 ] \
+    && [ -n "${RELEASE_EXCHANGE_STATUS_FILE:-}" ] \
+    && [ -f "$RELEASE_EXCHANGE_STATUS_FILE" ] \
+    && /usr/bin/grep -Fqx \
+      'TINYBUDDY_RELEASE_INSTALLER_EXCHANGED' \
+      "$RELEASE_EXCHANGE_STATUS_FILE"
+  then
+    RELEASE_SWITCHED=1
   fi
 
-  if [ "$rollback_status" -eq 0 ] && [ "$RELEASE_HAD_PREVIOUS" -eq 1 ]; then
-    if [ ! -d "$RELEASE_BACKUP_APP" ]; then
+  if [ "$RELEASE_SWITCHED" -eq 0 ] \
+    && [ "$RELEASE_HAD_PREVIOUS" -eq 0 ] \
+    && [ -n "${RELEASE_EXCHANGE_STATUS_FILE:-}" ] \
+    && [ -f "$RELEASE_EXCHANGE_STATUS_FILE" ] \
+    && /usr/bin/grep -Fqx \
+      'TINYBUDDY_RELEASE_INSTALLER_INSTALLED' \
+      "$RELEASE_EXCHANGE_STATUS_FILE"
+  then
+    RELEASE_SWITCHED=1
+  fi
+
+  if [ "$RELEASE_SWITCHED" -eq 0 ] \
+    && [ "${RELEASE_EXCHANGE_IN_PROGRESS:-0}" -eq 1 ]
+  then
+    echo "atomic app exchange state is uncertain; preserving the release transaction for recovery" >&2
+    rollback_status=1
+  fi
+
+  if [ "$rollback_status" -eq 0 ] && [ "$RELEASE_SWITCHED" -eq 1 ]; then
+    if ! stop_release_runtime; then
       rollback_status=1
-    elif [ -e "$INSTALLED_APP" ] || [ -L "$INSTALLED_APP" ]; then
-      rollback_status=1
-    elif /bin/mv "$RELEASE_BACKUP_APP" "$INSTALLED_APP"; then
-      restored_previous=1
+    elif [ "$RELEASE_HAD_PREVIOUS" -eq 1 ]; then
+      if [ ! -d "$RELEASE_BACKUP_APP" ] || [ ! -d "$INSTALLED_APP" ]; then
+        rollback_status=1
+      elif atomic_exchange_release_apps "$RELEASE_BACKUP_APP" "$INSTALLED_APP"; then
+        restored_previous=1
+      else
+        rollback_status=1
+      fi
     else
-      rollback_status=1
+      installed_identity="$(release_path_identity "$INSTALLED_APP" 2>/dev/null || true)"
+      if [ -z "${RELEASE_STAGED_APP_IDENTITY:-}" ] \
+        || [ "$installed_identity" != "$RELEASE_STAGED_APP_IDENTITY" ]
+      then
+        echo "refusing to remove an installed app that is not the staged clean-install candidate" >&2
+        rollback_status=1
+      elif ! /bin/rm -rf "$INSTALLED_APP"; then
+        rollback_status=1
+      fi
     fi
   fi
 
   if [ "$rollback_status" -eq 0 ]; then
     if [ "$restored_previous" -eq 1 ]; then
       restore_release_runtime || rollback_status=1
-    elif [ "$RELEASE_SWITCHED" -eq 1 ]; then
+    elif [ "$RELEASE_SWITCHED" -eq 1 ] \
+      && [ "${RELEASE_WIDGET_REGISTRATION_ATTEMPTED:-0}" -eq 1 ]
+    then
       unregister_widget_extensions || rollback_status=1
     fi
   fi
@@ -2374,13 +2544,21 @@ rollback_release_install() {
     RELEASE_HAD_PREVIOUS=0
     RELEASE_SWITCHED=0
     RELEASE_COMMITTED=0
+    RELEASE_EXCHANGE_STATUS_FILE=""
+    RELEASE_EXCHANGE_IN_PROGRESS=0
+    RELEASE_STAGED_APP_IDENTITY=""
+    RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
   fi
 
   if [ "$rollback_status" -eq 0 ]; then
     if [ "$restored_previous" -eq 1 ]; then
       echo "release install failed; rolled back to the previous installed app" >&2
-    elif [ "$switched_before_rollback" -eq 1 ]; then
+    elif [ "$switched_before_rollback" -eq 1 ] \
+      && [ "$registration_attempted_before_rollback" -eq 1 ]
+    then
       echo "release clean install failed; removed the candidate app and Widget registration" >&2
+    elif [ "$switched_before_rollback" -eq 1 ]; then
+      echo "release clean install failed; removed the candidate app without changing Widget registrations" >&2
     else
       echo "release install failed before activation; cleaned the staged candidate" >&2
     fi
@@ -2401,10 +2579,18 @@ verify_release_app() {
   local baseline_refresh_epoch="-1"
   local minimum_refresh_epoch
   local current_epoch
+  local allow_widget_registration_add=0
 
   verify_release_bundle "$INSTALLED_APP" || return $?
   verify_installed_matches_build || return $?
-  register_widget_extension "$INSTALLED_APP" || return $?
+  if [ "${RELEASE_HAD_PREVIOUS:-0}" -eq 0 ] \
+    && [ "${RELEASE_SWITCHED:-0}" -eq 1 ]
+  then
+    allow_widget_registration_add=1
+  fi
+  register_widget_extension \
+    "$INSTALLED_APP" \
+    "$allow_widget_registration_add" || return $?
   installed_appex="$(find_widget_extension "$INSTALLED_APP")"
   widget_executable="$installed_appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
 
@@ -2437,7 +2623,7 @@ verify_release_app() {
   RELEASE_SNAPSHOT_DAY=""
   RELEASE_REFRESH_WIDGET_CONTENT_CHANGED=""
   RELEASE_REFRESH_WIDGET_RELOADED=""
-  /usr/bin/open -n "$INSTALLED_APP" || return $?
+  launch_installed_release_app || return $?
   wait_for_running_bundle_process "$APP_NAME" "$app_executable" "$rejected_app_pids" "$APP_RUNTIME_TIMEOUT" || return $?
   verify_hud_window "$RELEASE_VERIFIED_APP_PID" || return $?
   wait_for_running_bundle_process "$WIDGET_EXTENSION_NAME" "$widget_executable" "$rejected_widget_pids" "$WIDGET_RUNTIME_TIMEOUT" || return $?
@@ -2484,6 +2670,7 @@ activate_and_verify_release_app() {
 verify_release_app_fresh() {
   verify_release_bundle "$INSTALLED_APP" || return $?
   verify_installed_matches_build || return $?
+  verify_widget_registration_preflight || return $?
   RELEASE_AUTHORIZATION_RECORD_COUNT_BEFORE="$(saved_git_scan_root_record_count)" || return $?
   RELEASE_AUTHORIZATION_RECORD_IDENTITY_BEFORE="$(saved_git_scan_root_record_identity)" || return $?
   capture_release_runtime || return $?
@@ -2495,25 +2682,35 @@ install_release_app() {
   local activation_status
 
   validate_release_install_paths || return $?
+  verify_widget_registration_preflight || return $?
   RELEASE_AUTHORIZATION_RECORD_COUNT_BEFORE="$(saved_git_scan_root_record_count)" || return $?
   RELEASE_AUTHORIZATION_RECORD_IDENTITY_BEFORE="$(saved_git_scan_root_record_identity)" || return $?
-  RELEASE_TRANSACTION_DIR="$INSTALL_DIR/.TinyBuddy.install.$$"
-  RELEASE_STAGED_APP="$RELEASE_TRANSACTION_DIR/$APP_NAME.app"
-  RELEASE_BACKUP_APP="$RELEASE_TRANSACTION_DIR/$APP_NAME.backup.app"
+  RELEASE_TRANSACTION_DIR=""
+  RELEASE_STAGED_APP=""
+  RELEASE_BACKUP_APP=""
+  RELEASE_EXCHANGE_STATUS_FILE=""
   RELEASE_HAD_PREVIOUS=0
   RELEASE_SWITCHED=0
   RELEASE_COMMITTED=0
-  trap 'rollback_release_install' EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  if /bin/mkdir -m 700 "$RELEASE_TRANSACTION_DIR"; then
-    :
+  RELEASE_EXCHANGE_IN_PROGRESS=0
+  RELEASE_STAGED_APP_IDENTITY=""
+  RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
+  if RELEASE_TRANSACTION_DIR="$(
+    /usr/bin/mktemp -d "$INSTALL_DIR/.TinyBuddy.install.XXXXXXXX"
+  )"
+  then
+    trap 'rollback_release_install' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
   else
     activation_status="$?"
-    rollback_release_install || true
+    RELEASE_TRANSACTION_DIR=""
     return "$activation_status"
   fi
+  RELEASE_STAGED_APP="$RELEASE_TRANSACTION_DIR/$APP_NAME.candidate"
+  RELEASE_BACKUP_APP="$RELEASE_STAGED_APP"
+  RELEASE_EXCHANGE_STATUS_FILE="$RELEASE_TRANSACTION_DIR/exchange.status"
 
   if /usr/bin/ditto "$APP_BUNDLE" "$RELEASE_STAGED_APP"; then
     :
@@ -2523,6 +2720,13 @@ install_release_app() {
     return "$activation_status"
   fi
   if verify_release_bundle "$RELEASE_STAGED_APP"; then
+    :
+  else
+    activation_status="$?"
+    rollback_release_install || true
+    return "$activation_status"
+  fi
+  if RELEASE_STAGED_APP_IDENTITY="$(release_path_identity "$RELEASE_STAGED_APP")"; then
     :
   else
     activation_status="$?"
@@ -2547,22 +2751,64 @@ install_release_app() {
 
   if [ -e "$INSTALLED_APP" ] || [ -L "$INSTALLED_APP" ]; then
     RELEASE_HAD_PREVIOUS=1
-    if /bin/mv "$INSTALLED_APP" "$RELEASE_BACKUP_APP"; then
-      :
+    RELEASE_EXCHANGE_IN_PROGRESS=1
+    if atomic_exchange_release_apps \
+      "$RELEASE_STAGED_APP" \
+      "$INSTALLED_APP" >"$RELEASE_EXCHANGE_STATUS_FILE"
+    then
+      RELEASE_SWITCHED=1
+      RELEASE_EXCHANGE_IN_PROGRESS=0
+      /bin/cat "$RELEASE_EXCHANGE_STATUS_FILE"
     else
       activation_status="$?"
-      RELEASE_HAD_PREVIOUS=0
+      case "$activation_status" in
+        64|66|69|74)
+          RELEASE_EXCHANGE_IN_PROGRESS=0
+          ;;
+        75)
+          # The installer exchanged the bundles but could not confirm that its
+          # in-process reverse exchange completed. Treat the canonical path as
+          # switched so rollback either restores the previous bundle or leaves
+          # the transaction intact for recovery.
+          RELEASE_SWITCHED=1
+          RELEASE_EXCHANGE_IN_PROGRESS=0
+          ;;
+        *)
+          # A crash or non-protocol status can occur on either side of the
+          # exchange. The EXIT rollback must preserve both paths rather than
+          # guess and delete the only previous bundle.
+          :
+          ;;
+      esac
       rollback_release_install || true
       return "$activation_status"
     fi
-  fi
-  RELEASE_SWITCHED=1
-  if /bin/mv "$RELEASE_STAGED_APP" "$INSTALLED_APP"; then
-    :
   else
-    activation_status="$?"
-    rollback_release_install || true
-    return "$activation_status"
+    RELEASE_EXCHANGE_IN_PROGRESS=1
+    if atomic_place_release_candidate \
+      "$RELEASE_STAGED_APP" \
+      "$INSTALLED_APP" >"$RELEASE_EXCHANGE_STATUS_FILE"
+    then
+      RELEASE_SWITCHED=1
+      RELEASE_EXCHANGE_IN_PROGRESS=0
+      /bin/cat "$RELEASE_EXCHANGE_STATUS_FILE"
+    else
+      activation_status="$?"
+      case "$activation_status" in
+        64|66|69|73|74)
+          RELEASE_EXCHANGE_IN_PROGRESS=0
+          ;;
+        75)
+          RELEASE_SWITCHED=1
+          RELEASE_EXCHANGE_IN_PROGRESS=0
+          ;;
+        *)
+          :
+          ;;
+      esac
+      rollback_release_install || true
+      return "$activation_status"
+    fi
   fi
 
   if activate_and_verify_release_app; then
@@ -2583,6 +2829,10 @@ install_release_app() {
     RELEASE_TRANSACTION_DIR=""
     RELEASE_STAGED_APP=""
     RELEASE_BACKUP_APP=""
+    RELEASE_EXCHANGE_STATUS_FILE=""
+    RELEASE_EXCHANGE_IN_PROGRESS=0
+    RELEASE_STAGED_APP_IDENTITY=""
+    RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
     trap - HUP INT TERM
     echo "transactionally installed $INSTALLED_APP"
     return 0

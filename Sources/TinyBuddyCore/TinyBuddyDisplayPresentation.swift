@@ -662,24 +662,29 @@ public struct TinyBuddyDisplayLayout: Equatable, Sendable {
         let prioritizesActivity = Self.prioritizesActivityContent(
             presentation.state
         )
+        let showsPartialActivityDetails = isExpandedWidget
+            && accessibilityText == false
+            && presentation.state == .partial
+            && presentation.showsActivityMetrics
 
         showsBrandLabel = isHUD || accessibilityText == false
         showsExpression = accessibilityText == false
         showsMetrics = isHUD
             ? presentation.showsActivityMetrics
             : accessibilityText == false
-                && prioritizesActivity
+                && (prioritizesActivity || showsPartialActivityDetails)
                 && presentation.showsActivityMetrics
         showsProject = accessibilityText == false
             && presentation.recentProjectName != nil
-            && (isHUD || (isExpandedWidget && prioritizesActivity))
-        showsMessage = isHUD || prioritizesActivity == false
+            && (isHUD || (isExpandedWidget && (prioritizesActivity || showsPartialActivityDetails)))
+        showsMessage = isHUD || (prioritizesActivity == false && showsPartialActivityDetails == false)
         showsDataDate = accessibilityText == false
-            && (isHUD || (isExpandedWidget && prioritizesActivity))
+            && (isHUD || (isExpandedWidget && (prioritizesActivity || showsPartialActivityDetails)))
         stacksMetricsVertically = isHUD && accessibilityText
         usesEnhancedContrast = environment.increasedContrast
         allowsMotion = environment.reduceMotion == false && environment.lowPower == false
-        titleLineLimit = accessibilityText || isCompactWidget || prioritizesActivity == false
+        titleLineLimit = accessibilityText || isCompactWidget
+            || (prioritizesActivity == false && showsPartialActivityDetails == false)
             ? 2
             : 1
         switch environment.size {
@@ -688,7 +693,7 @@ public struct TinyBuddyDisplayLayout: Equatable, Sendable {
         case .standard:
             messageLineLimit = accessibilityText ? 5 : 3
         case .expanded:
-            messageLineLimit = accessibilityText ? 1 : 3
+            messageLineLimit = accessibilityText || showsPartialActivityDetails ? 1 : 3
         }
     }
 

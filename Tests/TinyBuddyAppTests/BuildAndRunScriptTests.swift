@@ -310,6 +310,120 @@ final class BuildAndRunScriptTests: XCTestCase {
         )
     }
 
+    func testReleaseInstallerBinaryCanBeResolvedAfterAnIsolatedBuildStage() throws {
+        let resolveFunction = try XCTUnwrap(
+            shellFunction(named: "resolve_release_installer_binary", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerResolutionTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptDirectory = temporaryDirectory.appendingPathComponent("script")
+        let binaryDirectory = temporaryDirectory.appendingPathComponent("bin")
+        let swiftPM = scriptDirectory.appendingPathComponent("swiftpm.sh")
+        let installer = binaryDirectory.appendingPathComponent("TinyBuddyReleaseInstaller")
+        try FileManager.default.createDirectory(at: scriptDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: true)
+        try Data("""
+        #!/bin/bash
+        printf '%s\n' \(shellQuote(binaryDirectory.path))
+        """.utf8).write(to: swiftPM)
+        try Data("#!/bin/bash\nexit 0\n".utf8).write(to: installer)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: swiftPM.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installer.path)
+
+        let result = try runBash("""
+        set -euo pipefail
+        ROOT_DIR=\(shellQuote(temporaryDirectory.path))
+        RELEASE_INSTALLER_BINARY=""
+        \(resolveFunction)
+        resolve_release_installer_binary
+        printf '%s\n' "$RELEASE_INSTALLER_BINARY"
+        """)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(
+            result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
+            installer.path
+        )
+    }
+
+    func testReplacementInstallUsesAtomicExchangeWithoutMovingTheInstalledBundleAway() throws {
+        let script = try buildAndRunScript()
+        let installFunction = try XCTUnwrap(
+            shellFunction(named: "install_release_app", in: script)
+        )
+        let rollbackFunction = try XCTUnwrap(
+            shellFunction(named: "rollback_release_install", in: script)
+        )
+
+        XCTAssertTrue(installFunction.contains(
+            "RELEASE_STAGED_APP=\"$RELEASE_TRANSACTION_DIR/$APP_NAME.candidate\""
+        ))
+        XCTAssertTrue(installFunction.contains(
+            "atomic_exchange_release_apps"
+        ))
+        XCTAssertTrue(installFunction.contains(
+            "atomic_place_release_candidate"
+        ))
+        XCTAssertTrue(installFunction.contains(
+            "\"$INSTALLED_APP\" >\"$RELEASE_EXCHANGE_STATUS_FILE\""
+        ))
+        XCTAssertFalse(installFunction.contains(
+            "/bin/mv \"$INSTALLED_APP\" \"$RELEASE_BACKUP_APP\""
+        ))
+        XCTAssertFalse(installFunction.contains(
+            "/bin/mv \"$RELEASE_STAGED_APP\" \"$INSTALLED_APP\""
+        ))
+        XCTAssertTrue(rollbackFunction.contains(
+            "atomic_exchange_release_apps \"$RELEASE_BACKUP_APP\" \"$INSTALLED_APP\""
+        ))
+    }
+
+    func testReleaseRegistrationPreflightRunsBeforeStoppingInstalledRuntime() throws {
+        let script = try buildAndRunScript()
+        for functionName in ["install_release_app", "verify_release_app_fresh"] {
+            let function = try XCTUnwrap(shellFunction(named: functionName, in: script))
+            let preflightOffset = try XCTUnwrap(
+                function.range(of: "verify_widget_registration_preflight")
+            ).lowerBound.utf16Offset(in: function)
+            let stopOffset = try XCTUnwrap(
+                function.range(of: "stop_release_runtime")
+            ).lowerBound.utf16Offset(in: function)
+
+            XCTAssertLessThan(preflightOffset, stopOffset, functionName)
+        }
+    }
+
+    func testReleaseRegistrationPreflightAllowsMissingRecordOnlyForCleanInstall() throws {
+        let preflightFunction = try XCTUnwrap(
+            shellFunction(named: "verify_widget_registration_preflight", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyWidgetPreflightTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let installedApp = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+
+        let result = try runBash("""
+        set -euo pipefail
+        INSTALLED_APP=\(shellQuote(installedApp.path))
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
+        registered_widget_paths() { return 0; }
+        \(preflightFunction)
+        verify_widget_registration_preflight
+        printf 'clean-install-safe\n'
+        /bin/mkdir "$INSTALLED_APP"
+        if verify_widget_registration_preflight; then
+          exit 91
+        fi
+        printf 'existing-install-refused\n'
+        """)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(
+            result.standardOutput,
+            "clean-install-safe\nexisting-install-refused\n"
+        )
+        XCTAssertTrue(result.standardError.contains("missing its Widget registration"))
+    }
+
     func testReleaseInstallRollsBackPreviousBundleWhenActivationFails() throws {
         let script = try buildAndRunScript()
         let rollbackFunction = try XCTUnwrap(
@@ -341,11 +455,13 @@ final class BuildAndRunScriptTests: XCTestCase {
         RELEASE_SWITCHED=0
         RELEASE_PREVIOUS_APP_WAS_RUNNING=0
         validate_release_install_paths() { return 0; }
+        verify_widget_registration_preflight() { return 0; }
         saved_git_scan_root_record_count() { echo 1; }
         saved_git_scan_root_record_identity() { echo v2:test-identity; }
         verify_release_bundle() { return 0; }
         capture_release_runtime() { return 0; }
         stop_release_runtime() { return 0; }
+        \(atomicExchangeReleaseAppsStub)
         activate_and_verify_release_app() { return 47; }
         restore_release_runtime() { return 0; }
         \(rollbackFunction)
@@ -451,6 +567,100 @@ final class BuildAndRunScriptTests: XCTestCase {
         )
     }
 
+    func testReleaseInstallPreservesPreexistingTransactionResidue() throws {
+        let script = try buildAndRunScript()
+        let rollbackFunction = try XCTUnwrap(
+            shellFunction(named: "rollback_release_install", in: script)
+        )
+        let installFunction = try XCTUnwrap(
+            shellFunction(named: "install_release_app", in: script)
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyReleaseResidueCollisionTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let installDirectory = temporaryDirectory.appendingPathComponent("install")
+        let installedApp = installDirectory.appendingPathComponent("TinyBuddy.app")
+        try replaceTestBundle(at: candidateApp, version: "2.0", build: "2")
+        try FileManager.default.createDirectory(at: installDirectory, withIntermediateDirectories: true)
+
+        let probe = releaseInstallProbePreamble(candidateApp: candidateApp, installedApp: installedApp) + """
+        STALE_TRANSACTION="$INSTALL_DIR/.TinyBuddy.install.$$"
+        /bin/mkdir "$STALE_TRANSACTION"
+        printf 'preserved-recovery\n' >"$STALE_TRANSACTION/recovery-marker"
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        activate_and_verify_release_app() { return 0; }
+        \(rollbackFunction)
+        \(installFunction)
+        install_release_app
+        /bin/cat "$STALE_TRANSACTION/recovery-marker"
+        """
+        let result = try runBash(probe)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(try bundleBuild(at: installedApp), "2")
+        XCTAssertTrue(result.standardOutput.contains("preserved-recovery"))
+        let residues = try FileManager.default.contentsOfDirectory(atPath: installDirectory.path)
+            .filter { $0.hasPrefix(".TinyBuddy.install.") }
+        XCTAssertEqual(residues.count, 1)
+        let recoveryMarker = installDirectory
+            .appendingPathComponent(try XCTUnwrap(residues.first))
+            .appendingPathComponent("recovery-marker")
+        XCTAssertEqual(
+            try String(contentsOf: recoveryMarker, encoding: .utf8),
+            "preserved-recovery\n"
+        )
+    }
+
+    func testCleanInstallDestinationRacePreservesTheAppearingApp() throws {
+        let script = try buildAndRunScript()
+        let rollbackFunction = try XCTUnwrap(
+            shellFunction(named: "rollback_release_install", in: script)
+        )
+        let installFunction = try XCTUnwrap(
+            shellFunction(named: "install_release_app", in: script)
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyCleanInstallRaceTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let appearingApp = temporaryDirectory.appendingPathComponent("appearing/TinyBuddy.app")
+        let installedApp = temporaryDirectory.appendingPathComponent("install/TinyBuddy.app")
+        try replaceTestBundle(at: candidateApp, version: "2.0", build: "2")
+        try replaceTestBundle(at: appearingApp, version: "9.0", build: "9")
+        try FileManager.default.createDirectory(
+            at: installedApp.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let probe = releaseInstallProbePreamble(candidateApp: candidateApp, installedApp: installedApp) + """
+        APPEARING_APP=\(shellQuote(appearingApp.path))
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        activate_and_verify_release_app() { echo unexpected-activation; return 0; }
+        atomic_place_release_candidate() {
+          /usr/bin/ditto "$APPEARING_APP" "$2"
+          return 73
+        }
+        \(rollbackFunction)
+        \(installFunction)
+        install_release_app
+        """
+        let result = try runBash(probe)
+
+        XCTAssertEqual(result.exitCode, 73)
+        XCTAssertEqual(try bundleBuild(at: installedApp), "9")
+        XCTAssertFalse(result.standardOutput.contains("unexpected-activation"))
+        XCTAssertFalse(try transactionResidueExists(in: installedApp.deletingLastPathComponent()))
+    }
+
     func testReleaseInstallMatrixPreservesUserDataAndAuthorizationsAcrossReinstallAndUpgrades() throws {
         let script = try buildAndRunScript()
         let rollbackFunction = try XCTUnwrap(shellFunction(named: "rollback_release_install", in: script))
@@ -536,6 +746,198 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertFalse(try transactionResidueExists(in: installedApp.deletingLastPathComponent()))
     }
 
+    func testReleaseInstallTermAfterAtomicExchangeUsesStatusMarkerToRollback() throws {
+        let script = try buildAndRunScript()
+        let rollbackFunction = try XCTUnwrap(shellFunction(named: "rollback_release_install", in: script))
+        let installFunction = try XCTUnwrap(shellFunction(named: "install_release_app", in: script))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyReleaseExchangeInterruptTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let installedApp = temporaryDirectory.appendingPathComponent("install/TinyBuddy.app")
+        try replaceTestBundle(at: candidateApp, version: "2.0", build: "2")
+        try replaceTestBundle(at: installedApp, version: "1.0", build: "1")
+
+        let probe = releaseInstallProbePreamble(candidateApp: candidateApp, installedApp: installedApp) + """
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        restore_release_runtime() { return 0; }
+        activate_and_verify_release_app() { echo unexpected-activation; return 0; }
+        EXCHANGE_CALL_COUNT=0
+        atomic_exchange_release_apps() {
+          EXCHANGE_CALL_COUNT=$((EXCHANGE_CALL_COUNT + 1))
+          local temporary_path="$1.exchange-interrupt"
+          /bin/mv "$1" "$temporary_path"
+          /bin/mv "$2" "$1"
+          /bin/mv "$temporary_path" "$2"
+          printf 'TINYBUDDY_RELEASE_INSTALLER_EXCHANGED\n'
+          if [ "$EXCHANGE_CALL_COUNT" -eq 1 ]; then
+            kill -TERM "$$"
+          fi
+        }
+        \(rollbackFunction)
+        \(installFunction)
+        install_release_app
+        """
+        let result = try runBash(probe)
+
+        XCTAssertEqual(result.exitCode, 143)
+        XCTAssertEqual(try bundleBuild(at: installedApp), "1")
+        XCTAssertFalse(result.standardOutput.contains("unexpected-activation"))
+        XCTAssertTrue(result.standardError.contains("rolled back"))
+        XCTAssertFalse(try transactionResidueExists(in: installedApp.deletingLastPathComponent()))
+    }
+
+    func testReleaseInstallerUncertainExitForcesPreviousBundleRollback() throws {
+        let script = try buildAndRunScript()
+        let rollbackFunction = try XCTUnwrap(shellFunction(named: "rollback_release_install", in: script))
+        let installFunction = try XCTUnwrap(shellFunction(named: "install_release_app", in: script))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyReleaseUncertainExchangeTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let installedApp = temporaryDirectory.appendingPathComponent("install/TinyBuddy.app")
+        try replaceTestBundle(at: candidateApp, version: "2.0", build: "2")
+        try replaceTestBundle(at: installedApp, version: "1.0", build: "1")
+
+        let probe = releaseInstallProbePreamble(candidateApp: candidateApp, installedApp: installedApp) + """
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        restore_release_runtime() { return 0; }
+        activate_and_verify_release_app() { echo unexpected-activation; return 0; }
+        EXCHANGE_CALL_COUNT=0
+        atomic_exchange_release_apps() {
+          EXCHANGE_CALL_COUNT=$((EXCHANGE_CALL_COUNT + 1))
+          local temporary_path="$1.exchange-uncertain"
+          /bin/mv "$1" "$temporary_path"
+          /bin/mv "$2" "$1"
+          /bin/mv "$temporary_path" "$2"
+          if [ "$EXCHANGE_CALL_COUNT" -eq 1 ]; then
+            return 75
+          fi
+          printf 'TINYBUDDY_RELEASE_INSTALLER_EXCHANGED\n'
+        }
+        \(rollbackFunction)
+        \(installFunction)
+        install_release_app
+        """
+        let result = try runBash(probe)
+
+        XCTAssertEqual(result.exitCode, 75)
+        XCTAssertEqual(try bundleBuild(at: installedApp), "1")
+        XCTAssertFalse(result.standardOutput.contains("unexpected-activation"))
+        XCTAssertTrue(result.standardError.contains("rolled back"))
+        XCTAssertFalse(try transactionResidueExists(in: installedApp.deletingLastPathComponent()))
+    }
+
+    func testReleaseInstallerUncertainExitPreservesOldBundleWhenRollbackFails() throws {
+        let script = try buildAndRunScript()
+        let rollbackFunction = try XCTUnwrap(shellFunction(named: "rollback_release_install", in: script))
+        let installFunction = try XCTUnwrap(shellFunction(named: "install_release_app", in: script))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyReleaseUncertainRecoveryTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let installDirectory = temporaryDirectory.appendingPathComponent("install")
+        let installedApp = installDirectory.appendingPathComponent("TinyBuddy.app")
+        try replaceTestBundle(at: candidateApp, version: "2.0", build: "2")
+        try replaceTestBundle(at: installedApp, version: "1.0", build: "1")
+
+        let probe = releaseInstallProbePreamble(candidateApp: candidateApp, installedApp: installedApp) + """
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        restore_release_runtime() { return 0; }
+        activate_and_verify_release_app() { echo unexpected-activation; return 0; }
+        EXCHANGE_CALL_COUNT=0
+        atomic_exchange_release_apps() {
+          EXCHANGE_CALL_COUNT=$((EXCHANGE_CALL_COUNT + 1))
+          if [ "$EXCHANGE_CALL_COUNT" -gt 1 ]; then
+            return 93
+          fi
+          local temporary_path="$1.exchange-uncertain"
+          /bin/mv "$1" "$temporary_path"
+          /bin/mv "$2" "$1"
+          /bin/mv "$temporary_path" "$2"
+          return 75
+        }
+        \(rollbackFunction)
+        \(installFunction)
+        install_release_app
+        """
+        let result = try runBash(probe)
+
+        XCTAssertEqual(result.exitCode, 75)
+        XCTAssertEqual(try bundleBuild(at: installedApp), "2")
+        XCTAssertFalse(result.standardOutput.contains("unexpected-activation"))
+        XCTAssertTrue(result.standardError.contains("rollback was incomplete"))
+        let residueName = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(atPath: installDirectory.path)
+                .first(where: { $0.hasPrefix(".TinyBuddy.install.") })
+        )
+        let preservedPreviousApp = installDirectory
+            .appendingPathComponent(residueName)
+            .appendingPathComponent("TinyBuddy.candidate")
+        XCTAssertEqual(try bundleBuild(at: preservedPreviousApp), "1")
+    }
+
+    func testReleaseInstallerNonProtocolExitPreservesBothBundlesForRecovery() throws {
+        let script = try buildAndRunScript()
+        let rollbackFunction = try XCTUnwrap(shellFunction(named: "rollback_release_install", in: script))
+        let installFunction = try XCTUnwrap(shellFunction(named: "install_release_app", in: script))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyReleaseCrashedExchangeTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let installDirectory = temporaryDirectory.appendingPathComponent("install")
+        let installedApp = installDirectory.appendingPathComponent("TinyBuddy.app")
+        try replaceTestBundle(at: candidateApp, version: "2.0", build: "2")
+        try replaceTestBundle(at: installedApp, version: "1.0", build: "1")
+
+        let probe = releaseInstallProbePreamble(candidateApp: candidateApp, installedApp: installedApp) + """
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        restore_release_runtime() { return 0; }
+        activate_and_verify_release_app() { echo unexpected-activation; return 0; }
+        atomic_exchange_release_apps() {
+          local temporary_path="$1.exchange-crash"
+          /bin/mv "$1" "$temporary_path"
+          /bin/mv "$2" "$1"
+          /bin/mv "$temporary_path" "$2"
+          return 99
+        }
+        \(rollbackFunction)
+        \(installFunction)
+        install_release_app
+        """
+        let result = try runBash(probe)
+
+        XCTAssertEqual(result.exitCode, 99)
+        XCTAssertEqual(try bundleBuild(at: installedApp), "2")
+        XCTAssertFalse(result.standardOutput.contains("unexpected-activation"))
+        XCTAssertTrue(result.standardError.contains("exchange state is uncertain"))
+        XCTAssertTrue(result.standardError.contains("rollback was incomplete"))
+        let residueName = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(atPath: installDirectory.path)
+                .first(where: { $0.hasPrefix(".TinyBuddy.install.") })
+        )
+        let preservedPreviousApp = installDirectory
+            .appendingPathComponent(residueName)
+            .appendingPathComponent("TinyBuddy.candidate")
+        XCTAssertEqual(try bundleBuild(at: preservedPreviousApp), "1")
+    }
+
     func testReleaseInstallRollsBackWhenWidgetRegistrationFails() throws {
         let script = try buildAndRunScript()
         let rollbackFunction = try XCTUnwrap(shellFunction(named: "rollback_release_install", in: script))
@@ -584,6 +986,76 @@ final class BuildAndRunScriptTests: XCTestCase {
 
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(result.standardOutput, "TinyBuddy:7\nTinyBuddyWidgetExtension:11\n")
+    }
+
+    func testInstalledReleaseLaunchBypassesLaunchServicesForPreservedRegistration() throws {
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstalledLaunchTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let installedApp = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let installedExecutable = installedApp.appendingPathComponent("Contents/MacOS/TinyBuddy")
+        let commandLog = temporaryDirectory.appendingPathComponent("open-commands.log")
+        let fakeOpen = temporaryDirectory.appendingPathComponent("fake-open.sh")
+        try FileManager.default.createDirectory(
+            at: installedExecutable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("""
+        #!/bin/bash
+        if { : <&9; } 2>/dev/null; then
+          printf 'fd9:open\\n' >> "$FAKE_OPEN_COMMAND_LOG"
+        else
+          printf 'fd9:closed\\n' >> "$FAKE_OPEN_COMMAND_LOG"
+        fi
+        kill -HUP "$$"
+        printf 'direct:%s\\n' "$0" >> "$FAKE_OPEN_COMMAND_LOG"
+        kill -TERM "$$"
+        printf 'survived-term\\n' >> "$FAKE_OPEN_COMMAND_LOG"
+        """.utf8).write(to: installedExecutable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: installedExecutable.path
+        )
+        try Data("""
+        #!/bin/bash
+        printf 'open:%s\n' "$*" >> "$FAKE_OPEN_COMMAND_LOG"
+        """.utf8).write(to: fakeOpen)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeOpen.path)
+        let launchFunction = try XCTUnwrap(
+            shellFunction(named: "launch_installed_release_app", in: try buildAndRunScript())
+        ).replacingOccurrences(of: "/usr/bin/open", with: shellQuote(fakeOpen.path))
+        XCTAssertTrue(
+            launchFunction.contains(
+                "trap - INT TERM\n      trap '' HUP\n      exec 9>&-\n      exec \"$app_executable\""
+            )
+        )
+
+        let result = try runBash("""
+        set -euo pipefail
+        APP_NAME=TinyBuddy
+        INSTALLED_APP=\(shellQuote(installedApp.path))
+        FAKE_OPEN_COMMAND_LOG=\(shellQuote(commandLog.path))
+        export FAKE_OPEN_COMMAND_LOG
+        exec 9<>\(shellQuote(temporaryDirectory.appendingPathComponent("release-lock").path))
+        \(launchFunction)
+        trap '' HUP INT TERM
+        RELEASE_WIDGET_REGISTRATION_PRESERVED=1
+        launch_installed_release_app
+        launched_pid=$!
+        set +e
+        wait "$launched_pid"
+        direct_status=$?
+        set -e
+        printf 'direct-status:%s\n' "$direct_status" >> "$FAKE_OPEN_COMMAND_LOG"
+        trap - HUP INT TERM
+        RELEASE_WIDGET_REGISTRATION_PRESERVED=0
+        launch_installed_release_app
+        """)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(
+            try String(contentsOf: commandLog, encoding: .utf8),
+            "fd9:closed\ndirect:\(installedExecutable.path)\ndirect-status:143\nopen:-n \(installedApp.path)\n"
+        )
     }
 
     func testProcessIdsMatchesFullWidgetExecutableNameBeyondPgrepLimit() throws {
@@ -788,20 +1260,35 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertTrue(result.standardError.contains("found 2"))
     }
 
-    func testWidgetRegistrationAddsTheTargetBeforeRemovingStaleRecords() throws {
+    func testWidgetRegistrationPreservesTheUniqueInstalledRecordWithoutMutation() throws {
         let registrationFunction = try XCTUnwrap(
             shellFunction(named: "register_widget_extension", in: try buildAndRunScript())
         )
-        let addOffset = try XCTUnwrap(registrationFunction.range(of: "\"$PLUGINKIT_BIN\" -a \"$appex\""))
-            .lowerBound.utf16Offset(in: registrationFunction)
-        let removeOffset = try XCTUnwrap(registrationFunction.range(of: "\"$PLUGINKIT_BIN\" -r \"$registered_path\""))
-            .lowerBound.utf16Offset(in: registrationFunction)
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyWidgetRegistrationTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let app = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let appex = app.appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        try FileManager.default.createDirectory(at: appex, withIntermediateDirectories: true)
 
-        XCTAssertLessThan(addOffset, removeOffset)
-        XCTAssertTrue(registrationFunction.contains("[ \"$registered_path\" = \"$appex\" ]"))
+        let result = try runBash("""
+        set -euo pipefail
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
+        WIDGET_RUNTIME_TIMEOUT=0
+        PLUGINKIT_BIN=/usr/bin/false
+        RELEASE_WIDGET_REGISTRATION_PRESERVED=0
+        find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
+        registered_widget_paths() { printf '%s\n' \(shellQuote(appex.path)); }
+        \(registrationFunction)
+        register_widget_extension \(shellQuote(app.path))
+        printf 'preserved=%s\n' "$RELEASE_WIDGET_REGISTRATION_PRESERVED"
+        """)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertTrue(result.standardOutput.contains("preserved existing widget extension registration"))
+        XCTAssertTrue(result.standardOutput.contains("preserved=1"))
     }
 
-    func testWidgetRegistrationAddFailureLeavesExistingRecordsUntouched() throws {
+    func testWidgetRegistrationAddFailureIsReturnedForCleanInstall() throws {
         let registrationFunction = try XCTUnwrap(
             shellFunction(named: "register_widget_extension", in: try buildAndRunScript())
         )
@@ -833,15 +1320,93 @@ final class BuildAndRunScriptTests: XCTestCase {
         FAKE_PLUGIN_COMMAND_LOG=\(shellQuote(commandLog.path))
         export FAKE_PLUGIN_COMMAND_LOG
         find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
-        registered_widget_paths() { printf '%s\n' /tmp/existing.appex; }
+        registered_widget_paths() { return 0; }
         \(registrationFunction)
-        register_widget_extension \(shellQuote(app.path))
+        register_widget_extension \(shellQuote(app.path)) 1
         """)
 
         XCTAssertEqual(result.exitCode, 71)
         let commands = try String(contentsOf: commandLog, encoding: .utf8)
         XCTAssertTrue(commands.contains("-a \(appex.path)"))
         XCTAssertFalse(commands.contains("-r "))
+    }
+
+    func testWidgetRegistrationRefusesMissingRecordOutsideCleanInstallWithoutMutation() throws {
+        let registrationFunction = try XCTUnwrap(
+            shellFunction(named: "register_widget_extension", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyWidgetRegistrationTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let app = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let appex = app.appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let commandLog = temporaryDirectory.appendingPathComponent("commands.log")
+        let fakePluginKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        try FileManager.default.createDirectory(at: appex, withIntermediateDirectories: true)
+        try Data("""
+        #!/bin/bash
+        echo "$*" >> "$FAKE_PLUGIN_COMMAND_LOG"
+        exit 0
+        """.utf8).write(to: fakePluginKit)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakePluginKit.path
+        )
+
+        let result = try runBash("""
+        set -euo pipefail
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
+        WIDGET_RUNTIME_TIMEOUT=0
+        PLUGINKIT_BIN=\(shellQuote(fakePluginKit.path))
+        FAKE_PLUGIN_COMMAND_LOG=\(shellQuote(commandLog.path))
+        export FAKE_PLUGIN_COMMAND_LOG
+        find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
+        registered_widget_paths() { return 0; }
+        \(registrationFunction)
+        register_widget_extension \(shellQuote(app.path))
+        """)
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("allowed only during a clean install"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: commandLog.path))
+    }
+
+    func testWidgetRegistrationRefusesStaleRecordsWithoutMutation() throws {
+        let registrationFunction = try XCTUnwrap(
+            shellFunction(named: "register_widget_extension", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyWidgetRegistrationTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let app = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let appex = app.appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let commandLog = temporaryDirectory.appendingPathComponent("commands.log")
+        let fakePluginKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        try FileManager.default.createDirectory(at: appex, withIntermediateDirectories: true)
+        try Data("""
+        #!/bin/bash
+        echo "$*" >> "$FAKE_PLUGIN_COMMAND_LOG"
+        exit 0
+        """.utf8).write(to: fakePluginKit)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakePluginKit.path
+        )
+
+        let result = try runBash("""
+        set -euo pipefail
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
+        WIDGET_RUNTIME_TIMEOUT=0
+        PLUGINKIT_BIN=\(shellQuote(fakePluginKit.path))
+        FAKE_PLUGIN_COMMAND_LOG=\(shellQuote(commandLog.path))
+        export FAKE_PLUGIN_COMMAND_LOG
+        find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
+        registered_widget_paths() { printf '%s\n' /tmp/stale.appex; }
+        \(registrationFunction)
+        register_widget_extension \(shellQuote(app.path))
+        """)
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("refusing to replace existing Widget registrations"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: commandLog.path))
     }
 
     func testRunReleaseStageReportsStageCommandAndLogAndPreservesExitCode() throws {
@@ -928,6 +1493,10 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertTrue(verificationFunction.contains("verify_widget_snapshot_consumption"))
         XCTAssertTrue(verificationFunction.contains("$RELEASE_REFRESH_WIDGET_CONTENT_CHANGED"))
         XCTAssertTrue(verificationFunction.contains("verify_running_bundle_process"))
+        XCTAssertTrue(verificationFunction.contains("${RELEASE_HAD_PREVIOUS:-0}"))
+        XCTAssertTrue(verificationFunction.contains("${RELEASE_SWITCHED:-0}"))
+        XCTAssertTrue(verificationFunction.contains("allow_widget_registration_add=1"))
+        XCTAssertTrue(verificationFunction.contains("$allow_widget_registration_add"))
         let appWaitOffset = try XCTUnwrap(
             verificationFunction.range(of: "wait_for_running_bundle_process \"$APP_NAME\"")
         ).lowerBound.utf16Offset(in: verificationFunction)
@@ -1352,11 +1921,13 @@ final class BuildAndRunScriptTests: XCTestCase {
         RELEASE_SWITCHED=0
         RELEASE_PREVIOUS_APP_WAS_RUNNING=0
         validate_release_install_paths() { return 0; }
+        verify_widget_registration_preflight() { return 0; }
         saved_git_scan_root_record_count() { echo 1; }
         saved_git_scan_root_record_identity() { echo v2:test-identity; }
         verify_release_bundle() { [ -d "$1" ]; }
         capture_release_runtime() { return 0; }
         stop_release_runtime() { return 0; }
+        \(atomicExchangeReleaseAppsStub)
         activate_and_verify_release_app() { return 0; }
         \(rollbackFunction)
         \(installFunction)
@@ -1408,7 +1979,38 @@ final class BuildAndRunScriptTests: XCTestCase {
         RELEASE_HAD_PREVIOUS=0
         RELEASE_SWITCHED=0
         RELEASE_PREVIOUS_APP_WAS_RUNNING=0
+        verify_widget_registration_preflight() { return 0; }
+        \(atomicExchangeReleaseAppsStub)
         """ + "\n"
+    }
+
+    private var atomicExchangeReleaseAppsStub: String {
+        """
+        release_path_identity() {
+          /usr/bin/stat -f '%d:%i' "$1"
+        }
+        atomic_place_release_candidate() {
+          local source_path="$1"
+          local destination_path="$2"
+          if [ -e "$destination_path" ] || [ -L "$destination_path" ]; then
+            return 73
+          fi
+          /bin/mv "$source_path" "$destination_path" || return $?
+          printf 'TINYBUDDY_RELEASE_INSTALLER_INSTALLED\n'
+        }
+        atomic_exchange_release_apps() {
+          local first_path="$1"
+          local second_path="$2"
+          local temporary_path="$1.exchange"
+          /bin/mv "$first_path" "$temporary_path" || return $?
+          if ! /bin/mv "$second_path" "$first_path"; then
+            /bin/mv "$temporary_path" "$first_path" || true
+            return 1
+          fi
+          /bin/mv "$temporary_path" "$second_path" || return $?
+          printf 'TINYBUDDY_RELEASE_INSTALLER_EXCHANGED\n'
+        }
+        """
     }
 
     private func replaceTestBundle(at app: URL, version: String, build: String) throws {

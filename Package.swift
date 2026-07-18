@@ -10,6 +10,10 @@ let package = Package(
     products: [
         .executable(name: "TinyBuddy", targets: ["TinyBuddy"]),
         .executable(
+            name: "TinyBuddyReleaseInstaller",
+            targets: ["TinyBuddyReleaseInstaller"]
+        ),
+        .executable(
             name: "TinyBuddyReleaseVerifier",
             targets: ["TinyBuddyReleaseVerifier"]
         )
@@ -20,6 +24,7 @@ let package = Package(
             name: "TinyBuddy",
             dependencies: ["TinyBuddyCore"]
         ),
+        .executableTarget(name: "TinyBuddyReleaseInstaller"),
         .executableTarget(
             name: "TinyBuddyReleaseVerifier",
             dependencies: ["TinyBuddyCore"]

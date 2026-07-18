@@ -169,8 +169,11 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         XCTAssertTrue(rejectedProfile.standardError.contains("rejects embedded provisioning profiles"))
     }
 
-    func testWidgetRegistrationAddsTargetThenRemovesStaleRecordAndConverges() throws {
-        let probe = try runWidgetRegistrationProbe()
+    func testWidgetRegistrationAddsTargetForCleanInstallAndConverges() throws {
+        let probe = try runWidgetRegistrationProbe(
+            startsWithStaleRecord: false,
+            allowsRegistrationAdd: true
+        )
 
         XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
         XCTAssertEqual(
@@ -181,23 +184,30 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
             .split(separator: "\n")
             .map(String.init)
         XCTAssertEqual(commands.first, "-a \(probe.widget.path)")
-        XCTAssertEqual(commands.dropFirst().first, "-r /tmp/stale-tinybuddy-widget.appex")
+        XCTAssertEqual(commands.count, 1)
         XCTAssertTrue(probe.result.standardOutput.contains("registered unique widget extension"))
     }
 
-    func testWidgetRegistrationFailsWhenStaleRecordCannotBeRemoved() throws {
-        let probe = try runWidgetRegistrationProbe(staleRemovalFails: true)
+    func testWidgetRegistrationRefusesStaleRecordWithoutMutation() throws {
+        let probe = try runWidgetRegistrationProbe()
 
         XCTAssertEqual(probe.result.exitCode, 1)
-        XCTAssertTrue(probe.result.standardError.contains("failed to unregister stale Widget record"))
-        XCTAssertTrue(
-            try String(contentsOf: probe.stateFile, encoding: .utf8)
-                .contains("/tmp/stale-tinybuddy-widget.appex")
+        XCTAssertTrue(probe.result.standardError.contains(
+            "refusing to replace existing Widget registrations automatically"
+        ))
+        XCTAssertEqual(
+            try String(contentsOf: probe.stateFile, encoding: .utf8),
+            "/tmp/stale-tinybuddy-widget.appex\n"
         )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: probe.commandLog.path))
     }
 
     func testWidgetRegistrationRejectsDuplicateTargetRecords() throws {
-        let probe = try runWidgetRegistrationProbe(duplicateTargetOnAdd: true, startsWithStaleRecord: false)
+        let probe = try runWidgetRegistrationProbe(
+            duplicateTargetOnAdd: true,
+            startsWithStaleRecord: false,
+            allowsRegistrationAdd: true
+        )
 
         XCTAssertEqual(probe.result.exitCode, 1)
         XCTAssertTrue(probe.result.standardError.contains("registration is not unique"))
@@ -235,12 +245,18 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         XCTAssertEqual(result.standardOutput, "\(expectedPath)\n\(expectedPath)\n")
     }
 
-    func testWidgetRegistrationFailsWhenRemovalDoesNotConverge() throws {
-        let probe = try runWidgetRegistrationProbe(ignoreRemoval: true)
+    func testWidgetRegistrationRejectsExistingDuplicateTargetWithoutMutation() throws {
+        let probe = try runWidgetRegistrationProbe(
+            startsWithStaleRecord: false,
+            startsWithDuplicateTargetRecord: true
+        )
 
         XCTAssertEqual(probe.result.exitCode, 1)
-        XCTAssertTrue(probe.result.standardError.contains("does not point to the installed extension"))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "refusing to replace existing Widget registrations automatically"
+        ))
         XCTAssertTrue(probe.result.standardError.contains("registered_count=2"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: probe.commandLog.path))
     }
 
     func testCleanInstallActivationFailureUnregistersCandidateAndRemovesAllTransactionResidue() throws {
@@ -294,15 +310,24 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         RELEASE_SWITCHED=0
         RELEASE_COMMITTED=0
         RELEASE_PREVIOUS_APP_WAS_RUNNING=0
+        RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
         validate_release_install_paths() { return 0; }
+        verify_widget_registration_preflight() { return 0; }
         saved_git_scan_root_record_count() { echo 1; }
         saved_git_scan_root_record_identity() { echo v2:test-identity; }
         verify_release_bundle() { [ -d "$1" ]; }
         capture_release_runtime() { return 0; }
         stop_release_runtime() { return 0; }
         restore_release_runtime() { return 0; }
+        release_path_identity() { /usr/bin/stat -f '%d:%i' "$1"; }
+        atomic_place_release_candidate() {
+          [ ! -e "$2" ] && [ ! -L "$2" ] || return 73
+          /bin/mv "$1" "$2" || return $?
+          printf 'TINYBUDDY_RELEASE_INSTALLER_INSTALLED\n'
+        }
         registered_widget_paths() { /bin/cat "$FAKE_PLUGIN_STATE"; }
         activate_and_verify_release_app() {
+          RELEASE_WIDGET_REGISTRATION_ATTEMPTED=1
           printf '%s\n' "$INSTALLED_WIDGET" >"$FAKE_PLUGIN_STATE"
           return 83
         }
@@ -310,7 +335,11 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         install_release_app
         """)
 
-        XCTAssertEqual(result.exitCode, 83)
+        XCTAssertEqual(
+            result.exitCode,
+            83,
+            "stdout:\n\(result.standardOutput)\nstderr:\n\(result.standardError)"
+        )
         XCTAssertFalse(FileManager.default.fileExists(atPath: installedApp.path))
         XCTAssertEqual(try Data(contentsOf: stateFile), Data())
         XCTAssertFalse(
@@ -320,6 +349,90 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         let commands = try String(contentsOf: commandLog, encoding: .utf8)
         XCTAssertTrue(commands.contains("-r \(installedWidget.path)"))
         XCTAssertTrue(result.standardError.contains("removed the candidate app and Widget registration"))
+    }
+
+    func testCleanInstallStaleRegistrationFailureDoesNotMutateExistingRecords() throws {
+        let script = try buildAndRunScript()
+        let functions = try [
+            "verify_widget_registration_preflight",
+            "register_widget_extension",
+            "unregister_widget_extensions",
+            "rollback_release_install",
+            "install_release_app"
+        ].map { try XCTUnwrap(shellFunction(named: $0, in: script)) }
+            .joined(separator: "\n")
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyCleanInstallStaleWidgetTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let candidateApp = temporaryDirectory.appendingPathComponent("candidate/TinyBuddy.app")
+        let candidateWidget = candidateApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let installDirectory = temporaryDirectory.appendingPathComponent("install")
+        let installedApp = installDirectory.appendingPathComponent("TinyBuddy.app")
+        let installedWidget = installedApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let stateFile = temporaryDirectory.appendingPathComponent("plugin-state.txt")
+        let commandLog = temporaryDirectory.appendingPathComponent("plugin-commands.log")
+        let fakePluginKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        let staleRecord = "/tmp/stale-tinybuddy-widget.appex\n"
+        try FileManager.default.createDirectory(at: candidateWidget, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: installDirectory, withIntermediateDirectories: true)
+        try Data("candidate".utf8).write(to: candidateApp.appendingPathComponent("marker"))
+        try Data(staleRecord.utf8).write(to: stateFile)
+        try writeStatefulPluginKit(to: fakePluginKit)
+
+        let result = try runBash("""
+        set -euo pipefail
+        APP_NAME=TinyBuddy
+        APP_BUNDLE=\(shellQuote(candidateApp.path))
+        INSTALL_DIR=\(shellQuote(installDirectory.path))
+        INSTALLED_APP=\(shellQuote(installedApp.path))
+        INSTALLED_WIDGET=\(shellQuote(installedWidget.path))
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
+        WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+        WIDGET_RUNTIME_TIMEOUT=0
+        PLUGINKIT_BIN=\(shellQuote(fakePluginKit.path))
+        FAKE_PLUGIN_STATE=\(shellQuote(stateFile.path))
+        FAKE_PLUGIN_COMMAND_LOG=\(shellQuote(commandLog.path))
+        FAKE_PLUGIN_FAIL_REMOVE=0
+        FAKE_PLUGIN_IGNORE_REMOVE=0
+        FAKE_PLUGIN_DUPLICATE_TARGET=0
+        export FAKE_PLUGIN_STATE FAKE_PLUGIN_COMMAND_LOG FAKE_PLUGIN_FAIL_REMOVE
+        export FAKE_PLUGIN_IGNORE_REMOVE FAKE_PLUGIN_DUPLICATE_TARGET
+        RELEASE_TRANSACTION_DIR=""
+        RELEASE_STAGED_APP=""
+        RELEASE_BACKUP_APP=""
+        RELEASE_HAD_PREVIOUS=0
+        RELEASE_SWITCHED=0
+        RELEASE_COMMITTED=0
+        RELEASE_PREVIOUS_APP_WAS_RUNNING=0
+        RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
+        RELEASE_WIDGET_REGISTRATION_PRESERVED=0
+        validate_release_install_paths() { return 0; }
+        saved_git_scan_root_record_count() { echo 1; }
+        saved_git_scan_root_record_identity() { echo v2:test-identity; }
+        verify_release_bundle() { [ -d "$1" ]; }
+        capture_release_runtime() { return 0; }
+        stop_release_runtime() { return 0; }
+        restore_release_runtime() { return 0; }
+        find_widget_extension() { printf '%s\n' "$INSTALLED_WIDGET"; }
+        registered_widget_paths() { /bin/cat "$FAKE_PLUGIN_STATE"; }
+        activate_and_verify_release_app() { register_widget_extension "$INSTALLED_APP"; }
+        \(functions)
+        install_release_app
+        """)
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installedApp.path))
+        XCTAssertEqual(try String(contentsOf: stateFile, encoding: .utf8), staleRecord)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: commandLog.path))
+        XCTAssertFalse(
+            try FileManager.default.contentsOfDirectory(atPath: installDirectory.path)
+                .contains(where: { $0.hasPrefix(".TinyBuddy.install.") })
+        )
+        XCTAssertTrue(result.standardError.contains(
+            "existing Widget registrations cannot be preserved safely"
+        ))
     }
 
     private func runSigningContract(
@@ -377,10 +490,10 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
     }
 
     private func runWidgetRegistrationProbe(
-        staleRemovalFails: Bool = false,
-        ignoreRemoval: Bool = false,
         duplicateTargetOnAdd: Bool = false,
-        startsWithStaleRecord: Bool = true
+        startsWithStaleRecord: Bool = true,
+        startsWithDuplicateTargetRecord: Bool = false,
+        allowsRegistrationAdd: Bool = false
     ) throws -> RegistrationProbe {
         let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyWidgetRegistrationContractTests")
         let app = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
@@ -389,9 +502,14 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         let commandLog = temporaryDirectory.appendingPathComponent("plugin-commands.log")
         let fakePluginKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
         try FileManager.default.createDirectory(at: widget, withIntermediateDirectories: true)
-        let initialState = startsWithStaleRecord
-            ? Data("/tmp/stale-tinybuddy-widget.appex\n".utf8)
-            : Data()
+        let initialState: Data
+        if startsWithDuplicateTargetRecord {
+            initialState = Data("\(widget.path)\n\(widget.path)\n".utf8)
+        } else if startsWithStaleRecord {
+            initialState = Data("/tmp/stale-tinybuddy-widget.appex\n".utf8)
+        } else {
+            initialState = Data()
+        }
         try initialState.write(to: stateFile)
         try writeStatefulPluginKit(to: fakePluginKit)
         let registrationFunction = try XCTUnwrap(
@@ -407,15 +525,15 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         FAKE_APPEX=\(shellQuote(widget.path))
         FAKE_PLUGIN_STATE=\(shellQuote(stateFile.path))
         FAKE_PLUGIN_COMMAND_LOG=\(shellQuote(commandLog.path))
-        FAKE_PLUGIN_FAIL_REMOVE=\(staleRemovalFails ? 1 : 0)
-        FAKE_PLUGIN_IGNORE_REMOVE=\(ignoreRemoval ? 1 : 0)
+        FAKE_PLUGIN_FAIL_REMOVE=0
+        FAKE_PLUGIN_IGNORE_REMOVE=0
         FAKE_PLUGIN_DUPLICATE_TARGET=\(duplicateTargetOnAdd ? 1 : 0)
         export FAKE_APPEX FAKE_PLUGIN_STATE FAKE_PLUGIN_COMMAND_LOG FAKE_PLUGIN_FAIL_REMOVE
         export FAKE_PLUGIN_IGNORE_REMOVE FAKE_PLUGIN_DUPLICATE_TARGET
         find_widget_extension() { printf '%s\n' "$FAKE_APPEX"; }
         registered_widget_paths() { /bin/cat "$FAKE_PLUGIN_STATE"; }
         \(registrationFunction)
-        register_widget_extension \(shellQuote(app.path))
+        register_widget_extension \(shellQuote(app.path)) \(allowsRegistrationAdd ? 1 : 0)
         """)
 
         return RegistrationProbe(

@@ -466,20 +466,33 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                             let isAccessibility = textScale == .accessibility
 
                             let isHUD = size == .standard
+                            let isExpandedWidget = size == .expanded
+                            let showsPartialActivityDetails = isExpandedWidget && !isAccessibility
                             XCTAssertEqual(layout.showsBrandLabel, isHUD || !isAccessibility)
                             XCTAssertEqual(layout.showsExpression, !isAccessibility)
-                            XCTAssertEqual(layout.showsMetrics, isHUD)
-                            XCTAssertEqual(layout.showsProject, isHUD && !isAccessibility)
-                            XCTAssertTrue(layout.showsMessage)
-                            XCTAssertEqual(layout.showsDataDate, isHUD && !isAccessibility)
+                            XCTAssertEqual(layout.showsMetrics, isHUD || showsPartialActivityDetails)
+                            XCTAssertEqual(
+                                layout.showsProject,
+                                !isAccessibility && (isHUD || showsPartialActivityDetails)
+                            )
+                            XCTAssertEqual(layout.showsMessage, !showsPartialActivityDetails)
+                            XCTAssertEqual(
+                                layout.showsDataDate,
+                                !isAccessibility && (isHUD || showsPartialActivityDetails)
+                            )
                             XCTAssertEqual(
                                 layout.stacksMetricsVertically,
                                 isAccessibility && isHUD
                             )
                             XCTAssertEqual(layout.usesEnhancedContrast, increasedContrast)
                             XCTAssertEqual(layout.allowsMotion, !reduceMotion && !lowPower)
-                            XCTAssertEqual(layout.titleLineLimit, 2)
-                            XCTAssertEqual(layout.messageLineLimit, expectedMessageLineLimit(size: size, accessibility: isAccessibility))
+                            XCTAssertEqual(layout.titleLineLimit, showsPartialActivityDetails ? 1 : 2)
+                            XCTAssertEqual(
+                                layout.messageLineLimit,
+                                showsPartialActivityDetails
+                                    ? 1
+                                    : expectedMessageLineLimit(size: size, accessibility: isAccessibility)
+                            )
                         }
                     }
                 }
@@ -517,11 +530,12 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                 presentation: partialValue,
                 environment: TinyBuddyDisplayEnvironment(size: size)
             )
-            XCTAssertFalse(partialStandard.showsMetrics)
-            XCTAssertTrue(partialStandard.showsMessage)
-            XCTAssertFalse(partialStandard.showsProject)
-            XCTAssertFalse(partialStandard.showsDataDate)
-            XCTAssertEqual(partialStandard.titleLineLimit, 2)
+            XCTAssertEqual(partialStandard.showsMetrics, size == .expanded)
+            XCTAssertEqual(partialStandard.showsMessage, size == .compact)
+            XCTAssertEqual(partialStandard.showsProject, size == .expanded)
+            XCTAssertEqual(partialStandard.showsDataDate, size == .expanded)
+            XCTAssertEqual(partialStandard.titleLineLimit, size == .expanded ? 1 : 2)
+            XCTAssertEqual(partialStandard.messageLineLimit, size == .expanded ? 1 : 2)
 
             let staleStandard = TinyBuddyDisplayLayout(
                 presentation: staleValue,
@@ -548,6 +562,57 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                 XCTAssertEqual(accessibility.titleLineLimit, 2)
                 XCTAssertEqual(accessibility.messageLineLimit, 1)
             }
+        }
+    }
+
+    func testExpandedWidgetShowsPartialMetricsOnlyForTrustedPartialData() {
+        let activity = activity(focus: 2, completion: 3, project: "TinyBuddy")
+        let partial = presentation(
+            activity: activity,
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+        let partialWithoutTrustedMetrics = presentation(
+            activity: self.activity(focus: nil, completion: nil, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+        XCTAssertEqual(partialWithoutTrustedMetrics.state, .partial)
+        let unavailableValues = [
+            partialWithoutTrustedMetrics,
+            presentation(activity: activity, refreshStatus: status(outcome: .failed)),
+            presentation(
+                activity: activity,
+                refreshStatus: status(
+                    outcome: .skipped,
+                    diagnosticReason: .authorizationRequired
+                )
+            ),
+            presentation(
+                activity: activity,
+                refreshStatus: status(
+                    outcome: .failed,
+                    diagnosticReason: .authorizationInvalid
+                )
+            ),
+            presentation(activity: activity, dataAvailability: .stale),
+            presentation(activity: activity, dataAvailability: .loading)
+        ]
+
+        let environment = TinyBuddyDisplayEnvironment(size: .expanded)
+        let partialLayout = TinyBuddyDisplayLayout(
+            presentation: partial,
+            environment: environment
+        )
+        XCTAssertTrue(partialLayout.showsMetrics)
+        XCTAssertTrue(partialLayout.showsProject)
+        XCTAssertTrue(partialLayout.showsDataDate)
+        XCTAssertFalse(partialLayout.showsMessage)
+
+        for value in unavailableValues {
+            let layout = TinyBuddyDisplayLayout(presentation: value, environment: environment)
+            XCTAssertFalse(layout.showsMetrics, value.state.rawValue)
+            XCTAssertFalse(layout.showsProject, value.state.rawValue)
+            XCTAssertFalse(layout.showsDataDate, value.state.rawValue)
+            XCTAssertTrue(layout.showsMessage, value.state.rawValue)
         }
     }
 

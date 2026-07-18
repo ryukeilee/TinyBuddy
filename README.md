@@ -90,11 +90,15 @@ Run the complete locally signed Release acceptance gate:
 ```
 
 This is the authoritative release entry point. It runs the complete Swift test
-suite, builds the Release app and the read-only shared-snapshot verifier, signs
+suite, builds the Release app, atomic installer, and read-only shared-snapshot verifier, signs
 the Widget and then the App with the one valid local Apple Development identity,
 checks the candidate's Bundle IDs, versions, Team ID, effective entitlements,
-and nested signatures, performs a transactional install, performs a real
+and nested signatures, atomically installs a clean candidate or exchanges the
+staged and installed bundles without removing the canonical app path, performs a real
 same-version reinstall, and then repeats a fresh runtime verification. Every
+replacement relaunch executes the verified installed binary directly so LaunchServices
+does not rebuild the embedded Widget record and remove pinned Widget instances; clean
+installs still use the normal bundle launch after creating their first registration. Every
 release workflow holds a kernel-backed lock on the canonical physical install
 directory from build through its final gate. A dead owner releases the lock
 automatically without deleting or racing the successor lock inode. Release
@@ -117,7 +121,7 @@ its inputs have not changed:
 ```
 
 A successful `release-install` still verifies the current build, installed
-bundle, fresh app/HUD process, unique Widget registration, App Group snapshot,
+bundle, fresh app/HUD process, preserved unique Widget registration, App Group snapshot,
 exact HUD and Widget snapshot-consumption telemetry, and repository
 authorization recovery. It does not replace the test stage in
 `release-acceptance`.
@@ -130,10 +134,11 @@ Verify the installed signed app from a fresh process state:
 
 `release-verify` stops only current-user processes whose executable paths match
 the TinyBuddy app or extension bundle contract, rejects stale transaction
-residue and launch items (including custom filenames whose contents reference
-TinyBuddy), removes stale PlugInKit records for the Widget Bundle ID, and
-requires the only remaining record and both running executables to come from
-the configured installed bundle. Exact paths and SHA-256/code-directory hashes
+residue, launch items (including custom filenames whose contents reference
+TinyBuddy), and missing, stale, or duplicate PlugInKit records without mutating
+an existing installation. It requires the only remaining record and both
+running executables to come from the configured installed bundle. Exact paths
+and SHA-256/code-directory hashes
 prevent LaunchServices or WidgetKit caches from producing a false pass.
 
 ## Git Activity Refresh
