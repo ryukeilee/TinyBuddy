@@ -6,13 +6,14 @@ TinyBuddy is a Swift 5.9 macOS 14 project with both Swift Package Manager and Xc
 
 - `Sources/TinyBuddyCore/` contains shared domain logic, daily stats persistence, Git activity stores, and widget presentation models.
 - `Sources/TinyBuddy/` contains the macOS SwiftUI HUD app, authorization flow, refresh coordination, and app lifecycle wiring.
+- `Sources/TinyBuddyReleaseVerifier/` contains the read-only command-line verifier used by signed Release workflows to validate the shared snapshot artifact.
 - `Widget/TinyBuddyWidget/` contains the WidgetKit extension implementation.
 - `Tests/TinyBuddyCoreTests/` contains deterministic XCTest coverage for the shared core module.
 - `Tests/TinyBuddyAppTests/` contains app-target tests for refresh coordination, authorization, scripts, and view model behavior.
 - `Tests/TinyBuddyAppTests/GitActivityRealRepositoryFixtureTests.swift` owns real Git regression coverage for worktrees, rewrites, duplicate roots, day boundaries, filtering, and partial failures.
 - `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` contain Info.plist, entitlements, and app/widget resources.
 - `script/build_and_run.sh` is the main local build, launch, install, and verification entry point.
-- `script/update_git_completion_count.sh` performs the launch-time Git refresh and writes shared daily-activity data; `script/verify_resource_stability.sh` is the opt-in macOS lifecycle/resource verifier.
+- `script/update_git_completion_count.sh` performs the launch-time Git refresh and writes shared daily-activity data; `script/benchmark_git_refresh.sh` exercises accuracy, incremental latency, resource use, and cancellation against disposable repositories; `script/verify_resource_stability.sh` is the opt-in macOS lifecycle/resource verifier.
 - `project.yml` is the XcodeGen source of truth for `TinyBuddy.xcodeproj`; regenerate the project after target, bundle, entitlement, or signing changes.
 
 ## Build, Test, and Development Commands
@@ -23,12 +24,13 @@ TinyBuddy is a Swift 5.9 macOS 14 project with both Swift Package Manager and Xc
 - `swift test --filter 'GitActivity(RefreshScript|RealRepositoryFixture)Tests'` runs the Git script and real-repository regression suites.
 - `swift test --filter GitActivityRefreshCoordinatorTests` runs the app-side refresh/outcome tests.
 - `/bin/bash -n script/update_git_completion_count.sh` is the narrow syntax check for Git refresh script edits.
+- `./script/benchmark_git_refresh.sh` is the repeatable large-repository accuracy, performance, resource, and cancellation gate for Git refresh changes; tune its workload only through the documented `TINYBUDDY_BENCHMARK_*` variables.
 - `xcodegen generate` regenerates `TinyBuddy.xcodeproj` from `project.yml` when XcodeGen is installed.
 - `./script/build_and_run.sh` builds the Debug app with unsigned local signing, refreshes Git-derived counters when possible, and launches the app.
 - `./script/build_and_run.sh --verify` builds and launches the app, verifies startup, and compares the desktop Widget source/hash with the current build when an installed bundle is present.
 - `./script/build_and_run.sh --logs` launches the app and streams process logs.
 - `./script/build_and_run.sh --telemetry` launches the app and streams subsystem telemetry logs.
-- Release modes default to `TINYBUDDY_SIGNING_MODE=local`: build with signing disabled, select the sole valid Apple Development fingerprint, sign Widget then App, and enforce the source entitlement allowlist plus real runtime verification. This profile-free path preserves the existing App Group only on macOS 14 and is not a distribution/notarization workflow. `TINYBUDDY_SIGNING_MODE=signed` remains an explicit profile-backed option.
+- Release modes default to `TINYBUDDY_SIGNING_MODE=local`: build with signing disabled, select the sole valid Apple Development identity or require an exact `TINYBUDDY_LOCAL_CODE_SIGN_IDENTITY` fingerprint when selection is ambiguous, sign Widget then App, and enforce the source entitlement allowlist plus real runtime verification. This profile-free path preserves the existing App Group only on macOS 14 and is not a distribution/notarization workflow. `TINYBUDDY_SIGNING_MODE=signed` remains an explicit profile-backed option.
 - `script/build_and_run.sh` stores full Xcode output under `$TMPDIR/TinyBuddyBuildLogs` by default and returns a concise success or bounded failure summary; set `TINYBUDDY_BUILD_LOG_MODE=verbose` only when the full live build stream is required.
 - `./script/build_and_run.sh release-install` builds a signed Release app, stages and verifies it on the installation filesystem, atomically replaces the installed app with rollback on failure, then verifies the relaunched app and widget processes use the installed executables. The default destination is `/Applications/TinyBuddy.app`; `TINYBUDDY_INSTALL_DIR` overrides it. Reuse a successful run as the terminal install gate unless code/build inputs changed or its evidence was incomplete.
 - `./script/build_and_run.sh release-verify` verifies the installed signed app matches the current Release build, checks WidgetKit registration, and proves the running app and widget executable paths and hashes come from the installed bundle. It uses the same install-directory override.
@@ -50,6 +52,7 @@ Keep `project.yml` authoritative for Xcode targets, build settings, resources, e
 - Exclude dependency/build/cache components, automated author or committer identities, and bounded duplicate reflog events before publishing activity.
 - Publish valid repositories when another repository or worktree fails. `partial` preserves successful results; `failed`, `skipped`, and unknown outcomes must not overwrite a previously committed snapshot with zero or stale data.
 - Keep trusted/shared snapshot writes atomic and revision-monotonic. Cache hits must be content-validated, repository-list cache hits must not renew their own expiry, and malformed or stale cache data must trigger bounded recomputation.
+- Treat the current-schema committed combined snapshot as the authoritative presentation input. HUD, Widget, telemetry, and Release verification must agree on its schema, revision, and local day; do not reintroduce independent legacy-key reads or parallel presentation derivation.
 - Diagnostics must use stable redacted candidate identifiers. If the script gains an external command, update its documented runtime dependency boundary and tests for indirect dependencies.
 
 ## Testing & Definition of Done
@@ -58,6 +61,7 @@ Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-fa
 
 - Start with the narrowest affected test or syntax check, then run `swift test` once after the implementation is stable when shared logic, app behavior, Git refresh, or widget presentation changed.
 - Git, snapshot, bookmark, sandbox, or widget-data changes must cover atomic recovery, mixed valid/invalid repositories or worktrees, stable `success`/`partial`/`failed`/`skipped` behavior, redacted diagnostics, and permission boundaries when applicable.
+- Git refresh performance, timeout, cache, enumeration, or cancellation changes should also run `./script/benchmark_git_refresh.sh`; report the configured workload when it differs from the script defaults.
 - Use real Git fixtures for behavior that depends on reflog ordering, object rewriting, common-dir identity, worktrees, or filesystem aliases; do not replace those cases with only synthetic reflog text.
 - Build/signing/widget/launch changes require the smallest relevant `build_and_run.sh` mode. `release-install` requires explicit authorization because it replaces an installed app bundle; after it succeeds, reuse it as terminal install evidence and rerun `release-verify` only after an invalidating change or when evidence was incomplete.
 - A successful `release-acceptance` supersedes separate `swift test`, `release-install`, and `release-verify` runs for the same unchanged inputs. Do not report release acceptance from a lower-level stage, a run without `release-complete`, or a run whose evidence directory contains a failed or missing stage.
