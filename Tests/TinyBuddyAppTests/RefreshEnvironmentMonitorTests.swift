@@ -120,6 +120,106 @@ final class RefreshEnvironmentMonitorTests: XCTestCase {
         XCTAssertEqual(eventCount, 1)
         XCTAssertEqual(scheduler.actionCount, 0)
     }
+
+    func testExtremePowerStateBurstCoalescesToOneEmission() {
+        let notificationCenter = NotificationCenter()
+        let scheduler = RefreshEnvironmentScheduler()
+        var currentState = TinyBuddyPowerState(
+            isOnBatteryPower: false,
+            isLowPowerModeEnabled: false
+        )
+        var publishedStateChanges: [TinyBuddyPowerState] = []
+        let monitor = TinyBuddyPowerStateMonitor(
+            notificationCenter: notificationCenter,
+            stateProvider: { currentState },
+            scheduler: scheduler.schedule,
+            eventHandler: { publishedStateChanges.append($0) }
+        )
+        monitor.start()
+        publishedStateChanges.removeAll()
+
+        currentState = TinyBuddyPowerState(
+            isOnBatteryPower: true,
+            isLowPowerModeEnabled: true
+        )
+
+        for _ in 0..<50 {
+            notificationCenter.post(name: .NSProcessInfoPowerStateDidChange, object: nil)
+        }
+
+        XCTAssertEqual(scheduler.actionCount, 1)
+
+        scheduler.runNext()
+        XCTAssertEqual(publishedStateChanges.count, 1)
+        XCTAssertEqual(publishedStateChanges[0], currentState)
+        monitor.stop()
+    }
+
+    func testPowerStateMonitorRestartDoesNotDeliverOldGenerationEmission() {
+        let notificationCenter = NotificationCenter()
+        let scheduler = RefreshEnvironmentScheduler()
+        var currentState = TinyBuddyPowerState(
+            isOnBatteryPower: false,
+            isLowPowerModeEnabled: false
+        )
+        var publishedStateChanges: [TinyBuddyPowerState] = []
+        let monitor = TinyBuddyPowerStateMonitor(
+            notificationCenter: notificationCenter,
+            stateProvider: { currentState },
+            scheduler: scheduler.schedule,
+            eventHandler: { publishedStateChanges.append($0) }
+        )
+
+        monitor.start()
+        publishedStateChanges.removeAll()
+
+        currentState = TinyBuddyPowerState(
+            isOnBatteryPower: true,
+            isLowPowerModeEnabled: false
+        )
+        notificationCenter.post(name: .NSProcessInfoPowerStateDidChange, object: nil)
+
+        monitor.stop()
+        publishedStateChanges.removeAll()
+        currentState = TinyBuddyPowerState(
+            isOnBatteryPower: false,
+            isLowPowerModeEnabled: false
+        )
+        scheduler.runNext()
+
+        XCTAssertTrue(publishedStateChanges.isEmpty)
+
+        monitor.start()
+        XCTAssertEqual(publishedStateChanges.count, 1)
+        monitor.stop()
+    }
+
+    func testHUDVisibilityExtremeBurstCoalescesToOneEmission() {
+        let notificationCenter = NotificationCenter()
+        let scheduler = RefreshEnvironmentScheduler()
+        var isVisible = false
+        var publishedVisibility: [Bool] = []
+        let monitor = HUDVisibilityMonitor(
+            notificationCenter: notificationCenter,
+            visibilityProvider: { isVisible },
+            scheduler: scheduler.schedule,
+            eventHandler: { publishedVisibility.append($0) }
+        )
+
+        monitor.start()
+        publishedVisibility.removeAll()
+
+        isVisible = true
+        for _ in 0..<50 {
+            notificationCenter.post(name: .tinyBuddyHUDWindowDidConfigure, object: nil)
+        }
+
+        XCTAssertEqual(scheduler.actionCount, 1)
+        scheduler.runNext()
+        XCTAssertEqual(publishedVisibility.count, 1)
+        XCTAssertEqual(publishedVisibility[0], true)
+        monitor.stop()
+    }
 }
 
 @MainActor

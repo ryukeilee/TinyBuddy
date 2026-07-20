@@ -91,6 +91,94 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
         monitor.stop()
     }
 
+    func testConsecutiveRelevantBatchesEachTriggerHandler() {
+        let state = State()
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+        XCTAssertTrue(monitor.start())
+
+        stream.emit(["/Authorized/Project/.git/logs/HEAD"])
+        stream.emit(["/Authorized/Project/.git/refs/heads/main"])
+        stream.emit(["/Authorized/Project/.git/index"])
+
+        XCTAssertEqual(state.changeCount, 3)
+        monitor.stop()
+    }
+
+    func testStopMarksMonitorAsStoppedAndReleasesStreamResources() {
+        let state = State()
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+        XCTAssertTrue(monitor.start())
+
+        monitor.stop()
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(stream.stopCount, 1)
+        XCTAssertEqual(stream.invalidateCount, 1)
+        XCTAssertEqual(state.rootStopCount, 1)
+    }
+
+    func testEmitWithOnlyRelevantGitMetadataTriggersHandler() {
+        let state = State()
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+        XCTAssertTrue(monitor.start())
+
+        stream.emit(["/Authorized/Project/.git/logs/refs/heads/feature"])
+        XCTAssertEqual(state.changeCount, 1)
+        monitor.stop()
+    }
+
+    func testEmitWithoutGitDirectoryDoesNotTriggerHandler() {
+        let state = State()
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+        XCTAssertTrue(monitor.start())
+
+        stream.emit(["/Authorized/Project/Sources/App.swift"])
+        stream.emit(["/Authorized/Project/Tests/Test.swift"])
+        stream.emit(["/Authorized/Project/README.md"])
+
+        XCTAssertEqual(state.changeCount, 0)
+        monitor.stop()
+    }
+
+    func testStopDuringActiveMonitoringReleasesStreamAndScopes() {
+        let state = State()
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+        XCTAssertTrue(monitor.start())
+        XCTAssertEqual(state.rootAccessCount, 1)
+
+        monitor.stop()
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(stream.stopCount, 1)
+        XCTAssertEqual(stream.invalidateCount, 1)
+        XCTAssertEqual(state.rootStopCount, 1)
+    }
+
+    func testRestartAfterStopCreatesFreshMonitoringSession() {
+        let state = State()
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+
+        XCTAssertTrue(monitor.start())
+        let firstStreamStartCount = stream.startCount
+        let firstRootAccessCount = state.rootAccessCount
+
+        stream.emit(["/Authorized/Project/.git/logs/HEAD"])
+        XCTAssertEqual(state.changeCount, 1)
+
+        monitor.stop()
+        monitor.start()
+
+        XCTAssertEqual(stream.startCount, firstStreamStartCount + 1)
+        XCTAssertEqual(state.rootAccessCount, firstRootAccessCount + 1)
+        stream.emit(["/Authorized/Project/.git/refs/heads/main"])
+        XCTAssertEqual(state.changeCount, 2)
+        monitor.stop()
+    }
+
     func testGitMetadataPathFilterIncludesOnlyRefreshRelevantMetadata() {
         XCTAssertTrue(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
             path: "/Authorized/Project/.git"

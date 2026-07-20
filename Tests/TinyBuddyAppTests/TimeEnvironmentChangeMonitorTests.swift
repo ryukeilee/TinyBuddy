@@ -160,6 +160,97 @@ final class TimeEnvironmentChangeMonitorTests: XCTestCase {
         XCTAssertTrue(recorder.events.isEmpty)
     }
 
+    func testEnvironmentNotificationStormCoalescesToOneEmission() {
+        let notificationCenter = NotificationCenter()
+        let workspaceNotificationCenter = NotificationCenter()
+        let scheduler = Scheduler()
+        var currentContext = "pre-storm"
+        let recorder = EventRecorder()
+        let monitor = makeMonitor(
+            notificationCenter: notificationCenter,
+            workspaceNotificationCenter: workspaceNotificationCenter,
+            scheduler: scheduler,
+            capture: { currentContext },
+            recorder: recorder
+        )
+        monitor.start()
+
+        currentContext = "post-storm"
+        for _ in 0..<100 {
+            notificationCenter.post(name: .NSSystemClockDidChange, object: nil)
+        }
+
+        XCTAssertEqual(scheduler.actionCount, 1)
+
+        scheduler.runNext()
+        XCTAssertEqual(recorder.events.count, 1)
+        assertEnvironmentChanged(recorder.events[0], equals: "post-storm")
+        monitor.stop()
+    }
+
+    func testMultipleSleepWakeCyclesMaintainCorrectObserverCount() {
+        let notificationCenter = NotificationCenter()
+        let workspaceNotificationCenter = NotificationCenter()
+        let scheduler = Scheduler()
+        let recorder = EventRecorder()
+        let monitor = makeMonitor(
+            notificationCenter: notificationCenter,
+            workspaceNotificationCenter: workspaceNotificationCenter,
+            scheduler: scheduler,
+            capture: { "context" },
+            recorder: recorder
+        )
+
+        for cycle in 0..<5 {
+            recorder.events.removeAll()
+            monitor.start()
+            XCTAssertEqual(monitor.observerCount, 5)
+            workspaceNotificationCenter.post(
+                name: NSWorkspace.willSleepNotification, object: nil
+            )
+            XCTAssertEqual(recorder.events.count, 1, "cycle \(cycle)")
+            guard case .willSleep = recorder.events[0] else {
+                return XCTFail("willSleep must be delivered each cycle \(cycle)")
+            }
+            monitor.stop()
+            XCTAssertEqual(monitor.observerCount, 0, "cycle \(cycle)")
+        }
+    }
+
+    func testWillSleepDuringScheduledEnvironmentEmissionDeliversBoth() {
+        let notificationCenter = NotificationCenter()
+        let workspaceNotificationCenter = NotificationCenter()
+        let scheduler = Scheduler()
+        var currentContext = "before"
+        let recorder = EventRecorder()
+        let monitor = makeMonitor(
+            notificationCenter: notificationCenter,
+            workspaceNotificationCenter: workspaceNotificationCenter,
+            scheduler: scheduler,
+            capture: { currentContext },
+            recorder: recorder
+        )
+        monitor.start()
+
+        notificationCenter.post(name: .NSSystemClockDidChange, object: nil)
+        XCTAssertEqual(scheduler.actionCount, 1)
+
+        workspaceNotificationCenter.post(
+            name: NSWorkspace.willSleepNotification, object: nil
+        )
+
+        XCTAssertEqual(recorder.events.count, 1)
+        guard case .willSleep = recorder.events[0] else {
+            return XCTFail("willSleep must be delivered immediately")
+        }
+
+        currentContext = "after-sleep"
+        scheduler.runNext()
+        XCTAssertEqual(recorder.events.count, 2)
+        assertEnvironmentChanged(recorder.events[1], equals: "after-sleep")
+        monitor.stop()
+    }
+
     private func makeMonitor(
         notificationCenter: NotificationCenter,
         workspaceNotificationCenter: NotificationCenter,
