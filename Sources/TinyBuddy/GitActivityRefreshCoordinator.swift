@@ -338,6 +338,8 @@ final class GitActivityRefreshCoordinator {
     private var didReloadWidgetDuringCurrentRefresh = false
     private var lastWidgetContent: PublishedWidgetContent
     private var pendingRefreshRequest: PendingRefreshRequest?
+    private var directoryRecoveryRemainingAttempts = 0
+    private var hasExhaustedDirectoryRecovery = false
 
     private static let schedulingLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.ryukeili.TinyBuddy",
@@ -896,6 +898,10 @@ final class GitActivityRefreshCoordinator {
     private func finishRefresh(succeeded: Bool) {
         isRefreshing = false
         didReloadWidgetDuringCurrentRefresh = false
+        if succeeded {
+            directoryRecoveryRemainingAttempts = 0
+            hasExhaustedDirectoryRecovery = false
+        }
 
         if let pendingRequest = pendingRefreshRequest {
             pendingRefreshRequest = nil
@@ -1065,6 +1071,9 @@ final class GitActivityRefreshCoordinator {
             isPeriodicRefreshSuspended = false
             lastRefreshAttemptMonotonicTime = monotonicTime
             lastRefreshFailureMonotonicTime = monotonicTime
+            if !hasExhaustedDirectoryRecovery && directoryRecoveryRemainingAttempts == 0 {
+                directoryRecoveryRemainingAttempts = 3
+            }
             let diagnostic = diagnostic(for: accessResult.issue)
             recordRefreshStatus(
                 refreshedAt: timeContext.now,
@@ -1079,6 +1088,7 @@ final class GitActivityRefreshCoordinator {
                 )
             )
             scopedRoots.forEach { $0.stopAccessing() }
+            scheduleRecoveryRetryIfNeeded(at: monotonicTime)
             return false
         }
 
@@ -1568,9 +1578,39 @@ final class GitActivityRefreshCoordinator {
             return true
         }
 
+        if !hasExhaustedDirectoryRecovery, directoryRecoveryRemainingAttempts > 0 {
+            let elapsed = monotonicTime - lastRefreshFailureMonotonicTime
+            return elapsed < 0 || elapsed >= minimumRefreshSpacing
+        }
+
         let elapsed = monotonicTime - lastRefreshFailureMonotonicTime
         let retryInterval = max(refreshInterval, currentCadence.nextRefreshInterval)
         return elapsed < 0 || elapsed >= retryInterval
+    }
+
+    private func scheduleRecoveryRetryIfNeeded(at monotonicTime: TimeInterval) {
+        guard directoryRecoveryRemainingAttempts > 0 else {
+            hasExhaustedDirectoryRecovery = true
+            return
+        }
+        directoryRecoveryRemainingAttempts -= 1
+        let scheduledRemaining = directoryRecoveryRemainingAttempts
+        DispatchQueue.main.asyncAfter(deadline: .now() + minimumRefreshSpacing) { [weak self] in
+            guard let self else {
+                return
+            }
+            let currentMonotonicTime = self.monotonicTimeProvider()
+            guard !self.isRefreshing,
+                  self.shouldRetryAfterFailure(at: currentMonotonicTime) else {
+                guard scheduledRemaining > 0 else {
+                    self.hasExhaustedDirectoryRecovery = true
+                    return
+                }
+                self.scheduleRecoveryRetryIfNeeded(at: currentMonotonicTime)
+                return
+            }
+            self.refresh(trigger: .timer, force: true, bypassFailureBackoff: true)
+        }
     }
 
     private func refreshChange(

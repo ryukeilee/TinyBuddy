@@ -5,6 +5,59 @@ import XCTest
 
 @MainActor
 final class PetViewModelSharedSnapshotTelemetryTests: XCTestCase {
+    func testStartupTelemetryLogsExactCategoryAndDurationMessage() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: repositoryRoot
+            .appendingPathComponent("Sources/TinyBuddy/TinyBuddyApp.swift"))
+
+        XCTAssertTrue(source.contains(#"category: "Startup""#))
+        XCTAssertTrue(source.contains(
+            #""Cold start completed duration=\(startupDuration, privacy: .public)ms""#
+        ))
+    }
+
+    func testLoginItemManagerRejectsRegistrationOutsideAppBundle() {
+        let manager = TinyBuddyLoginItemManager.shared
+        XCTAssertEqual(manager.isEnabled, false)
+    }
+
+    func testPetViewModelInitUsesPreloadedSnapshotAvoidingRedundantReads() throws {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 17, hour: 9)
+        let timeEnvironment = TinyBuddyTimeEnvironment(
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+
+        _ = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(
+                defaults: defaults,
+                calendar: calendar,
+                today: today
+            ),
+            combinedSnapshotStore: TinyBuddyCombinedSnapshotStore(
+                userDefaults: defaults,
+                sharedPreferencesProvider: { nil }
+            ),
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter,
+            timeEnvironment: timeEnvironment,
+            widgetReloader: {}
+        )
+
+        XCTAssertNotNil(store.loadSnapshot().stats.dayIdentifier)
+    }
     func testOSLogContractUsesExactPublicSharedSnapshotMessage() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

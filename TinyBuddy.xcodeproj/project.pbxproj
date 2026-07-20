@@ -45,7 +45,9 @@
 		D44D93E752B820DCD0C973A3 /* GitTodayFocusBlockCountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */; };
 		D8032BD68E38F54C02BC67F0 /* GitTodayActivitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B2356A5A3AB0BC7E871B67 /* GitTodayActivitySnapshot.swift */; };
 		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
+		E2B6035121A36F917A3DB16F /* TinyBuddyLoginItemManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D134899A4E957415BBAB3AE4 /* TinyBuddyLoginItemManager.swift */; };
 		EB9D58FB5AB5F5AB5D5E0479 /* GitTodayActivityRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96B45C0592764EBEE0461F5C /* GitTodayActivityRefreshPolicy.swift */; };
+		F0D96FCBB4F2B6EB6BE9E772 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DFF177D4F1D24C4D3552C206 /* ServiceManagement.framework */; };
 		F60A0FF508F100BCF30472F3 /* GitTodayRecentProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */; };
 		F6D2B174FF12EA89BA853BFD /* GitScanRootAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DAD80D7D515BD28AAD30DFD /* GitScanRootAuthorizationStore.swift */; };
 		FBDA6882DEF17849CDBAA5EE /* TinyBuddyCombinedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876BF9E3494E8DAA5CE1FFD8 /* TinyBuddyCombinedSnapshotStore.swift */; };
@@ -125,9 +127,11 @@
 		CA4CC0257E403A04A4D7866B /* GitTodayRecentProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayRecentProjectStore.swift; sourceTree = "<group>"; };
 		CB3739683A8BD56CCC48578E /* GitActivityExperiencePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitActivityExperiencePresentation.swift; sourceTree = "<group>"; };
 		CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDWindowPositionController.swift; sourceTree = "<group>"; };
+		D134899A4E957415BBAB3AE4 /* TinyBuddyLoginItemManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyLoginItemManager.swift; sourceTree = "<group>"; };
 		D50C649DCBEBEFF73C0B0893 /* RefreshEnvironmentMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshEnvironmentMonitor.swift; sourceTree = "<group>"; };
 		D68039BC3E998F20EF09C2CD /* GitRepositoryChangeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitRepositoryChangeMonitor.swift; sourceTree = "<group>"; };
 		D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		DFF177D4F1D24C4D3552C206 /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
 		E8F8EEF00869149828C56CC9 /* update_git_completion_count.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = update_git_completion_count.sh; sourceTree = "<group>"; };
 		F47EAEACDF2D02524E542DEB /* TinyBuddySharedSnapshotDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddySharedSnapshotDiagnostics.swift; sourceTree = "<group>"; };
 		F621E187E17E0739A05B14B2 /* TinyBuddyArcReactorCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyArcReactorCore.swift; sourceTree = "<group>"; };
@@ -152,6 +156,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				434375AA9EC8F4411454E7A6 /* libTinyBuddyCore.a in Frameworks */,
+				F0D96FCBB4F2B6EB6BE9E772 /* ServiceManagement.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -161,6 +166,7 @@
 		00A3C2A1FE5BD2A058969585 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				DFF177D4F1D24C4D3552C206 /* ServiceManagement.framework */,
 				AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */,
 				D7F25F848FCFC3C7FB344A17 /* WidgetKit.framework */,
 			);
@@ -281,6 +287,7 @@
 				D50C649DCBEBEFF73C0B0893 /* RefreshEnvironmentMonitor.swift */,
 				1ED892A30DA553AB4D2F2EC3 /* TimeEnvironmentChangeMonitor.swift */,
 				017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */,
+				D134899A4E957415BBAB3AE4 /* TinyBuddyLoginItemManager.swift */,
 				F9C9BB0B130BF6661F6E7DA7 /* TinyBuddyOnboardingStore.swift */,
 				F47EAEACDF2D02524E542DEB /* TinyBuddySharedSnapshotDiagnostics.swift */,
 			);
@@ -492,6 +499,7 @@
 				A795EF9F43C024A9852A4349 /* RefreshEnvironmentMonitor.swift in Sources */,
 				59B45B568CCAE8F3ABC062C0 /* TimeEnvironmentChangeMonitor.swift in Sources */,
 				97E6F1FE28D892C1ED5AA56D /* TinyBuddyApp.swift in Sources */,
+				E2B6035121A36F917A3DB16F /* TinyBuddyLoginItemManager.swift in Sources */,
 				FF02303F1D18D4443F72A3E2 /* TinyBuddyOnboardingStore.swift in Sources */,
 				C7B9D2FC67BFC83DB7191326 /* TinyBuddySharedSnapshotDiagnostics.swift in Sources */,
 			);

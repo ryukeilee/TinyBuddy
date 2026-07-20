@@ -139,6 +139,24 @@ struct GitScanRootSettingsView: View {
                 }
                 .disabled(viewModel.authorizations.isEmpty)
             }
+
+            Divider()
+
+            Toggle(isOn: Binding(
+                get: { TinyBuddyLoginItemManager.shared.isEnabled },
+                set: { newValue in
+                    try? TinyBuddyLoginItemManager.shared.setEnabled(newValue)
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("登录时启动 TinyBuddy")
+                        .font(.subheadline)
+                    Text("启用后，TinyBuddy 会在你登录 macOS 时自动启动")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
         }
         .frame(minWidth: 560, minHeight: 380)
         .scenePadding()

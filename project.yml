@@ -64,6 +64,7 @@ targets:
       - target: TinyBuddyWidgetExtension
         embed: true
         codeSign: false
+      - sdk: ServiceManagement.framework
   TinyBuddyWidgetExtension:
     type: app-extension
     platform: macOS

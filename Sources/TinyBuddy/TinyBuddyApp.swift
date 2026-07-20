@@ -6,6 +6,9 @@ import WidgetKit
 
 private let tinyBuddyHUDWindowIdentifier = NSUserInterfaceItemIdentifier("TinyBuddy.HUDWindow")
 private let tinyBuddyHUDLogger = Logger(subsystem: "local.tinybuddy", category: "HUD")
+private let tinyBuddyStartupLogger = Logger(subsystem: "local.tinybuddy", category: "Startup")
+
+private let appColdStartTime = CFAbsoluteTimeGetCurrent()
 
 @MainActor
 private func publishTinyBuddyHUDReadyWhenVisible(
@@ -25,6 +28,10 @@ private func publishTinyBuddyHUDReadyWhenVisible(
        isSemanticallyVisible {
         tinyBuddyHUDLogger.notice(
             "HUD ready identifier=TinyBuddy.HUDWindow width=284 height=520"
+        )
+        let startupDuration = Int((CFAbsoluteTimeGetCurrent() - appColdStartTime) * 1000)
+        tinyBuddyStartupLogger.notice(
+            "Cold start completed duration=\(startupDuration, privacy: .public)ms"
         )
         return
     }

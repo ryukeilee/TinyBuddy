@@ -195,7 +195,9 @@ final class PetViewModel: ObservableObject {
             ),
             expectedDayIdentifier: expectedDayIdentifier,
             diagnosticRecorder: sharedSnapshotDiagnosticRecorder,
-            rebuiltSnapshotFaultIdentifiers: &rebuiltSnapshotFaultIdentifiers
+            rebuiltSnapshotFaultIdentifiers: &rebuiltSnapshotFaultIdentifiers,
+            preloadedSnapshot: fallbackSnapshot,
+            preloadedValidatedRead: committedReadBeforePublication
         )
         let snapshot = combinedHUDState.snapshot
         let activitySnapshot = combinedHUDState.activitySnapshot
@@ -719,12 +721,15 @@ final class PetViewModel: ObservableObject {
         includeTrustedActivity: Bool,
         expectedDayIdentifier: String,
         diagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder,
-        rebuiltSnapshotFaultIdentifiers: inout Set<String>
+        rebuiltSnapshotFaultIdentifiers: inout Set<String>,
+        preloadedSnapshot: TinyBuddySnapshot? = nil,
+        preloadedValidatedRead: TinyBuddyValidatedCombinedSnapshotRead? = nil
     ) -> CombinedHUDState {
-        let snapshot = store.loadSnapshot()
-        let validatedRead = combinedSnapshotStore.readValidated(
-            expectedDayIdentifier: expectedDayIdentifier
-        )
+        let snapshot = preloadedSnapshot ?? store.loadSnapshot()
+        let validatedRead = preloadedValidatedRead
+            ?? combinedSnapshotStore.readValidated(
+                expectedDayIdentifier: expectedDayIdentifier
+            )
         validatedRead.observation.map(diagnosticRecorder.record)
         if validatedRead.observation == nil, validatedRead.snapshot != nil {
             rebuiltSnapshotFaultIdentifiers = Set(
