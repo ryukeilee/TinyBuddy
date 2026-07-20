@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import TinyBuddyCore
 
 final class ScopedGitScanRoot {
     let url: URL
@@ -49,6 +50,23 @@ struct GitScanRootAuthorization: Identifiable, Equatable {
     let displayName: String
     let lastKnownPath: String
     let state: GitScanRootAuthorizationState
+}
+
+extension GitScanRootAuthorization {
+    /// A diagnostic-safe authorization record with the real path replaced by a
+    /// stable identifier and brief path suffix.
+    var diagnosticSummary: String {
+        let stableID = TinyBuddyPrivacyRedactor.stableIdentifier(for: lastKnownPath)
+        let brief = TinyBuddyPrivacyRedactor.briefPath(lastKnownPath)
+        let stateLabel: String
+        switch state {
+        case .available:
+            stateLabel = "available"
+        case .unavailable(let reason):
+            stateLabel = "unavailable(\(reason))"
+        }
+        return "id=\(stableID) path=\(brief) display=\(displayName) state=\(stateLabel)"
+    }
 }
 
 enum GitScanRootAccessIssue: Equatable {

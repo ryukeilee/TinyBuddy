@@ -24,6 +24,13 @@ struct TinyBuddyHiddenSnapshotDiagnosticSummary: Equatable {
         recovery = observation.recovery
         attemptCount = observation.attemptCount
     }
+
+    /// A sanitized diagnostic string suitable for export.
+    /// Contains only the stable identifier and enum-based state — no paths,
+    /// no usernames, no sensitive content.
+    var sanitizedDiagnosticLine: String {
+        "id=\(identifier) phase=\(phase.rawValue) reason=\(reason.rawValue) recovery=\(recovery.rawValue) attempt=\(attemptCount)"
+    }
 }
 
 final class TinyBuddySharedSnapshotDiagnosticRecorder {
