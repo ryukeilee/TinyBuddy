@@ -52,8 +52,8 @@ public enum TinyBuddyReleaseSnapshotVerificationOutcome: Equatable, Sendable {
 
 /// Validates a preferences plist without loading, repairing, or writing shared
 /// state. This is intentionally stricter than runtime recovery: a release
-/// artifact must carry the current schema, a valid commit marker, and a V2 slot
-/// that precisely represents that committed snapshot.
+/// artifact must carry the current schema, a valid commit marker, and a V3
+/// (or V2) slot that precisely represents that committed snapshot.
 public enum TinyBuddyReleaseSnapshotVerifier {
     public static func verify(
         plist: [String: Any],
@@ -78,12 +78,19 @@ public enum TinyBuddyReleaseSnapshotVerifier {
             return .invalid(.committedRevisionInvalid)
         }
 
+        let decodeFormats: [(String) -> TinyBuddyCombinedSnapshot?] = [
+            TinyBuddyCombinedSnapshotStore.decodeV3,
+            TinyBuddyCombinedSnapshotStore.decodeV2
+        ]
+
         let committedSnapshot = [
             plist[TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA] as? String,
             plist[TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB] as? String
         ]
         .compactMap { $0 }
-        .compactMap(TinyBuddyCombinedSnapshotStore.decodeV2)
+        .compactMap { value in
+            decodeFormats.lazy.compactMap { $0(value) }.first
+        }
         .first {
             $0.revision == committedRevision && $0.dayIdentifier == expectedDayIdentifier
         }

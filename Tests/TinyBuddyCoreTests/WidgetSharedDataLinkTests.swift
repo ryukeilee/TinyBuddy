@@ -7,13 +7,13 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             TinyBuddyCombinedSnapshotStore.migrationPath(
                 from: TinyBuddyCombinedSnapshotStore.legacySchemaVersion
             ),
-            [1, 2]
+            [1, 2, 3]
         )
         XCTAssertEqual(
             TinyBuddyCombinedSnapshotStore.migrationPath(
                 from: TinyBuddyCombinedSnapshotStore.currentSchemaVersion
             ),
-            [2]
+            [3]
         )
         XCTAssertNil(
             TinyBuddyCombinedSnapshotStore.migrationPath(
@@ -67,11 +67,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
             TinyBuddyCombinedSnapshotStore.encode(legacySnapshot)
         )
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             legacySnapshot
         )
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
             legacySnapshot
         )
         XCTAssertEqual(
@@ -137,7 +137,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         )
         XCTAssertEqual(resumedStore.load(), legacySnapshot)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             legacySnapshot
         )
         XCTAssertEqual(
@@ -179,7 +179,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
 
         XCTAssertEqual(store.load(), legacySnapshot)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             legacySnapshot
         )
         XCTAssertEqual(
@@ -222,7 +222,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         )
         XCTAssertEqual(appStore.load(), legacySnapshot)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             legacySnapshot
         )
         XCTAssertEqual(
@@ -310,7 +310,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(recovered.snapshot, committed.snapshot)
         XCTAssertEqual(recovered.activitySnapshot, committed.activitySnapshot)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
             recovered
         )
 
@@ -358,11 +358,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(rebuilt.outcome, .saved)
         XCTAssertEqual(rebuilt.snapshot?.revision, 22)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             rebuilt.snapshot
         )
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
             rebuilt.snapshot
         )
     }
@@ -386,11 +386,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         XCTAssertEqual(recovered.snapshot, oldSnapshot.snapshot)
         XCTAssertEqual(recovered.activitySnapshot, oldSnapshot.activitySnapshot)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             recovered
         )
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
             recovered
         )
         XCTAssertEqual(
@@ -437,8 +437,8 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         let first = store.updatePetSlice(firstPetSnapshot, fallbackActivitySnapshot: nil)
         let second = store.updatePetSlice(secondPetSnapshot, fallbackActivitySnapshot: nil)
         let slotRevisions = try [
-            decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults).revision,
-            decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults).revision
+            decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults).revision,
+            decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults).revision
         ].sorted()
 
         XCTAssertEqual(first.snapshot?.revision, 1)
@@ -741,7 +741,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         )
         XCTAssertEqual(repairingStore.load(), result.snapshot)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB, defaults: defaults),
             result.snapshot
         )
         XCTAssertEqual(
@@ -954,7 +954,7 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         let appRecovery = try XCTUnwrap(store.load())
         XCTAssertEqual(appRecovery, widgetRecovery)
         XCTAssertEqual(
-            try decodeV2Slot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
+            try decodeSlot(TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA, defaults: defaults),
             appRecovery
         )
     }
@@ -1824,12 +1824,15 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         )
     }
 
-    private func decodeV2Slot(
+    private func decodeSlot(
         _ key: String,
         defaults: UserDefaults
     ) throws -> TinyBuddyCombinedSnapshot {
         let value = try XCTUnwrap(defaults.string(forKey: key))
-        return try XCTUnwrap(TinyBuddyCombinedSnapshotStore.decodeV2(value))
+        return try XCTUnwrap(
+            TinyBuddyCombinedSnapshotStore.decodeV3(value)
+                ?? TinyBuddyCombinedSnapshotStore.decodeV2(value)
+        )
     }
 
     private func corruptLastCharacter(of value: String) -> String {

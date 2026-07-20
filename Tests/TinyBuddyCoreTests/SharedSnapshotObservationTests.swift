@@ -149,7 +149,7 @@ final class SharedSnapshotObservationTests: XCTestCase {
     }
 
     func testUnknownEnvelopeVersionStopsWithoutOverwritingInput() {
-        let unknownEnvelope = "3\t17\tchecksum\tpayloadChecksum\tpayload"
+        let unknownEnvelope = "4\t17\tchecksum\tpayloadChecksum\tpayload"
         let values: [String: Any] = [
             TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA: unknownEnvelope
         ]
@@ -168,8 +168,8 @@ final class SharedSnapshotObservationTests: XCTestCase {
 
     func testTruncatedUnknownVersionsRemainVersionIncompatible() {
         let cases: [[String: Any]] = [
-            [TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA: "3"],
-            [TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2: "3\t17"]
+            [TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA: "4"],
+            [TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2: "4\t17"]
         ]
 
         for values in cases {

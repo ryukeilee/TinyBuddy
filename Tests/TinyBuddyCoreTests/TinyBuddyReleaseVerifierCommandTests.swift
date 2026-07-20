@@ -14,7 +14,7 @@ final class TinyBuddyReleaseVerifierCommandTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(result.standardError, "")
         XCTAssertTrue(result.standardOutput.contains("TINYBUDDY_RELEASE_SNAPSHOT"))
-        XCTAssertTrue(result.standardOutput.contains("schema=2"))
+        XCTAssertTrue(result.standardOutput.contains("schema=3"))
         XCTAssertTrue(result.standardOutput.contains("revision=42"))
         XCTAssertTrue(result.standardOutput.contains("day=2026-07-17"))
         XCTAssertTrue(result.standardOutput.contains("status=completedOnce"))

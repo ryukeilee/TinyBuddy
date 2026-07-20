@@ -24,14 +24,16 @@ public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
 
 public final class TinyBuddyCombinedSnapshotStore {
     public static let legacySchemaVersion = 1
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public static func migrationPath(from version: Int) -> [Int]? {
         switch version {
-        case legacySchemaVersion:
-            return [legacySchemaVersion, currentSchemaVersion]
-        case currentSchemaVersion:
-            return [currentSchemaVersion]
+        case 1:
+            return [1, 2, 3]
+        case 2:
+            return [2, 3]
+        case 3:
+            return [3]
         default:
             return nil
         }
@@ -163,6 +165,19 @@ public final class TinyBuddyCombinedSnapshotStore {
     // The app is the only semantic writer. This lock also serializes migration and
     // repair inside that process. WidgetKit uses repairOnLoad=false and stays read-only.
     private static let writerLock = NSLock()
+
+    // Write-failure cooldown prevents pointless retries when storage is full or
+    // the preference domain is unavailable. After maxWriteFailuresBeforeCooldown
+    // consecutive failures, writes are skipped for writeCooldownSeconds.
+    private var writeFailureCount = 0
+    private var lastWriteFailure: Date?
+    private static let writeCooldownSeconds: TimeInterval = 60
+    private static let maxWriteFailuresBeforeCooldown = 3
+
+    private var isInWriteCooldown: Bool {
+        writeFailureCount >= Self.maxWriteFailuresBeforeCooldown
+            && lastWriteFailure.map { Date().timeIntervalSince($0) < Self.writeCooldownSeconds } == true
+    }
 
     public convenience init(repairOnLoad: Bool = true) {
         let preferencesStore = TinyBuddyAppGroupPreferencesStore()
@@ -462,6 +477,10 @@ public final class TinyBuddyCombinedSnapshotStore {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
 
+        guard !isInWriteCooldown else {
+            return cooldownResult()
+        }
+
         let state = readStateLocked(repair: true)
         let current = state.snapshot
         guard state.diagnosticReason != .versionIncompatible else {
@@ -506,6 +525,10 @@ public final class TinyBuddyCombinedSnapshotStore {
     ) -> UpdateResult {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
+
+        guard !isInWriteCooldown else {
+            return cooldownResult()
+        }
 
         let state = readStateLocked(repair: true)
         let current = state.snapshot
@@ -658,6 +681,128 @@ public final class TinyBuddyCombinedSnapshotStore {
         return revision
     }
 
+    // V3 uses a compact binary plist payload instead of the tab-separated V1
+    // text. The envelope format remains compatible: the version field changes
+    // from "2" to "3" so V2-only readers see versionIncompatible and stop.
+    public static func encodeV3(_ snapshot: TinyBuddyCombinedSnapshot) -> String? {
+        let normalizedSnapshot = normalized(snapshot)
+        guard let payloadData = v3PayloadData(normalizedSnapshot) else {
+            return nil
+        }
+        let encodedPayload = payloadData.base64EncodedString()
+        return [
+            "3",
+            String(normalizedSnapshot.revision),
+            revisionChecksum(normalizedSnapshot.revision),
+            checksum(payloadData),
+            encodedPayload
+        ].joined(separator: "\t")
+    }
+
+    public static func decodeV3(_ value: String) -> TinyBuddyCombinedSnapshot? {
+        guard let claimedRevision = verifiedV3ClaimedRevision(value) else {
+            return nil
+        }
+        let fields = value.split(separator: "\t", omittingEmptySubsequences: false)
+        guard fields.count == 5,
+              let payloadData = Data(base64Encoded: String(fields[4])) else {
+            return nil
+        }
+        guard fields[3] == Substring(checksum(payloadData)),
+              let snapshot = v3Snapshot(from: payloadData),
+              snapshot.revision == claimedRevision else {
+            return nil
+        }
+        return snapshot
+    }
+
+    private static func v3PayloadData(_ snapshot: TinyBuddyCombinedSnapshot) -> Data? {
+        let projectName = snapshot.activitySnapshot.recentProjectName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var dict: [String: Any] = [
+            "rv": snapshot.revision,
+            "di": snapshot.dayIdentifier,
+            "st": snapshot.snapshot.status.rawValue,
+            "fc": max(0, snapshot.snapshot.stats.focusCount),
+            "cc": max(0, snapshot.snapshot.stats.completionCount)
+        ]
+        if let af = snapshot.activitySnapshot.focusBlockCount {
+            dict["af"] = max(0, af)
+        }
+        if let ac = snapshot.activitySnapshot.commitCount {
+            dict["ac"] = max(0, ac)
+        }
+        if let rp = projectName, !rp.isEmpty {
+            dict["rp"] = rp
+        }
+        if let ar = snapshot.activityRevision {
+            dict["ar"] = ar
+        }
+        return try? PropertyListSerialization.data(
+            fromPropertyList: dict,
+            format: .binary,
+            options: 0
+        )
+    }
+
+    private static func v3Snapshot(from payloadData: Data) -> TinyBuddyCombinedSnapshot? {
+        var format = PropertyListSerialization.PropertyListFormat.binary
+        guard let dict = try? PropertyListSerialization.propertyList(
+            from: payloadData,
+            options: [],
+            format: &format
+        ) as? [String: Any] else {
+            return nil
+        }
+
+        guard let revision = dict["rv"] as? Int64, revision >= 0,
+              let dayIdentifier = dict["di"] as? String,
+              TinyBuddyTimeContext.isValidDayIdentifier(dayIdentifier),
+              let statusRaw = dict["st"] as? String,
+              let status = PetStatus(rawValue: statusRaw),
+              let focusCount = dict["fc"] as? Int, focusCount >= 0,
+              let completionCount = dict["cc"] as? Int, completionCount >= 0 else {
+            return nil
+        }
+
+        let activityFocusBlockCount = dict["af"] as? Int
+        let activityCommitCount = dict["ac"] as? Int
+        let recentProjectName = dict["rp"] as? String
+        let activityRevision = dict["ar"] as? Int64
+
+        let normalizedProjectName = recentProjectName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return TinyBuddyCombinedSnapshot(
+            revision: revision,
+            dayIdentifier: dayIdentifier,
+            snapshot: TinyBuddySnapshot(
+                status: status,
+                stats: DailyStats(
+                    dayIdentifier: dayIdentifier,
+                    focusCount: focusCount,
+                    completionCount: completionCount
+                )
+            ),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: activityFocusBlockCount,
+                commitCount: activityCommitCount,
+                recentProjectName: normalizedProjectName?.isEmpty == false ? normalizedProjectName : nil
+            ),
+            activityRevision: activityRevision
+        )
+    }
+
+    private static func verifiedV3ClaimedRevision(_ value: String) -> Int64? {
+        let fields = value.split(separator: "\t", omittingEmptySubsequences: false)
+        guard fields.count == 5,
+              fields[0] == "3",
+              let revision = Int64(fields[1]), revision >= 0,
+              fields[2] == Substring(revisionChecksum(revision)) else {
+            return nil
+        }
+        return revision
+    }
+
     public static func encodeSchemaVersion(_ version: Int = currentSchemaVersion) -> String? {
         guard version >= legacySchemaVersion else {
             return nil
@@ -691,12 +836,13 @@ public final class TinyBuddyCombinedSnapshotStore {
         let committedMarkerRevision = sources.compactMap { source in
             source.committedRevisionMarker.flatMap(Self.decodeRevisionMarker)
         }.max()
-        var committedV2Candidates: [TinyBuddyCombinedSnapshot] = []
-        var stagedV2Candidates: [TinyBuddyCombinedSnapshot] = []
+        var committedCandidates: [TinyBuddyCombinedSnapshot] = []
+        var stagedCandidates: [TinyBuddyCombinedSnapshot] = []
         var hasV2Evidence = committedMarkerRevision != nil
 
-        // V2 wins equal-revision migration ties. Direct defaults remain first,
-        // followed by the on-disk cache and explicit fallback.
+        // V3 takes priority, with V2 as a fallback. V1 legacy is the final
+        // recovery path. Direct defaults remain first, followed by the on-disk
+        // cache and explicit fallback.
         for source in sources {
             let sourceCommittedRevision = source.committedRevisionMarker
                 .flatMap(Self.decodeRevisionMarker)
@@ -707,19 +853,18 @@ public final class TinyBuddyCombinedSnapshotStore {
                 guard let value else {
                     continue
                 }
-                if Self.verifiedV2ClaimedRevision(value) != nil {
+                if Self.verifiedV3ClaimedRevision(value) != nil
+                    || Self.verifiedV2ClaimedRevision(value) != nil {
                     hasV2Evidence = true
                 }
-                guard let snapshot = Self.decodeV2(value) else {
+                guard let snapshot = Self.decodeV3(value)
+                    ?? Self.decodeV2(value) else {
                     continue
                 }
-                // A commit marker only publishes slots from the same source. This
-                // prevents an unrelated fallback marker from exposing a staged
-                // direct-defaults write after a failed synchronization.
                 if sourceCommittedRevision.map({ snapshot.revision <= $0 }) == true {
-                    committedV2Candidates.append(snapshot)
+                    committedCandidates.append(snapshot)
                 } else {
-                    stagedV2Candidates.append(snapshot)
+                    stagedCandidates.append(snapshot)
                 }
             }
         }
@@ -727,7 +872,9 @@ public final class TinyBuddyCombinedSnapshotStore {
         var legacyCandidates: [TinyBuddyCombinedSnapshot] = []
         for source in sources {
             for value in [source.legacySnapshot, source.migrationBackupV1].compactMap({ $0 }) {
-                guard let snapshot = Self.decode(value) else {
+                guard Self.decodeV3(value) == nil,
+                      Self.decodeV2(value) == nil,
+                      let snapshot = Self.decode(value) else {
                     continue
                 }
                 let sourceCommittedRevision = source.committedRevisionMarker
@@ -743,11 +890,11 @@ public final class TinyBuddyCombinedSnapshotStore {
             }
         }
 
-        let allCandidates = committedV2Candidates + legacyCandidates
+        let allCandidates = committedCandidates + legacyCandidates
         let candidates = allCandidates.filter {
             expectedDayIdentifier == nil || $0.dayIdentifier == expectedDayIdentifier
         }
-        let scopedStagedCandidates = stagedV2Candidates.filter {
+        let scopedStagedCandidates = stagedCandidates.filter {
             expectedDayIdentifier == nil || $0.dayIdentifier == expectedDayIdentifier
         }
         let selected = Self.newestSnapshot(in: candidates)
@@ -756,7 +903,7 @@ public final class TinyBuddyCombinedSnapshotStore {
            expectedDayIdentifier != nil,
            selected == nil,
            newestStaged == nil,
-           (!allCandidates.isEmpty || !stagedV2Candidates.isEmpty) {
+           (!allCandidates.isEmpty || !stagedCandidates.isEmpty) {
             diagnosticReason = .staleData
         }
         let durableRevisionFloor = max(
@@ -771,12 +918,14 @@ public final class TinyBuddyCombinedSnapshotStore {
                 revisionFloor = max(revisionFloor, markedRevision)
             }
             for value in [source.v2SlotA, source.v2SlotB] {
-                if let claimedRevision = value.flatMap(Self.verifiedV2ClaimedRevision) {
+                if let claimedRevision = value.flatMap(Self.verifiedV3ClaimedRevision)
+                    ?? value.flatMap(Self.verifiedV2ClaimedRevision) {
                     revisionFloor = max(revisionFloor, claimedRevision)
                 }
             }
             if let value = source.legacySnapshot,
-               let claimedRevision = Self.verifiedV2ClaimedRevision(value) {
+               let claimedRevision = Self.verifiedV3ClaimedRevision(value)
+                ?? Self.verifiedV2ClaimedRevision(value) {
                 revisionFloor = max(revisionFloor, claimedRevision)
             } else if let legacyHighestRevision = source.legacyHighestRevision,
                       let legacyValue = source.legacySnapshot,
@@ -891,7 +1040,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         guard value.isEmpty == false else {
             return false
         }
-        return decodeV2(value) == nil && decode(value) == nil
+        return decodeV3(value) == nil && decodeV2(value) == nil && decode(value) == nil
     }
 
     private static func isUnknownEnvelopeVersion(_ value: String) -> Bool {
@@ -906,7 +1055,7 @@ public final class TinyBuddyCombinedSnapshotStore {
               version >= 0 else {
             return false
         }
-        return version != 2
+        return version != 2 && version != 3
     }
 
     private static func isUnknownMarkerVersion(_ value: String) -> Bool {
@@ -1006,7 +1155,9 @@ public final class TinyBuddyCombinedSnapshotStore {
         }
 
         let slots = directSlots()
-        let encoded = Self.encodeV2(canonical)
+        guard let encoded = Self.encodeV3(canonical) else {
+            return false
+        }
         var writtenTarget: DirectSlot?
 
         if !slots.contains(where: { $0.snapshot == canonical }) {
@@ -1015,7 +1166,7 @@ public final class TinyBuddyCombinedSnapshotStore {
                 ?? DirectSlot(key: targetKey, rawValue: nil, snapshot: nil)
             guard writeValue(encoded, targetKey),
                   synchronizeWrites(),
-                  directString(forKey: targetKey).flatMap(Self.decodeV2) == canonical else {
+                  directString(forKey: targetKey).flatMap(Self.decodeV3) == canonical else {
                 restoreValueLocked(target.rawValue, forKey: target.key)
                 _ = synchronizeWrites()
                 return false
@@ -1077,14 +1228,16 @@ public final class TinyBuddyCombinedSnapshotStore {
     }
 
     private func repairAncillaryCopiesLocked(_ canonical: TinyBuddyCombinedSnapshot) {
-        let encodedV2 = Self.encodeV2(canonical)
+        guard let encodedV3 = Self.encodeV3(canonical) else {
+            return
+        }
         let slots = directSlots()
         var changed = false
 
         if slots.contains(where: { $0.snapshot == canonical }) {
             for slot in slots where slot.snapshot == nil
                 || (slot.snapshot?.revision == canonical.revision && slot.snapshot != canonical) {
-                changed = writeValue(encodedV2, slot.key) || changed
+                changed = writeValue(encodedV3, slot.key) || changed
             }
         }
 
@@ -1138,12 +1291,12 @@ public final class TinyBuddyCombinedSnapshotStore {
             DirectSlot(
                 key: Key.snapshotV2SlotA,
                 rawValue: slotAValue,
-                snapshot: slotAValue.flatMap(Self.decodeV2)
+                snapshot: slotAValue.flatMap { Self.decodeV3($0) ?? Self.decodeV2($0) }
             ),
             DirectSlot(
                 key: Key.snapshotV2SlotB,
                 rawValue: slotBValue,
-                snapshot: slotBValue.flatMap(Self.decodeV2)
+                snapshot: slotBValue.flatMap { Self.decodeV3($0) ?? Self.decodeV2($0) }
             )
         ]
     }
@@ -1312,38 +1465,28 @@ public final class TinyBuddyCombinedSnapshotStore {
 
         guard let directSource = sourceValues().first,
               ensureCurrentSchemaLocked(directSource: directSource) else {
-            return UpdateResult(
-                snapshot: current,
-                outcome: .persistenceFailed,
-                didPersist: false
-            )
+            return failureResult(current: current)
         }
 
         // Reserve before publication. If the process stops between these writes,
         // the previous whole snapshot stays valid while the next save advances
         // strictly beyond this floor.
         guard reserveRevisionLocked(combinedSnapshot.revision) else {
-            return UpdateResult(
-                snapshot: current,
-                outcome: .persistenceFailed,
-                didPersist: false
-            )
+            return failureResult(current: current)
         }
         let slots = directSlots()
         let targetKey = transactionalTargetKey(for: slots)
         let target = slots.first(where: { $0.key == targetKey })
             ?? DirectSlot(key: targetKey, rawValue: nil, snapshot: nil)
-        let encodedV2 = Self.encodeV2(combinedSnapshot)
-        guard writeValue(encodedV2, targetKey),
+        guard let encodedV3 = Self.encodeV3(combinedSnapshot) else {
+            return failureResult(current: current)
+        }
+        guard writeValue(encodedV3, targetKey),
               synchronizeWrites(),
-              directString(forKey: targetKey).flatMap(Self.decodeV2) == combinedSnapshot else {
+              directString(forKey: targetKey).flatMap(Self.decodeV3) == combinedSnapshot else {
             restoreValueLocked(target.rawValue, forKey: target.key)
             _ = synchronizeWrites()
-            return UpdateResult(
-                snapshot: current,
-                outcome: .persistenceFailed,
-                didPersist: false
-            )
+            return failureResult(current: current)
         }
 
         // The slot is staged until this independently checksummed marker is
@@ -1357,17 +1500,46 @@ public final class TinyBuddyCombinedSnapshotStore {
             restoreValueLocked(previousCommittedMarker, forKey: Key.committedRevisionV2)
             restoreValueLocked(target.rawValue, forKey: target.key)
             _ = synchronizeWrites()
-            return UpdateResult(
-                snapshot: current,
-                outcome: .persistenceFailed,
-                didPersist: false
-            )
+            return failureResult(current: current)
         }
+
+        writeFailureCount = 0
+        lastWriteFailure = nil
 
         // Redundant V2/V1 copies are repairable auxiliaries after the commit
         // marker has published one complete canonical slot.
         repairAncillaryCopiesLocked(combinedSnapshot)
 
         return UpdateResult(snapshot: combinedSnapshot, outcome: .saved, didPersist: true)
+    }
+
+    private func failureResult(current: TinyBuddyCombinedSnapshot?) -> UpdateResult {
+        writeFailureCount += 1
+        lastWriteFailure = Date()
+        return UpdateResult(
+            snapshot: current,
+            outcome: .persistenceFailed,
+            didPersist: false,
+            observation: TinyBuddySharedSnapshotObservation(
+                phase: .snapshotWrite,
+                reason: .persistenceFailed,
+                recovery: .stopped,
+                attemptCount: writeFailureCount
+            )
+        )
+    }
+
+    private func cooldownResult() -> UpdateResult {
+        UpdateResult(
+            snapshot: nil,
+            outcome: .persistenceFailed,
+            didPersist: false,
+            observation: TinyBuddySharedSnapshotObservation(
+                phase: .snapshotWrite,
+                reason: .persistenceFailed,
+                recovery: .stopped,
+                attemptCount: writeFailureCount
+            )
+        )
     }
 }
