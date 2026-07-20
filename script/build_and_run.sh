@@ -2947,6 +2947,9 @@ run_locked_release_workflow() {
 case "$MODE" in
   release-install|--release-install|release-verify|--release-verify|release-acceptance|--release-acceptance)
     ;;
+  regression-gate|--regression-gate|regression-gate-quick|--regression-gate-quick|regression-gate-record-baseline|--regression-gate-record-baseline)
+    initialize_build_artifact_paths
+    ;;
   *)
     initialize_build_artifact_paths
     ;;
@@ -3000,8 +3003,23 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     check_widget_runtime_source_match fail
     ;;
+  --regression-gate|regression-gate)
+    initialize_build_artifact_paths
+    echo "running full regression gate..." >&2
+    exec "$ROOT_DIR/script/regression_gate.sh" --check
+    ;;
+  --regression-gate-quick|regression-gate-quick)
+    initialize_build_artifact_paths
+    echo "running quick regression gate..." >&2
+    exec "$ROOT_DIR/script/regression_gate.sh" --quick
+    ;;
+  --regression-gate-record-baseline)
+    initialize_build_artifact_paths
+    echo "recording regression baselines..." >&2
+    exec "$ROOT_DIR/script/regression_gate.sh" --record-baseline
+    ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|release-install|release-verify|release-acceptance]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|release-install|release-verify|release-acceptance|--regression-gate|--regression-gate-quick|--regression-gate-record-baseline]" >&2
     exit 2
     ;;
 esac
