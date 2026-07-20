@@ -320,6 +320,22 @@ struct TinyBuddyWidgetView: View {
                 transaction.disablesAnimations = true
             }
         }
+        .accessibilityLabel(widgetAccessibilityLabel)
+    }
+
+    private var widgetAccessibilityLabel: String {
+        var parts = ["TinyBuddy"]
+        parts.append(presentation.statusTitle)
+        if presentation.focusCount > 0 {
+            parts.append("今日专注 \(presentation.focusCountText)")
+        }
+        if presentation.completionCount > 0 {
+            parts.append("今日完成 \(presentation.completionCountText)")
+        }
+        if let project = presentation.recentProjectName {
+            parts.append("最近项目 \(project)")
+        }
+        return parts.joined(separator: "，")
     }
 
     private var smallBody: some View {
@@ -405,6 +421,8 @@ struct TinyBuddyWidgetView: View {
                             )
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(mediumBodyBottomPanelLabel)
                 }
             }
         }
@@ -418,12 +436,14 @@ struct TinyBuddyWidgetView: View {
                 Text("TINYBUDDY")
                     .font(.caption2.weight(.bold).monospaced())
                     .foregroundStyle(secondaryText)
+                    .accessibilityHidden(true)
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: presentation.systemImage)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(statusAccent)
+                    .accessibilityHidden(true)
 
                 Text(presentation.statusTitle)
                     .font(compact ? .headline.weight(.heavy) : .title3.weight(.heavy))
@@ -442,6 +462,7 @@ struct TinyBuddyWidgetView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -482,12 +503,25 @@ struct TinyBuddyWidgetView: View {
                 .stroke(statusAccent.opacity(layout.usesEnhancedContrast ? 0.76 : 0.42), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title) \(value)")
     }
 
     private func panelLabel(_ text: String) -> some View {
         Text(text)
             .font(.caption2.weight(.semibold).monospaced())
             .foregroundStyle(secondaryText)
+    }
+
+    private var mediumBodyBottomPanelLabel: String {
+        var parts: [String] = []
+        if let project = presentation.recentProjectName {
+            parts.append("最近项目：\(project)")
+        }
+        if let date = presentation.dataDateText {
+            parts.append("\(date)")
+        }
+        return parts.joined(separator: "，")
     }
 }
 

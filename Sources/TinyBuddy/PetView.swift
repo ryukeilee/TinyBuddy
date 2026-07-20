@@ -9,12 +9,20 @@ struct PetView: View {
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityEnabled) private var accessibilityEnabled
 
+    @FocusState private var focusedField: PetViewFocusField?
     @StateObject private var viewModel: PetViewModel
     @State private var lowPowerModeEnabled: Bool
 
     private let fixedWidth: CGFloat = 284
     private let hudHeight: CGFloat = 520
+
+    enum PetViewFocusField: Hashable {
+        case settings
+        case statusButton(PetStatus)
+        case actionButton
+    }
 
     init(viewModel: PetViewModel? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel ?? PetViewModel())
@@ -80,12 +88,17 @@ struct PetView: View {
                     .accessibilityHidden(true)
 
                 header
+                    .focusable(false)
                 heroPanel
+                    .focusable(false)
                 if displayLayout.showsMetrics {
                     metricsPanel
+                        .focusable(false)
                 }
                 displayStatePanel
+                    .focusSection()
                 statusButtons
+                    .focusSection()
             }
             .padding(.horizontal, 14)
             .padding(.top, 10)
@@ -111,6 +124,7 @@ struct PetView: View {
                 transaction.disablesAnimations = true
             }
         }
+
     }
 
     private func updateLowPowerMode() {
@@ -137,6 +151,8 @@ struct PetView: View {
                     .minimumScaleFactor(0.78)
             }
             .layoutPriority(1)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("TinyBuddy Companion HUD")
 
             Spacer(minLength: 4)
 
@@ -161,6 +177,9 @@ struct PetView: View {
             }
             .buttonStyle(.plain)
             .help("打开设置")
+            .accessibilityLabel("设置")
+            .accessibilityHint("打开 TinyBuddy 设置窗口")
+            .focused($focusedField, equals: .settings)
 
             Label(presentation.statusTitle, systemImage: presentation.systemImage)
                 .font(.caption.weight(.bold))
@@ -193,6 +212,7 @@ struct PetView: View {
                         for: colorScheme,
                         increasedContrast: increasedContrast
                     ))
+                    .accessibilityHidden(true)
 
                 Text(presentation.statusTitle)
                     .font(.headline.weight(.heavy))
@@ -213,8 +233,11 @@ struct PetView: View {
                     .font(.caption.weight(.bold))
                     .foregroundStyle(statusAccent)
                     .lineLimit(1)
+                    .accessibilityHidden(true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(heroAccessibilityLabel)
         }
         .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
         .padding(10)
@@ -222,6 +245,20 @@ struct PetView: View {
         .overlay(panelBorder)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .animation(semanticAnimation, value: presentation.transitionIdentity)
+    }
+
+    private var heroAccessibilityLabel: String {
+        var parts = ["状态：\(presentation.statusTitle)"]
+        if let projectName = presentation.recentProjectName {
+            parts.append("最近项目：\(projectName)")
+        }
+        if presentation.focusCount > 0 {
+            parts.append("专注：\(presentation.focusCountText)")
+        }
+        if presentation.completionCount > 0 {
+            parts.append("完成：\(presentation.completionCountText)")
+        }
+        return parts.joined(separator: "，")
     }
 
     @ViewBuilder
@@ -316,19 +353,49 @@ struct PetView: View {
                     )
                 )
             )
+            .accessibilityLabel(statusButtonAccessibilityLabel(for: status))
             .accessibilityAddTraits(
                 viewModel.selectedStatus == status ? .isSelected : []
             )
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(statusButtonAccessibilityHint(for: status))
+            .focused($focusedField, equals: .statusButton(status))
         }
 
         if dynamicTypeSize.isAccessibilitySize {
             VStack(spacing: 8) {
                 buttons
             }
+            .accessibilityLabel("状态选择")
         } else {
             HStack(spacing: 8) {
                 buttons
             }
+            .accessibilityLabel("状态选择")
+        }
+    }
+
+    private func statusButtonAccessibilityLabel(for status: PetStatus) -> String {
+        switch status {
+        case .idle:
+            return "待机状态"
+        case .focusing:
+            return "专注中状态"
+        case .completedOnce:
+            return "完成一次状态"
+        }
+    }
+
+    private func statusButtonAccessibilityHint(for status: PetStatus) -> String {
+        let isSelected = viewModel.selectedStatus == status
+        let selectionState = isSelected ? "当前已选中" : "轻点切换到此状态"
+        switch status {
+        case .idle:
+            return "\(selectionState)。TinyBuddy 处于待机模式。"
+        case .focusing:
+            return "\(selectionState)。标记为专注中。"
+        case .completedOnce:
+            return "\(selectionState)。标记为已完成一次。"
         }
     }
 
@@ -420,7 +487,7 @@ private struct UnifiedDisplayStateView: View {
                     .foregroundStyle(accent)
                     .opacity(presentation.isRefreshing ? 1 : 0)
                     .accessibilityHidden(presentation.isRefreshing == false)
-                    .accessibilityLabel("数据正在刷新")
+                    .accessibilityLabel(presentation.isRefreshing ? "数据正在刷新" : "")
             }
 
             if layout.showsMessage {
@@ -437,7 +504,9 @@ private struct UnifiedDisplayStateView: View {
                         .buttonStyle(.borderless)
                         .font(.caption.weight(.bold))
                         .foregroundStyle(accent)
+                        .accessibilityLabel(actionTitle)
                         .accessibilityHint(presentation.message)
+                        .accessibilityAddTraits(.isButton)
                 }
 
                 Spacer(minLength: 0)
@@ -448,11 +517,13 @@ private struct UnifiedDisplayStateView: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(secondaryText)
                         .lineLimit(1)
+                        .accessibilityLabel("数据日期：\(dataDateText)")
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 

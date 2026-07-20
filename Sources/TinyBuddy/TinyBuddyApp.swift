@@ -381,6 +381,12 @@ struct WindowConfigurator: NSViewRepresentable {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.contentView?.layoutSubtreeIfNeeded()
 
+        // Accessibility: ensure the HUD window is recognized as a panel
+        window.setAccessibilityRole(.popover)
+        window.setAccessibilitySubrole(.unknown)
+        window.setAccessibilityLabel("TinyBuddy 状态面板")
+        window.setAccessibilityHelp("显示当前的 Git 活动状态和宠物情绪")
+
         let targetSize = NSSize(width: fixedWidth, height: fixedHeight)
 
         if window.contentLayoutRect.size != targetSize {

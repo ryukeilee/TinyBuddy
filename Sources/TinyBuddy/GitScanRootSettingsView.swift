@@ -107,10 +107,13 @@ struct GitScanRootSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Git 扫描目录")
                     .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Text("TinyBuddy 仅扫描你在此授权的目录中的 Git 元数据。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Git 扫描目录设置。TinyBuddy 仅扫描你在此授权的目录中的 Git 元数据。")
 
             Group {
                 if viewModel.authorizations.isEmpty {
@@ -134,6 +137,7 @@ struct GitScanRootSettingsView: View {
                 } label: {
                     Label("添加 Git 目录", systemImage: "plus")
                 }
+                .accessibilityHint("打开文件选择器，选择一个或多个开发目录进行授权")
 
                 Spacer()
 
@@ -141,9 +145,12 @@ struct GitScanRootSettingsView: View {
                     viewModel.removeAllAuthorizations()
                 }
                 .disabled(viewModel.authorizations.isEmpty)
+                .accessibilityLabel("移除全部授权目录")
+                .accessibilityHint("移除所有已授权的 Git 扫描目录")
             }
 
             Divider()
+                .accessibilityHidden(true)
 
             Toggle(isOn: Binding(
                 get: { TinyBuddyLoginItemManager.shared.isEnabled },
@@ -164,6 +171,7 @@ struct GitScanRootSettingsView: View {
                 }
             }
             .toggleStyle(.switch)
+            .accessibilityHint("启用后，TinyBuddy 会在你登录 macOS 时自动启动")
         }
         .frame(minWidth: 560, minHeight: 380)
         .scenePadding()
@@ -175,6 +183,7 @@ struct GitScanRootSettingsView: View {
             Image(systemName: stateSymbol(for: authorization.state))
                 .foregroundStyle(stateColor(for: authorization.state))
                 .frame(width: 18)
+                .accessibilityLabel(stateSymbolAccessibilityLabel(for: authorization.state))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(authorization.displayName)
@@ -188,6 +197,8 @@ struct GitScanRootSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(stateColor(for: authorization.state))
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(authorizationRowAccessibilityLabel(for: authorization))
 
             Spacer(minLength: 12)
 
@@ -195,14 +206,40 @@ struct GitScanRootSettingsView: View {
                 Button("重新授权") {
                     viewModel.requestReauthorization(for: authorization.id)
                 }
+                .accessibilityLabel("重新授权「\(authorization.displayName)」")
+                .accessibilityHint("重新选择该目录以刷新授权")
 
                 Button("移除", role: .destructive) {
                     viewModel.removeAuthorization(id: authorization.id)
                 }
+                .accessibilityLabel("移除「\(authorization.displayName)」")
+                .accessibilityHint("从授权列表中移除该目录")
             }
             .controlSize(.small)
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(authorizationRowAccessibilityLabel(for: authorization))
+    }
+
+    private func authorizationRowAccessibilityLabel(for authorization: GitScanRootAuthorization) -> String {
+        let stateText: String
+        switch authorization.state {
+        case .available:
+            stateText = "可用"
+        case .unavailable(let reason):
+            stateText = "不可用：\(localizedReason(for: reason))"
+        }
+        return "\(authorization.displayName)，\(authorization.lastKnownPath)，状态：\(stateText)"
+    }
+
+    private func stateSymbolAccessibilityLabel(for state: GitScanRootAuthorizationState) -> String {
+        switch state {
+        case .available:
+            return "授权可用"
+        case .unavailable:
+            return "授权不可用"
+        }
     }
 
     private func stateSymbol(for state: GitScanRootAuthorizationState) -> String {
