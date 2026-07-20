@@ -151,6 +151,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var configStore = TinyBuddyConfigStore()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // === Single-instance enforcement ===
+        //
+        // Attempt to become the primary instance. If another instance is already
+        // running, we send a wake request and exit immediately without creating
+        // any timers, monitors, Git subprocesses, or writing any shared state.
+        let coordinator = TinyBuddyInstanceCoordinator.shared
+        let role = coordinator.claimInstance { [weak self] in
+            // A secondary requested wake — trigger a reopen refresh.
+            self?.gitActivityRefreshCoordinator.handleReopen()
+        }
+
+        guard role == .primary else {
+            coordinator.wakePrimaryInstance()
+            // Exit immediately. No resources have been created because lazy
+            // property initialization only happens when first accessed. The
+            // existing primary instance owns all timers, monitors, and state.
+            Darwin.exit(0)
+        }
+
         NSApp.setActivationPolicy(.accessory)
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
@@ -181,6 +200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Relinquish primary instance ownership so the next launch can claim it.
+        TinyBuddyInstanceCoordinator.shared.relinquishOwnership()
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()
         hudVisibilityMonitor.stop()

@@ -162,8 +162,12 @@ public final class TinyBuddyCombinedSnapshotStore {
     private let synchronizeWrites: () -> Bool
     private let readFailureProvider: () -> TinyBuddySharedSnapshotReason?
 
-    // The app is the only semantic writer. This lock also serializes migration and
-    // repair inside that process. WidgetKit uses repairOnLoad=false and stays read-only.
+    // The main app is the only semantic writer, enforced by the cross-process
+    // TinyBuddyInstanceCoordinator (flock-based exclusive lock in the App Group
+    // container). Only the primary instance may call updatePetSlice or
+    // updateActivitySlice. This process-local writerLock serializes migration
+    // and repair within that single process. WidgetKit uses repairOnLoad=false
+    // and stays read-only; it never writes through this store.
     private static let writerLock = NSLock()
 
     // Write-failure cooldown prevents pointless retries when storage is full or
