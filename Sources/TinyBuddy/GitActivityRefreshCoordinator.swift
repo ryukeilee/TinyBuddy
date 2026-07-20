@@ -282,6 +282,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let cancelScript: () -> Void
     private let scriptURLProvider: ScriptURLProvider
     private let authorizedRootsProvider: AuthorizedRootsProvider
+    private let gitCommandExecutor: GitCommandExecutor?
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let monotonicTimeProvider: () -> TimeInterval
     private let powerStateProvider: PowerStateProvider
@@ -376,6 +377,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         statusNotificationCenter: NotificationCenter = .default,
         diagnosticRecorder: @escaping DiagnosticRecorder = GitActivityRefreshCoordinator.logDiagnostic(_:trigger:),
         sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared,
+        gitCommandExecutor: GitCommandExecutor? = nil,
         wakeRefreshCoalescingInterval: TimeInterval = 5,
         immediateRefreshCoalescingInterval: TimeInterval = 5,
         repositoryChangeDebounceInterval: TimeInterval = 5,
@@ -404,9 +406,15 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         self.scriptURLProvider = scriptURLProvider
         if let scriptRunner {
             self.scriptRunner = scriptRunner
-            self.cancelScript = cancelScript
+            let originalCancel = cancelScript
+            let executor = gitCommandExecutor
+            self.cancelScript = {
+                executor?.cancelAll()
+                originalCancel()
+            }
         } else {
             let executionController = GitRefreshScriptExecutionController()
+            let executor = gitCommandExecutor
             self.scriptRunner = { scriptURL, rootURLs, timeContext, timeScopeLease in
                 try GitActivityRefreshCoordinator.runScript(
                     at: scriptURL,
@@ -416,8 +424,12 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                     executionController: executionController
                 )
             }
-            self.cancelScript = executionController.cancel
+            self.cancelScript = {
+                executor?.cancelAll()
+                executionController.cancel()
+            }
         }
+        self.gitCommandExecutor = gitCommandExecutor
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
         self.timeEnvironment = resolvedTimeEnvironment
         self.monotonicTimeProvider = monotonicTimeProvider
