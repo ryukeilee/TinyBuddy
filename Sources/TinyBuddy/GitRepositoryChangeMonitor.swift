@@ -16,12 +16,18 @@ protocol GitRepositoryChangeEventStream: AnyObject {
     func invalidate()
 }
 
+struct GitRepositoryChangeImpact: Equatable, Sendable {
+    let requiresRepositoryDiscoveryRescan: Bool
+    let affectedRootPaths: [String]
+}
+
 final class GitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
     typealias AuthorizedRootsProvider = () -> GitScanRootAccessResult
     typealias EventStreamFactory = (
         _ watchedPaths: [String],
         _ handleEventPaths: @escaping ([String]) -> Void
     ) -> GitRepositoryChangeEventStream?
+    typealias ChangeHandler = (GitRepositoryChangeImpact) -> Void
 
     private struct ActiveResources {
         let stream: GitRepositoryChangeEventStream
@@ -30,13 +36,13 @@ final class GitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
 
     private let authorizedRootsProvider: AuthorizedRootsProvider
     private let eventStreamFactory: EventStreamFactory
-    private let changeHandler: () -> Void
+    private let changeHandler: ChangeHandler
     private let stateLock = NSLock()
     private var activeResources: ActiveResources?
 
     init(
         authorizedRootsProvider: @escaping AuthorizedRootsProvider,
-        changeHandler: @escaping () -> Void,
+        changeHandler: @escaping ChangeHandler,
         eventStreamFactory: @escaping EventStreamFactory = GitRepositoryChangeMonitor.makeFSEventStream
     ) {
         self.authorizedRootsProvider = authorizedRootsProvider
@@ -120,7 +126,13 @@ final class GitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
 
     static func isRelevantGitMetadataChange(path: String) -> Bool {
         let components = URL(fileURLWithPath: path).pathComponents
-        guard let gitDirectoryIndex = components.lastIndex(of: ".git") else {
+        if components.last == ".gitmodules" {
+            return true
+        }
+
+        guard let gitDirectoryIndex = components.lastIndex(where: {
+            $0 == ".git" || ($0.hasSuffix(".git") && $0.count > ".git".count)
+        }) else {
             return false
         }
 
@@ -136,13 +148,62 @@ final class GitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
             || firstMetadataComponent.hasPrefix("HEAD.")
             || firstMetadataComponent == "index"
             || firstMetadataComponent.hasPrefix("index.")
+            || firstMetadataComponent == "config"
+            || firstMetadataComponent.hasPrefix("config.")
+    }
+
+    static func requiresRepositoryDiscoveryRescan(path: String) -> Bool {
+        let components = URL(fileURLWithPath: path).pathComponents
+        if components.last == ".gitmodules" || components.last == ".git" {
+            return true
+        }
+
+        guard let gitDirectoryIndex = components.lastIndex(where: {
+            $0 == ".git" || ($0.hasSuffix(".git") && $0.count > ".git".count)
+        }) else {
+            return false
+        }
+        let metadataComponents = components.dropFirst(gitDirectoryIndex + 1)
+        guard let firstMetadataComponent = metadataComponents.first else {
+            return true
+        }
+        return firstMetadataComponent == "config"
+            || firstMetadataComponent.hasPrefix("config.")
     }
 
     private func handle(eventPaths: [String]) {
-        guard eventPaths.contains(where: Self.isRelevantGitMetadataChange(path:)) else {
+        let relevantPaths = eventPaths.filter(Self.isRelevantGitMetadataChange(path:))
+        guard !relevantPaths.isEmpty else {
             return
         }
-        changeHandler()
+        let requiresDiscoveryRescan = relevantPaths.contains(
+            where: Self.requiresRepositoryDiscoveryRescan(path:)
+        )
+        let watchedRoots: [String]
+        stateLock.lock()
+        watchedRoots = activeResources?.roots.map { $0.url.standardizedFileURL.path } ?? []
+        stateLock.unlock()
+        let affectedRoots = requiresDiscoveryRescan
+            ? Self.affectedRootPaths(for: relevantPaths, watchedRoots: watchedRoots)
+            : []
+        changeHandler(GitRepositoryChangeImpact(
+            requiresRepositoryDiscoveryRescan: requiresDiscoveryRescan,
+            affectedRootPaths: affectedRoots
+        ))
+    }
+
+    static func affectedRootPaths(for eventPaths: [String], watchedRoots: [String]) -> [String] {
+        var affected = Set<String>()
+        for eventPath in eventPaths {
+            let normalizedEventPath = URL(fileURLWithPath: eventPath).standardizedFileURL.path
+            if let root = watchedRoots
+                .map({ URL(fileURLWithPath: $0).standardizedFileURL.path })
+                .filter({ normalizedEventPath == $0 || normalizedEventPath.hasPrefix($0 + "/") })
+                .max(by: { $0.count < $1.count }) {
+                affected.insert(root)
+            }
+        }
+        return affected.sorted()
     }
 
     private static func stopAccessing(_ roots: [ScopedGitScanRoot]) {

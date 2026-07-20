@@ -38,6 +38,18 @@ final class TinyBuddyAppConfigTests: XCTestCase {
         XCTAssertNotEqual(a, b)
     }
 
+    func testExclusionPatternNormalizationRejectsAuthorizationEscapesAndGlobs() {
+        XCTAssertEqual(
+            TinyBuddyExclusionRule.normalizedPattern(" ./Teams/Private/ "),
+            "Teams/Private"
+        )
+        XCTAssertEqual(TinyBuddyExclusionRule.normalizedPattern("Archived"), "Archived")
+        XCTAssertNil(TinyBuddyExclusionRule.normalizedPattern("../Outside"))
+        XCTAssertNil(TinyBuddyExclusionRule.normalizedPattern("/Absolute"))
+        XCTAssertNil(TinyBuddyExclusionRule.normalizedPattern("Team/*"))
+        XCTAssertNil(TinyBuddyExclusionRule.normalizedPattern("Team//Private"))
+    }
+
     func testDictionaryRoundTrip() {
         let original = TinyBuddyAppConfig(
             configVersion: 42,

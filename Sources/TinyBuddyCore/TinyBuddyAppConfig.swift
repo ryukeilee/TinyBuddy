@@ -62,6 +62,30 @@ public struct TinyBuddyExclusionRule: Codable, Sendable, Equatable, Identifiable
         self.id = id
         self.pattern = pattern
     }
+
+    public static func normalizedPattern(_ rawPattern: String) -> String? {
+        var pattern = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        while pattern.hasPrefix("./") {
+            pattern.removeFirst(2)
+        }
+        while pattern.count > 1, pattern.hasSuffix("/") {
+            pattern.removeLast()
+        }
+        guard !pattern.isEmpty,
+              !pattern.hasPrefix("/"),
+              !pattern.contains("//"),
+              !pattern.contains("\t"),
+              !pattern.contains("\r"),
+              !pattern.contains("\n"),
+              !pattern.contains(where: { "*?[]".contains($0) }) else {
+            return nil
+        }
+        let components = pattern.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.allSatisfy({ $0 != "." && $0 != ".." && !$0.isEmpty }) else {
+            return nil
+        }
+        return pattern
+    }
 }
 
 extension TinyBuddyAppConfig {

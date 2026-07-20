@@ -182,17 +182,21 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     typealias ScriptRunner = @Sendable (
         URL,
         [URL],
+        [String],
+        [String],
         TinyBuddyTimeContext,
         GitRefreshTimeScopeLease
     ) throws -> GitRefreshScriptResult
     typealias ScriptURLProvider = () -> URL?
     typealias AuthorizedRootsProvider = () -> GitScanRootAccessResult
+    typealias ExclusionRulesProvider = () -> [String]
     typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
     typealias TimeScopePublisher = (String) -> URL?
     typealias ActivityCommitHook = () -> Void
     typealias PowerStateProvider = () -> TinyBuddyPowerState
+    typealias RepositoryDiscoveryCacheInvalidator = () -> Void
     typealias RepositoryChangeMonitorFactory = (
-        _ changeHandler: @escaping () -> Void
+        _ changeHandler: @escaping (GitRepositoryChangeImpact) -> Void
     ) -> GitRepositoryChangeMonitoring
 
     private enum PendingRefreshKind: Int {
@@ -282,6 +286,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let cancelScript: () -> Void
     private let scriptURLProvider: ScriptURLProvider
     private let authorizedRootsProvider: AuthorizedRootsProvider
+    private let exclusionRulesProvider: ExclusionRulesProvider
     private let gitCommandExecutor: GitCommandExecutor?
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let monotonicTimeProvider: () -> TimeInterval
@@ -289,6 +294,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let timeScopePublisher: TimeScopePublisher
     private let beforeActivityCommit: ActivityCommitHook
     private let repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory?
+    private let repositoryDiscoveryCacheInvalidator: RepositoryDiscoveryCacheInvalidator
     private let workspaceNotificationCenter: NotificationCenter
     private let statusNotificationCenter: NotificationCenter
     private let diagnosticRecorder: DiagnosticRecorder
@@ -328,6 +334,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         isLowPowerModeEnabled: false
     )
     private var isRefreshing = false
+    private var repositoryDiscoveryRescanPending = false
+    private var repositoryDiscoveryInvalidatedRootPaths = Set<String>()
     private var isPeriodicRefreshSuspended = false
     private var scheduledRefreshInterval: TimeInterval?
     private var unchangedRefreshStreak = 0
@@ -362,6 +370,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         scriptRunner: ScriptRunner? = nil,
         cancelScript: @escaping () -> Void = {},
         authorizedRootsProvider: AuthorizedRootsProvider? = nil,
+        exclusionRulesProvider: @escaping ExclusionRulesProvider = { [] },
         timeEnvironment: TinyBuddyTimeEnvironment? = nil,
         dateProvider: @escaping () -> Date = Date.init,
         monotonicTimeProvider: @escaping () -> TimeInterval = {
@@ -373,6 +382,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         timeScopePublisher: TimeScopePublisher? = nil,
         beforeActivityCommit: @escaping ActivityCommitHook = {},
         repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory? = nil,
+        repositoryDiscoveryCacheInvalidator: @escaping RepositoryDiscoveryCacheInvalidator = GitActivityRefreshCoordinator.invalidateRepositoryDiscoveryCache,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         statusNotificationCenter: NotificationCenter = .default,
         diagnosticRecorder: @escaping DiagnosticRecorder = GitActivityRefreshCoordinator.logDiagnostic(_:trigger:),
@@ -415,10 +425,12 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         } else {
             let executionController = GitRefreshScriptExecutionController()
             let executor = gitCommandExecutor
-            self.scriptRunner = { scriptURL, rootURLs, timeContext, timeScopeLease in
+            self.scriptRunner = { scriptURL, rootURLs, exclusions, invalidatedRoots, timeContext, timeScopeLease in
                 try GitActivityRefreshCoordinator.runScript(
                     at: scriptURL,
                     scanningRoots: rootURLs,
+                    excluding: exclusions,
+                    invalidatingDiscoveryUnder: invalidatedRoots,
                     timeContext: timeContext,
                     timeScopeLease: timeScopeLease,
                     executionController: executionController
@@ -431,6 +443,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         }
         self.gitCommandExecutor = gitCommandExecutor
         self.authorizedRootsProvider = authorizedRootsProvider ?? gitScanRootStore.accessAuthorizedRootResult
+        self.exclusionRulesProvider = exclusionRulesProvider
         self.timeEnvironment = resolvedTimeEnvironment
         self.monotonicTimeProvider = monotonicTimeProvider
         self.powerStateProvider = powerStateProvider
@@ -438,6 +451,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             ?? GitActivityRefreshCoordinator.publishTimeScopeToken
         self.beforeActivityCommit = beforeActivityCommit
         self.repositoryChangeMonitorFactory = repositoryChangeMonitorFactory
+        self.repositoryDiscoveryCacheInvalidator = repositoryDiscoveryCacheInvalidator
         self.workspaceNotificationCenter = workspaceNotificationCenter
         self.statusNotificationCenter = statusNotificationCenter
         self.diagnosticRecorder = diagnosticRecorder
@@ -643,11 +657,15 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         _ = refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
     }
 
-    func handleRepositoryContentsChanged() {
+    func handleRepositoryContentsChanged(impact: GitRepositoryChangeImpact? = nil) {
         guard currentCadence.allowsRepositoryEventListening else {
             return
         }
 
+        if let impact, impact.requiresRepositoryDiscoveryRescan {
+            repositoryDiscoveryRescanPending = true
+            repositoryDiscoveryInvalidatedRootPaths.formUnion(impact.affectedRootPaths)
+        }
         unchangedRefreshStreak = 0
         repositoryChangeDebounceTimer?.invalidate()
         let debounceTimer = Timer(timeInterval: repositoryChangeDebounceInterval, repeats: false) {
@@ -1150,6 +1168,13 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             return false
         }
 
+        let invalidatedRootPaths = repositoryDiscoveryInvalidatedRootPaths.sorted()
+        if repositoryDiscoveryRescanPending && invalidatedRootPaths.isEmpty {
+            repositoryDiscoveryCacheInvalidator()
+        }
+        repositoryDiscoveryRescanPending = false
+        repositoryDiscoveryInvalidatedRootPaths.removeAll()
+
         isPeriodicRefreshSuspended = false
         isRefreshing = true
         timer?.invalidate()
@@ -1168,6 +1193,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             token: currentTimeScopeToken,
             fileURL: currentTimeScopeFileURL
         )
+        let exclusionRules = exclusionRulesProvider()
 
         refreshQueue.async { [weak self] in
             var didStopAccessingRoots = false
@@ -1181,6 +1207,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                 let result = try scriptRunner(
                     scriptURL,
                     authorizedRootURLs,
+                    exclusionRules,
+                    invalidatedRootPaths,
                     timeContext,
                     timeScopeLease
                 )
@@ -1755,9 +1783,9 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             return
         }
         if repositoryChangeMonitor == nil {
-            repositoryChangeMonitor = repositoryChangeMonitorFactory { [weak self] in
+            repositoryChangeMonitor = repositoryChangeMonitorFactory { [weak self] impact in
                 DispatchQueue.main.async { [weak self] in
-                    self?.handleRepositoryContentsChanged()
+                    self?.handleRepositoryContentsChanged(impact: impact)
                 }
             }
         }
@@ -2148,9 +2176,37 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         }
     }
 
+    static func invalidateRepositoryDiscoveryCache() {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: TinyBuddySharedData.appGroupIdentifier
+        ) else {
+            return
+        }
+        let cacheDirectory = containerURL
+            .appendingPathComponent("Library/Preferences", isDirectory: true)
+            .appendingPathComponent(".tinybuddy-git-repository-cache", isDirectory: true)
+        invalidateRepositoryDiscoveryCache(at: cacheDirectory)
+    }
+
+    static func invalidateRepositoryDiscoveryCache(
+        at cacheDirectory: URL,
+        fileManager: FileManager = .default
+    ) {
+        for fileName in [
+            "repositories.txt",
+            "authorized-roots.txt",
+            "authorized-roots.signature",
+            "excluded-paths.txt"
+        ] {
+            try? fileManager.removeItem(at: cacheDirectory.appendingPathComponent(fileName))
+        }
+    }
+
     private static func runScript(
         at scriptURL: URL,
         scanningRoots rootURLs: [URL],
+        excluding exclusionRules: [String],
+        invalidatingDiscoveryUnder invalidatedRootPaths: [String],
         timeContext: TinyBuddyTimeContext,
         timeScopeLease: GitRefreshTimeScopeLease,
         executionController: GitRefreshScriptExecutionController
@@ -2188,6 +2244,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         environment["TINYBUDDY_GIT_SCAN_ROOTS"] = rootURLs
             .map(\.standardizedFileURL.path)
             .joined(separator: "\n")
+        environment["TINYBUDDY_GIT_EXCLUDED_PATHS"] = exclusionRules.joined(separator: "\n")
+        environment["TINYBUDDY_GIT_INVALIDATED_ROOTS"] = invalidatedRootPaths.joined(separator: "\n")
         if let appGroupContainerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: TinyBuddySharedData.appGroupIdentifier
         ) {

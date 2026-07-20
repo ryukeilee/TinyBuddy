@@ -94,6 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         combinedSnapshotStore: combinedSnapshotStore,
         refreshStatusStore: refreshStatusStore,
         gitScanRootStore: gitScanRootAuthorizationStore,
+        exclusionRulesProvider: { [configStore] in
+            configStore.load()?.exclusionRules.map(\.pattern) ?? []
+        },
         timeEnvironment: timeEnvironment,
         repositoryChangeMonitorFactory: { [gitScanRootAuthorizationStore] changeHandler in
             GitRepositoryChangeMonitor(
@@ -191,9 +194,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 forName: .tinyBuddySettingsDidChange,
                 object: nil,
                 queue: .main
-            ) { [weak self] _ in
+            ) { [weak self] notification in
                 Task { @MainActor [weak self] in
-                    self?.configCoordinator.proposeScanRootsChange()
+                    if notification.userInfo?[GitScanRootAuthorizationCommand.exclusionsDidChangeKey] as? Bool == true {
+                        self?.configCoordinator.reloadPersistedConfig()
+                    } else {
+                        self?.configCoordinator.proposeScanRootsChange()
+                    }
                 }
             }
         )

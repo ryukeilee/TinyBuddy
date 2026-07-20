@@ -660,6 +660,317 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
     }
 
+    func testScriptDiscoversBareRepositoryWithoutDotGitEntry() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeBareRepository(atRelativePath: "Archives/ProjectBare.git")
+        try harness.writeHeadReflog(
+            at: repoURL.appendingPathComponent("logs/HEAD"),
+            lines: [harness.reflogLine(daysOffset: 0, hour: 15, minute: 5, message: "commit: bare")]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBare.git")
+    }
+
+    func testScriptHonorsConfiguredRepositoryScanDepth() throws {
+        let harness = try ScriptHarness()
+        let visibleRepo = try harness.makeRepository(atRelativePath: "one/two/Visible")
+        let hiddenRepo = try harness.makeRepository(atRelativePath: "one/two/three/Hidden")
+        try harness.writeHeadReflog(
+            for: visibleRepo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: visible")]
+        )
+        try harness.writeHeadReflog(
+            for: hiddenRepo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 5, message: "commit: hidden")]
+        )
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_SCAN_MAX_DEPTH": "3"]
+        )
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "Visible")
+    }
+
+    func testMonorepoAndNestedRepositoryAreIndependentWithoutDuplicatingPlainPackages() throws {
+        let harness = try ScriptHarness()
+        let monorepo = try harness.makeRepository(named: "Monorepo")
+        let nested = try harness.makeRepository(atRelativePath: "Monorepo/Services/Independent")
+        try harness.fileManager.createDirectory(
+            at: monorepo.appendingPathComponent("Packages/PlainPackage", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try harness.writeHeadReflog(
+            for: monorepo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: monorepo")]
+        )
+        try harness.writeHeadReflog(
+            for: nested,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 35, message: "commit: nested")]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual((try harness.readPreferencesPlist())["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+    }
+
+    func testExplicitExclusionPrunesNestedRepositoryAndInvalidatesDiscoveryCache() throws {
+        let harness = try ScriptHarness()
+        let included = try harness.makeRepository(named: "Included")
+        let excluded = try harness.makeRepository(atRelativePath: "Teams/Private/Excluded")
+        try harness.writeHeadReflog(
+            for: included,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: included")]
+        )
+        try harness.writeHeadReflog(
+            for: excluded,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 5, message: "commit: excluded")]
+        )
+
+        let initial = try harness.run(scanRoots: [harness.scanRootURL])
+        XCTAssertEqual(try XCTUnwrap(harness.metrics(from: initial.standardOutput))["repository_count"], "2")
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_EXCLUDED_PATHS": "Teams/Private"]
+        )
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["cache_hit_count"], "1")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "0")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "Included")
+        XCTAssertFalse(try String(contentsOf: harness.repositoryCacheFileURL).contains("Excluded"))
+    }
+
+    func testDiscoveryEventRescansOnlyAffectedAuthorizedRootAndRetainsOtherStats() throws {
+        let harness = try ScriptHarness()
+        let rootA = harness.scanRootURL.appendingPathComponent("RootA", isDirectory: true)
+        let rootB = harness.scanRootURL.appendingPathComponent("RootB", isDirectory: true)
+        let repoA = try harness.makeRepository(atRelativePath: "RootA/ExistingA")
+        let repoB = try harness.makeRepository(atRelativePath: "RootB/ExistingB")
+        try harness.writeHeadReflog(
+            for: repoA,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: a")]
+        )
+        try harness.writeHeadReflog(
+            for: repoB,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 35, message: "commit: b")]
+        )
+        let findProbe = try harness.makeFindProbe()
+        let environment = ["TINYBUDDY_FIND_BIN": findProbe.scriptURL.path]
+        XCTAssertEqual(try harness.run(scanRoots: [rootA, rootB], extraEnvironment: environment).exitCode, 0)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+
+        let newRepoA = try harness.makeRepository(atRelativePath: "RootA/NewA")
+        try harness.writeHeadReflog(
+            for: newRepoA,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 5, message: "commit: new a")]
+        )
+        let result = try harness.run(
+            scanRoots: [rootA, rootB],
+            extraEnvironment: [
+                "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path,
+                "TINYBUDDY_GIT_INVALIDATED_ROOTS": rootA.path
+            ]
+        )
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 3)
+        XCTAssertEqual(metrics["repository_count"], "3")
+        XCTAssertEqual(metrics["cache_hit_count"], "2")
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+        XCTAssertEqual((try harness.readPreferencesPlist())["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
+    }
+
+    func testRepositoryRenameReplacesAffectedDiscoveryRecordWithoutDuplicateCount() throws {
+        let harness = try ScriptHarness()
+        let original = try harness.makeRepository(named: "OriginalName")
+        try harness.writeHeadReflog(
+            for: original,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: stable")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+
+        let renamed = harness.scanRootURL.appendingPathComponent("RenamedProject", isDirectory: true)
+        try harness.fileManager.moveItem(at: original, to: renamed)
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_INVALIDATED_ROOTS": harness.scanRootURL.path]
+        )
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+        let cache = try String(contentsOf: harness.repositoryCacheFileURL, encoding: .utf8)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual((try harness.readPreferencesPlist())["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertTrue(cache.contains("RenamedProject"))
+        XCTAssertFalse(cache.contains("OriginalName"))
+    }
+
+    func testExplicitDiscoveryInvalidationPublishesVerifiedEmptyResultAfterLastRepositoryDeletion() throws {
+        let harness = try ScriptHarness()
+        let repo = try harness.makeRepository(named: "DeletedProject")
+        try harness.writeHeadReflog(
+            for: repo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: deleted")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+        try harness.fileManager.removeItem(at: repo)
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_INVALIDATED_ROOTS": harness.scanRootURL.path]
+        )
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "0")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 0)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "")
+        XCTAssertEqual(try String(contentsOf: harness.repositoryCacheFileURL, encoding: .utf8), "")
+    }
+
+    func testDiscoveryInvalidationOutsideAuthorizationFailsClosedWithoutPathDisclosure() throws {
+        let harness = try ScriptHarness()
+        let repo = try harness.makeRepository(named: "Valid")
+        try harness.writeHeadReflog(
+            for: repo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: valid")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+        let original = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+        let outside = harness.rootURL.appendingPathComponent("NotAuthorized")
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_INVALIDATED_ROOTS": outside.path]
+        )
+
+        XCTAssertEqual(result.exitCode, 64)
+        XCTAssertFalse(result.standardError.contains(outside.path))
+        XCTAssertEqual(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
+            original
+        )
+    }
+
+    func testInvalidExplicitExclusionFailsClosedWithoutReplacingSnapshot() throws {
+        let harness = try ScriptHarness()
+        let repo = try harness.makeRepository(named: "Included")
+        try harness.writeHeadReflog(
+            for: repo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: included")]
+        )
+        XCTAssertEqual(try harness.run(scanRoots: [harness.scanRootURL]).exitCode, 0)
+        let originalSnapshot = try XCTUnwrap(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String
+        )
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_EXCLUDED_PATHS": "../OutsideAuthorization"]
+        )
+
+        XCTAssertEqual(result.exitCode, 64)
+        XCTAssertFalse(result.standardError.contains("OutsideAuthorization"))
+        XCTAssertEqual(
+            (try harness.readPreferencesPlist())[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
+            originalSnapshot
+        )
+    }
+
+    func testRepositoryRootSymlinkInsideAuthorizationIsResolvedWithoutFollowingDirectoryTree() throws {
+        let harness = try ScriptHarness()
+        let target = try harness.makeRepository(atRelativePath: "Storage/Deep/LinkedRepository")
+        try harness.writeHeadReflog(
+            for: target,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 11, minute: 5, message: "commit: linked")]
+        )
+        try harness.fileManager.createSymbolicLink(
+            at: harness.scanRootURL.appendingPathComponent("LinkedAlias"),
+            withDestinationURL: target
+        )
+
+        let result = try harness.run(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_SCAN_MAX_DEPTH": "1"]
+        )
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual((try harness.readPreferencesPlist())["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+    }
+
+    func testSymbolicLinkCycleIsIsolatedWithoutBlockingValidRepository() throws {
+        let harness = try ScriptHarness()
+        let repo = try harness.makeRepository(named: "Valid")
+        try harness.writeHeadReflog(
+            for: repo,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: valid")]
+        )
+        let cycleA = harness.scanRootURL.appendingPathComponent("CycleA")
+        let cycleB = harness.scanRootURL.appendingPathComponent("CycleB")
+        try harness.fileManager.createSymbolicLink(at: cycleA, withDestinationURL: cycleB)
+        try harness.fileManager.createSymbolicLink(at: cycleB, withDestinationURL: cycleA)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["invalid_repository_count"], "0")
+    }
+
+    func testIncompleteInitializedRepositoryIsIsolatedFromValidRepository() throws {
+        let harness = try ScriptHarness()
+        let valid = try harness.makeRepository(named: "Valid")
+        try harness.writeHeadReflog(
+            for: valid,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: valid")]
+        )
+        let incompleteGit = harness.scanRootURL
+            .appendingPathComponent("Incomplete/.git", isDirectory: true)
+        try harness.fileManager.createDirectory(at: incompleteGit, withIntermediateDirectories: true)
+        try "ref: refs/heads/main\n".write(
+            to: incompleteGit.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(metrics["invalid_repository_count"], "1")
+        XCTAssertEqual(metrics["refresh_outcome"], "partial")
+        XCTAssertFalse(result.standardError.contains("Incomplete"))
+    }
+
     func testScriptRewritesNumericStringsBackToIntegerSharedData() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectAlpha")
@@ -1715,6 +2026,28 @@ private final class ScriptHarness {
         try fileManager.createDirectory(at: gitLogsURL, withIntermediateDirectories: true)
         try "ref: refs/heads/main\n".write(
             to: gitDirectoryURL.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        return repoURL
+    }
+
+    func makeBareRepository(atRelativePath relativePath: String) throws -> URL {
+        let repoURL = scanRootURL.appendingPathComponent(relativePath, isDirectory: true)
+        try fileManager.createDirectory(
+            at: repoURL.appendingPathComponent("logs", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: repoURL.appendingPathComponent("objects", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: repoURL.appendingPathComponent("refs", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try "ref: refs/heads/main\n".write(
+            to: repoURL.appendingPathComponent("HEAD"),
             atomically: true,
             encoding: .utf8
         )

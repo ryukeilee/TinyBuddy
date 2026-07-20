@@ -27,6 +27,22 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
             date: "2024-01-15T09:35:00Z"
         )
 
+        let secondWorktree = fixture.scanRootURL.appendingPathComponent(
+            "ProjectAlpha-review",
+            isDirectory: true
+        )
+        try fixture.git(
+            in: repository,
+            ["worktree", "add", "-b", "review", secondWorktree.path, "HEAD"]
+        )
+        try fixture.commit(
+            in: secondWorktree,
+            file: "review.txt",
+            contents: "review\n",
+            message: "review work",
+            date: "2024-01-15T10:05:00Z"
+        )
+
         let symlinkRoot = fixture.rootURL.appendingPathComponent("scan-root-link", isDirectory: true)
         try fixture.fileManager.createSymbolicLink(at: symlinkRoot, withDestinationURL: fixture.scanRootURL)
 
@@ -42,8 +58,8 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
 
         XCTAssertEqual(firstMetrics["authorized_root_count"], "1")
         XCTAssertEqual(firstMetrics["repository_count"], "1")
-        XCTAssertEqual(firstPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
-        XCTAssertEqual(firstPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(firstPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
+        XCTAssertEqual(firstPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 3)
         XCTAssertEqual(
             firstPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String,
             "ProjectAlpha"
@@ -55,12 +71,98 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
 
         XCTAssertEqual(repeated.exitCode, 0, repeated.standardError)
         XCTAssertEqual(repeatedMetrics["repository_count"], "1")
-        XCTAssertEqual(repeatedMetrics["reflog_unchanged_skip_count"], "2")
+        XCTAssertEqual(repeatedMetrics["reflog_unchanged_skip_count"], "3")
         XCTAssertEqual(repeatedMetrics["shared_data_written"], "0")
         XCTAssertEqual(
             repeatedPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
             firstSnapshot
         )
+    }
+
+    func testSubmoduleGitFileResolvesIntoParentMetadataWithoutDuplicateDiscovery() throws {
+        let fixture = try RealGitFixture()
+        let temporaryOrigin = try fixture.makeRepository(named: "DependencyOrigin")
+        let origin = fixture.rootURL.appendingPathComponent("DependencyOrigin", isDirectory: true)
+        try fixture.fileManager.moveItem(at: temporaryOrigin, to: origin)
+        let monorepo = try fixture.makeRepository(named: "Monorepo")
+        let initial = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        XCTAssertEqual(initial.exitCode, 0, initial.standardError)
+        XCTAssertEqual(try XCTUnwrap(fixture.metrics(from: initial.standardOutput))["repository_count"], "1")
+
+        try fixture.git(
+            in: monorepo,
+            ["-c", "protocol.file.allow=always", "submodule", "add", origin.path, "Modules/Dependency"]
+        )
+        try fixture.git(
+            in: monorepo,
+            ["commit", "-am", "add dependency"],
+            environment: fixture.gitDateEnvironment("2024-01-14T13:00:00Z")
+        )
+        let submodule = monorepo.appendingPathComponent("Modules/Dependency", isDirectory: true)
+        try fixture.git(in: submodule, ["config", "user.name", "Tiny Buddy"])
+        try fixture.git(in: submodule, ["config", "user.email", "tinybuddy@example.com"])
+        try fixture.commit(
+            in: submodule,
+            file: "dependency.txt",
+            contents: "dependency\n",
+            message: "dependency work",
+            date: "2024-01-15T11:05:00Z"
+        )
+
+        let result = try fixture.runScript(
+            scanRoots: [fixture.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_GIT_INVALIDATED_ROOTS": fixture.scanRootURL.path]
+        )
+        let plist = try fixture.readPreferencesPlist()
+        let metrics = try XCTUnwrap(fixture.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(
+            plist["tinybuddy.gitTodayRecentProject.projectName"] as? String,
+            "Dependency"
+        )
+    }
+
+    func testRealBareRepositoryUsesDefaultBranchReflogWithoutHeadLog() throws {
+        let fixture = try RealGitFixture()
+        let temporarySource = try fixture.makeRepository(named: "BareSource")
+        let source = fixture.rootURL.appendingPathComponent("BareSource", isDirectory: true)
+        try fixture.fileManager.moveItem(at: temporarySource, to: source)
+        try fixture.commit(
+            in: source,
+            file: "bare.txt",
+            contents: "bare\n",
+            message: "bare work",
+            date: "2024-01-15T12:05:00Z"
+        )
+
+        let bare = fixture.scanRootURL.appendingPathComponent("ProjectBare.git", isDirectory: true)
+        try fixture.fileManager.createDirectory(at: bare, withIntermediateDirectories: true)
+        try fixture.git(in: bare, ["init", "--bare", "-b", "main"])
+        try fixture.git(in: bare, ["config", "core.logAllRefUpdates", "true"])
+        try fixture.git(in: source, ["remote", "add", "bare", bare.path])
+        try fixture.git(in: source, ["push", "bare", "main"])
+
+        let headLog = bare.appendingPathComponent("logs/HEAD")
+        if fixture.fileManager.fileExists(atPath: headLog.path) {
+            try fixture.fileManager.removeItem(at: headLog)
+        }
+
+        XCTAssertFalse(fixture.fileManager.fileExists(
+            atPath: headLog.path
+        ))
+        XCTAssertTrue(fixture.fileManager.fileExists(
+            atPath: bare.appendingPathComponent("logs/refs/heads/main").path
+        ))
+
+        let result = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let metrics = try XCTUnwrap(fixture.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["invalid_repository_count"], "0")
     }
 
     func testHistoryOperationsProduceStableLogicalCompletionEvents() throws {
@@ -541,7 +643,10 @@ private final class RealGitFixture {
         try fileManager.createDirectory(at: reflogURL, withIntermediateDirectories: false)
     }
 
-    func runScript(scanRoots: [URL]) throws -> RealGitScriptResult {
+    func runScript(
+        scanRoots: [URL],
+        extraEnvironment: [String: String] = [:]
+    ) throws -> RealGitScriptResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptURL.path]
@@ -559,6 +664,9 @@ private final class RealGitFixture {
         environment["TINYBUDDY_GIT_REPOSITORY_CACHE_DIR"] = cacheDirectoryURL.path
         environment["TINYBUDDY_GIT_SCAN_ROOTS"] = scanRoots.map(\.path).joined(separator: "\n")
         environment["TINYBUDDY_TODAY"] = "2024-01-15"
+        for (key, value) in extraEnvironment {
+            environment[key] = value
+        }
         process.environment = environment
 
         let stdoutPipe = Pipe()

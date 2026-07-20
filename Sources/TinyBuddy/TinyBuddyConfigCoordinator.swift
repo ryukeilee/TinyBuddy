@@ -65,6 +65,16 @@ final class TinyBuddyConfigCoordinator {
         lastPublishedConfig
     }
 
+    func reloadPersistedConfig() {
+        guard let persisted = configStore.load(), persisted != lastPublishedConfig else {
+            return
+        }
+        pendingConfig = nil
+        coalesceWorkItem?.cancel()
+        coalesceWorkItem = nil
+        publishConfig(persisted)
+    }
+
     func proposeScanRootsChange() {
         guard let current = lastPublishedConfig ?? buildCurrentConfig() else {
             return
@@ -113,6 +123,16 @@ final class TinyBuddyConfigCoordinator {
         coalesceConfigUpdate(updated)
     }
 
+    func proposeExclusionRulesChange(_ rules: [TinyBuddyExclusionRule]) {
+        guard let current = lastPublishedConfig ?? buildCurrentConfig() else {
+            return
+        }
+        guard current.exclusionRules != rules else {
+            return
+        }
+        coalesceConfigUpdate(current.withIncrementedVersion(exclusionRules: rules))
+    }
+
     private func coalesceConfigUpdate(_ config: TinyBuddyAppConfig) {
         pendingConfig = config
         coalesceWorkItem?.cancel()
@@ -155,6 +175,8 @@ final class TinyBuddyConfigCoordinator {
         let newRoots = Set(config.scanRootPaths)
         let previousStrategy = lastPublishedConfig?.refreshStrategy ?? .automatic
         let newStrategy = config.refreshStrategy
+        let previousExclusions = Set(lastPublishedConfig?.exclusionRules.map(\.pattern) ?? [])
+        let newExclusions = Set(config.exclusionRules.map(\.pattern))
 
         lastPublishedConfig = config
         configGeneration &+= 1
@@ -163,7 +185,7 @@ final class TinyBuddyConfigCoordinator {
             "config published version=\(config.configVersion, privacy: .public) generation=\(self.configGeneration, privacy: .public)"
         )
 
-        if previousRoots != newRoots || previousStrategy != newStrategy {
+        if previousRoots != newRoots || previousStrategy != newStrategy || previousExclusions != newExclusions {
             if previousRoots != newRoots {
                 Self.logger.info(
                     "config roots changed: \(previousRoots.count, privacy: .public) -> \(newRoots.count, privacy: .public)"
@@ -172,6 +194,11 @@ final class TinyBuddyConfigCoordinator {
             if previousStrategy != newStrategy {
                 Self.logger.info(
                     "config strategy changed: \(previousStrategy.rawValue, privacy: .public) -> \(newStrategy.rawValue, privacy: .public)"
+                )
+            }
+            if previousExclusions != newExclusions {
+                Self.logger.info(
+                    "config exclusion rules changed: \(previousExclusions.count, privacy: .public) -> \(newExclusions.count, privacy: .public)"
                 )
             }
             rebuildRepositoryChangeMonitor()

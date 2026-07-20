@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import TinyBuddy
+@testable import TinyBuddyCore
 
 @MainActor
 final class GitScanRootAuthorizationControllerTests: XCTestCase {
@@ -183,6 +184,50 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         XCTAssertEqual(received.map(\.1), [nil, "reauthorize-id", "remove-id", nil])
     }
 
+    func testSettingsViewModelPersistsNormalizedExclusionsAndPublishesConfigChange() throws {
+        let notificationCenter = NotificationCenter()
+        let storage = GitSettingsConfigStorage()
+        let configStore = TinyBuddyConfigStore(
+            directPreferencesProvider: { storage.values },
+            synchronizeReads: {},
+            writeValue: { value, key in storage.values[key] = value; return true },
+            synchronizeWrites: { true },
+            readFailureProvider: { nil }
+        )
+        XCTAssertEqual(
+            configStore.save(TinyBuddyAppConfig(configVersion: 1, dayIdentifier: "2026-07-20")),
+            .saved
+        )
+        let viewModel = GitScanRootSettingsViewModel(
+            store: makeStore(userDefaults: makeDefaults()),
+            configStore: configStore,
+            notificationCenter: notificationCenter
+        )
+        var changeCount = 0
+        let observer = notificationCenter.addObserver(
+            forName: .tinyBuddySettingsDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            if notification.userInfo?[GitScanRootAuthorizationCommand.exclusionsDidChangeKey] as? Bool == true {
+                changeCount += 1
+            }
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        XCTAssertTrue(viewModel.addExclusionRule(pattern: " ./Teams/Private/ "))
+        XCTAssertFalse(viewModel.addExclusionRule(pattern: "Teams/Private"))
+        XCTAssertFalse(viewModel.addExclusionRule(pattern: "../Outside"))
+        XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Teams/Private"])
+        XCTAssertEqual(configStore.load()?.exclusionRules.map(\.pattern), ["Teams/Private"])
+
+        let identifier = try XCTUnwrap(viewModel.exclusionRules.first?.id)
+        XCTAssertTrue(viewModel.removeExclusionRule(id: identifier))
+        XCTAssertFalse(viewModel.removeExclusionRule(id: identifier))
+        XCTAssertEqual(configStore.load()?.exclusionRules, [])
+        XCTAssertEqual(changeCount, 2)
+    }
+
     func testSettingsViewModelReloadsRecoveredAuthorizationState() async throws {
         let notificationCenter = NotificationCenter()
         let root = URL(fileURLWithPath: "/Authorized/Recovering")
@@ -239,4 +284,8 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
     }
+}
+
+private final class GitSettingsConfigStorage: @unchecked Sendable {
+    var values: [String: Any] = [:]
 }

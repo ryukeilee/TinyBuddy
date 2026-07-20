@@ -283,6 +283,17 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.stopAccessCount, roots.count)
     }
 
+    func testRefreshPassesExplicitExclusionRulesToScript() {
+        let exclusions = ["Teams/Private", "Archived"]
+        let harness = makeHarness(exclusionRules: exclusions)
+
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleDidBecomeActive()
+        }
+
+        XCTAssertEqual(harness.capturedExclusionRules, exclusions)
+    }
+
     func testFirstVisibleRefreshReloadsWidgetWhenReadyStateReplacesLoading() {
         let harness = makeHarness()
 
@@ -2192,6 +2203,89 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.statusHistory.count, 2)
     }
 
+    func testDiscoveryChangePassesAffectedRootWithoutGlobalCacheInvalidation() {
+        let harness = makeHarness()
+        harness.performAndWaitForStatusCount(1) {
+            harness.coordinator.start()
+        }
+        harness.advanceCurrentDate(by: 61)
+
+        harness.performAndWaitForStatusCount(2) {
+            harness.emitRepositoryDiscoveryChange()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.capturedInvalidatedRootPaths, ["/Authorized/TinyBuddyProject"])
+        XCTAssertEqual(harness.repositoryDiscoveryCacheInvalidationCount, 0)
+    }
+
+    func testDiscoveryChangesCoalesceAffectedRootsBeforeOneRefresh() {
+        let roots = ["/Authorized/A", "/Authorized/B"]
+        let harness = makeHarness(authorizedRoots: roots.map(URL.init(fileURLWithPath:)))
+        harness.performAndWaitForStatusCount(1) { harness.coordinator.start() }
+        harness.advanceCurrentDate(by: 61)
+
+        harness.performAndWaitForStatusCount(2) {
+            for root in roots {
+                harness.coordinator.handleRepositoryContentsChanged(impact: GitRepositoryChangeImpact(
+                    requiresRepositoryDiscoveryRescan: true,
+                    affectedRootPaths: [root]
+                ))
+            }
+        }
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.capturedInvalidatedRootPaths, roots)
+        XCTAssertEqual(harness.repositoryDiscoveryCacheInvalidationCount, 0)
+    }
+
+    func testUnknownDiscoveryImpactFallsBackToGlobalDiscoveryCacheInvalidation() {
+        let harness = makeHarness()
+        harness.performAndWaitForStatusCount(1) { harness.coordinator.start() }
+        harness.advanceCurrentDate(by: 61)
+
+        harness.performAndWaitForStatusCount(2) {
+            harness.coordinator.handleRepositoryContentsChanged(impact: GitRepositoryChangeImpact(
+                requiresRepositoryDiscoveryRescan: true,
+                affectedRootPaths: []
+            ))
+        }
+
+        XCTAssertEqual(harness.repositoryDiscoveryCacheInvalidationCount, 1)
+        XCTAssertEqual(harness.capturedInvalidatedRootPaths, [])
+    }
+
+    func testDiscoveryCacheInvalidationPreservesIncrementalRepositoryStats() throws {
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBuddyDiscoveryCache-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let discoveryFiles = [
+            "repositories.txt",
+            "authorized-roots.txt",
+            "authorized-roots.signature",
+            "excluded-paths.txt"
+        ]
+        for fileName in discoveryFiles + ["repository-stats.tsv", "repository-stats.cksum"] {
+            try Data("fixture".utf8).write(to: cacheDirectory.appendingPathComponent(fileName))
+        }
+
+        GitActivityRefreshCoordinator.invalidateRepositoryDiscoveryCache(at: cacheDirectory)
+
+        for fileName in discoveryFiles {
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: cacheDirectory.appendingPathComponent(fileName).path
+            ))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: cacheDirectory.appendingPathComponent("repository-stats.tsv").path
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: cacheDirectory.appendingPathComponent("repository-stats.cksum").path
+        ))
+    }
+
     func testManualRefreshStormDuringRefreshQueuesOnlyOneFollowUp() {
         let harness = makeHarness()
         let firstRunStarted = expectation(description: "first run started")
@@ -2296,6 +2390,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
     private func makeHarness(
         authorizedRoots: [URL] = [URL(fileURLWithPath: "/Authorized/TinyBuddyProject")],
+        exclusionRules: [String] = [],
         authorizationIssue: GitScanRootAccessIssue? = nil,
         scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh"),
         repositoryMonitoringStartDelay: TimeInterval = 0,
@@ -2304,6 +2399,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         RefreshHarness(
             testCase: self,
             authorizedRoots: authorizedRoots,
+            exclusionRules: exclusionRules,
             authorizationIssue: authorizationIssue,
             scriptURL: scriptURL,
             repositoryMonitoringStartDelay: repositoryMonitoringStartDelay,
@@ -2392,6 +2488,7 @@ private final class RefreshHarness: @unchecked Sendable {
     init(
         testCase: XCTestCase,
         authorizedRoots: [URL],
+        exclusionRules: [String] = [],
         authorizationIssue: GitScanRootAccessIssue? = nil,
         scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh"),
         repositoryMonitoringStartDelay: TimeInterval = 0,
@@ -2400,6 +2497,7 @@ private final class RefreshHarness: @unchecked Sendable {
         self.testCase = testCase
         self.state = State(currentDate: Self.makeDate(second: 0))
         self.state.authorizedRoots = authorizedRoots
+        self.state.exclusionRules = exclusionRules
         self.state.authorizationIssue = authorizationIssue
 
         let defaults = UserDefaults(suiteName: "TinyBuddyAppTests.\(UUID().uuidString)")!
@@ -2487,9 +2585,11 @@ private final class RefreshHarness: @unchecked Sendable {
                 state.onWidgetReload?(state.widgetReloadCount)
             },
             scriptURLProvider: { scriptURL },
-            scriptRunner: { [state] _, rootURLs, _, _ in
+            scriptRunner: { [state] _, rootURLs, exclusions, invalidatedRoots, _, _ in
                 state.scriptRunCount += 1
                 state.capturedRootPaths = rootURLs.map(\.standardizedFileURL.path)
+                state.capturedExclusionRules = exclusions
+                state.capturedInvalidatedRootPaths = invalidatedRoots
                 try state.scriptRunnerHook?(state.scriptRunCount)
                 state.onScriptRun?(state.scriptRunCount)
                 return GitRefreshScriptResult(
@@ -2513,6 +2613,7 @@ private final class RefreshHarness: @unchecked Sendable {
                     issue: state.authorizationIssue
                 )
             },
+            exclusionRulesProvider: { [state] in state.exclusionRules },
             timeEnvironment: timeEnvironment,
             dateProvider: { [state] in
                 state.currentDate
@@ -2537,6 +2638,9 @@ private final class RefreshHarness: @unchecked Sendable {
                 let monitor = TestGitRepositoryChangeMonitor(changeHandler: changeHandler)
                 state.repositoryChangeMonitor = monitor
                 return monitor
+            },
+            repositoryDiscoveryCacheInvalidator: { [state] in
+                state.repositoryDiscoveryCacheInvalidationCount += 1
             },
             workspaceNotificationCenter: workspaceNotificationCenter,
             statusNotificationCenter: statusNotificationCenter,
@@ -2580,6 +2684,8 @@ private final class RefreshHarness: @unchecked Sendable {
     var scriptRunCount: Int { state.scriptRunCount }
     var widgetReloadCount: Int { state.widgetReloadCount }
     var capturedRootPaths: [String] { state.capturedRootPaths }
+    var capturedExclusionRules: [String] { state.capturedExclusionRules }
+    var capturedInvalidatedRootPaths: [String] { state.capturedInvalidatedRootPaths }
     var stopAccessCount: Int { state.stopAccessCount }
     var scriptCancellationCount: Int { state.scriptCancellationCount }
     var currentDate: Date { state.currentDate }
@@ -2610,6 +2716,10 @@ private final class RefreshHarness: @unchecked Sendable {
 
     var repositoryMonitorStopCount: Int {
         state.repositoryChangeMonitor?.stopCount ?? 0
+    }
+
+    var repositoryDiscoveryCacheInvalidationCount: Int {
+        state.repositoryDiscoveryCacheInvalidationCount
     }
 
     func advanceCurrentDate(by seconds: TimeInterval) {
@@ -2650,6 +2760,10 @@ private final class RefreshHarness: @unchecked Sendable {
         for _ in 0..<count {
             state.repositoryChangeMonitor?.emitChange()
         }
+    }
+
+    func emitRepositoryDiscoveryChange() {
+        state.repositoryChangeMonitor?.emitChange(requiresRepositoryDiscoveryRescan: true)
     }
 
     func setScriptRunnerHook(_ hook: @escaping (Int) throws -> Void) {
@@ -2909,9 +3023,13 @@ private final class RefreshHarness: @unchecked Sendable {
             isLowPowerModeEnabled: false
         )
         var authorizedRoots: [URL] = []
+        var exclusionRules: [String] = []
         var authorizationIssue: GitScanRootAccessIssue?
         var capturedRootPaths: [String] = []
+        var capturedExclusionRules: [String] = []
+        var capturedInvalidatedRootPaths: [String] = []
         var scriptRunCount = 0
+        var repositoryDiscoveryCacheInvalidationCount = 0
         var scriptCancellationCount = 0
         var widgetReloadCount = 0
         var stopAccessCount = 0
@@ -2942,12 +3060,12 @@ private final class RefreshHarness: @unchecked Sendable {
 }
 
 private final class TestGitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
-    private let changeHandler: () -> Void
+    private let changeHandler: (GitRepositoryChangeImpact) -> Void
     private(set) var isRunning = false
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
-    init(changeHandler: @escaping () -> Void) {
+    init(changeHandler: @escaping (GitRepositoryChangeImpact) -> Void) {
         self.changeHandler = changeHandler
     }
 
@@ -2969,10 +3087,13 @@ private final class TestGitRepositoryChangeMonitor: GitRepositoryChangeMonitorin
         stopCount += 1
     }
 
-    func emitChange() {
+    func emitChange(requiresRepositoryDiscoveryRescan: Bool = false) {
         guard isRunning else {
             return
         }
-        changeHandler()
+        changeHandler(GitRepositoryChangeImpact(
+            requiresRepositoryDiscoveryRescan: requiresRepositoryDiscoveryRescan,
+            affectedRootPaths: requiresRepositoryDiscoveryRescan ? ["/Authorized/TinyBuddyProject"] : []
+        ))
     }
 }

@@ -27,7 +27,7 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
         let state = State()
         let monitor = GitRepositoryChangeMonitor(
             authorizedRootsProvider: { state.makeAccessResult() },
-            changeHandler: { state.changeCount += 1 },
+            changeHandler: { _ in state.changeCount += 1 },
             eventStreamFactory: { _, _ in nil }
         )
 
@@ -82,12 +82,14 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
         ])
 
         XCTAssertEqual(state.changeCount, 1)
+        XCTAssertTrue(state.lastChangeRequiredDiscoveryRescan)
+        XCTAssertEqual(state.lastAffectedRootPaths, ["/Authorized/Project"])
 
         stream.emit([
             "/Authorized/Project/Sources/App.swift",
             "/Authorized/Project/.git/config"
         ])
-        XCTAssertEqual(state.changeCount, 1)
+        XCTAssertEqual(state.changeCount, 2)
         monitor.stop()
     }
 
@@ -102,6 +104,7 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
         stream.emit(["/Authorized/Project/.git/index"])
 
         XCTAssertEqual(state.changeCount, 3)
+        XCTAssertFalse(state.lastChangeRequiredDiscoveryRescan)
         monitor.stop()
     }
 
@@ -192,12 +195,40 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
         XCTAssertTrue(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
             path: "/Authorized/Project/.git/index"
         ))
-        XCTAssertFalse(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
+        XCTAssertTrue(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
             path: "/Authorized/Project/.git/config"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
+            path: "/Authorized/Project/.gitmodules"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
+            path: "/Authorized/Archives/Project.git/refs/heads/main"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
+            path: "/Authorized/Archives/Project.git/HEAD"
+        ))
+        XCTAssertFalse(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
+            path: "/Authorized/Project.git/README.md"
         ))
         XCTAssertFalse(GitRepositoryChangeMonitor.isRelevantGitMetadataChange(
             path: "/Authorized/Project/Sources/App.swift"
         ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Project/.gitmodules"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Project/.git/config"
+        ))
+        XCTAssertFalse(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Project/.git/logs/HEAD"
+        ))
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRootPaths(
+                for: ["/Authorized/Project/Nested/.git"],
+                watchedRoots: ["/Authorized", "/Authorized/Project"]
+            ),
+            ["/Authorized/Project"]
+        )
     }
 
     private func makeMonitor(
@@ -206,7 +237,11 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
     ) -> GitRepositoryChangeMonitor {
         GitRepositoryChangeMonitor(
             authorizedRootsProvider: { state.makeAccessResult() },
-            changeHandler: { state.changeCount += 1 },
+            changeHandler: { impact in
+                state.changeCount += 1
+                state.lastChangeRequiredDiscoveryRescan = impact.requiresRepositoryDiscoveryRescan
+                state.lastAffectedRootPaths = impact.affectedRootPaths
+            },
             eventStreamFactory: { _, handler in
                 stream.eventHandler = handler
                 return stream
@@ -249,6 +284,8 @@ private final class State {
     var rootAccessCount = 0
     var rootStopCount = 0
     var changeCount = 0
+    var lastChangeRequiredDiscoveryRescan = false
+    var lastAffectedRootPaths: [String] = []
 
     func makeAccessResult() -> GitScanRootAccessResult {
         rootAccessCount += 1

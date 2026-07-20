@@ -1,4 +1,5 @@
 import SwiftUI
+import TinyBuddyCore
 
 extension Notification.Name {
     static let gitScanRootAuthorizationAddRequested = Notification.Name(
@@ -26,23 +27,30 @@ extension Notification.Name {
 
 enum GitScanRootAuthorizationCommand {
     static let authorizationIdentifierKey = "TinyBuddy.gitScanRootAuthorizationIdentifier"
+    static let exclusionsDidChangeKey = "TinyBuddy.gitExclusionRulesDidChange"
 }
 
 @MainActor
 final class GitScanRootSettingsViewModel: ObservableObject {
     @Published private(set) var authorizations: [GitScanRootAuthorization] = []
+    @Published private(set) var exclusionRules: [TinyBuddyExclusionRule] = []
 
     private let store: GitScanRootAuthorizationStore
+    private let configStore: TinyBuddyConfigStore
     private let notificationCenter: NotificationCenter
     private nonisolated(unsafe) var authorizationsDidChangeObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var configDidChangeObserver: NSObjectProtocol?
 
     init(
         store: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
+        configStore: TinyBuddyConfigStore = TinyBuddyConfigStore(),
         notificationCenter: NotificationCenter = .default
     ) {
         self.store = store
+        self.configStore = configStore
         self.notificationCenter = notificationCenter
         reloadAuthorizations()
+        reloadExclusionRules()
         authorizationsDidChangeObserver = notificationCenter.addObserver(
             forName: .gitScanRootAuthorizationsDidChange,
             object: nil,
@@ -50,6 +58,15 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.reloadAuthorizations()
+            }
+        }
+        configDidChangeObserver = notificationCenter.addObserver(
+            forName: .tinyBuddyAppConfigDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reloadExclusionRules()
             }
         }
     }
@@ -76,8 +93,47 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         notificationCenter.post(name: .gitScanRootAuthorizationRemoveAllRequested, object: nil)
     }
 
+    @discardableResult
+    func addExclusionRule(pattern rawPattern: String) -> Bool {
+        guard let pattern = TinyBuddyExclusionRule.normalizedPattern(rawPattern),
+              !exclusionRules.contains(where: { $0.pattern == pattern }) else {
+            return false
+        }
+        return persistExclusionRules(exclusionRules + [TinyBuddyExclusionRule(pattern: pattern)])
+    }
+
+    @discardableResult
+    func removeExclusionRule(id: String) -> Bool {
+        let updated = exclusionRules.filter { $0.id != id }
+        guard updated.count != exclusionRules.count else {
+            return false
+        }
+        return persistExclusionRules(updated)
+    }
+
     private func reloadAuthorizations() {
         authorizations = store.authorizationStatuses()
+    }
+
+    private func reloadExclusionRules() {
+        exclusionRules = configStore.load()?.exclusionRules ?? []
+    }
+
+    private func persistExclusionRules(_ rules: [TinyBuddyExclusionRule]) -> Bool {
+        guard let current = configStore.load() else {
+            return false
+        }
+        let updated = current.withIncrementedVersion(exclusionRules: rules)
+        guard configStore.save(updated) != .persistenceFailed else {
+            return false
+        }
+        exclusionRules = rules
+        notificationCenter.post(
+            name: .tinyBuddySettingsDidChange,
+            object: nil,
+            userInfo: [GitScanRootAuthorizationCommand.exclusionsDidChangeKey: true]
+        )
+        return true
     }
 
     private func postAuthorizationCommand(named name: Notification.Name, identifier: String) {
@@ -92,11 +148,15 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         if let authorizationsDidChangeObserver {
             notificationCenter.removeObserver(authorizationsDidChangeObserver)
         }
+        if let configDidChangeObserver {
+            notificationCenter.removeObserver(configDidChangeObserver)
+        }
     }
 }
 
 struct GitScanRootSettingsView: View {
     @StateObject private var viewModel: GitScanRootSettingsViewModel
+    @State private var exclusionPattern = ""
 
     init(viewModel: GitScanRootSettingsViewModel? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel ?? GitScanRootSettingsViewModel())
@@ -149,6 +209,40 @@ struct GitScanRootSettingsView: View {
                 .accessibilityHint("移除所有已授权的 Git 扫描目录")
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("排除目录")
+                    .font(.headline)
+                Text("输入相对于任一授权目录的路径，或需要在所有层级排除的目录名。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    TextField("例如：Teams/Private 或 Archived", text: $exclusionPattern)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Git 扫描排除目录")
+                    Button("添加排除") {
+                        if viewModel.addExclusionRule(pattern: exclusionPattern) {
+                            exclusionPattern = ""
+                        }
+                    }
+                    .disabled(TinyBuddyExclusionRule.normalizedPattern(exclusionPattern) == nil)
+                }
+
+                ForEach(viewModel.exclusionRules) { rule in
+                    HStack {
+                        Text(rule.pattern)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("移除", role: .destructive) {
+                            viewModel.removeExclusionRule(id: rule.id)
+                        }
+                        .controlSize(.small)
+                        .accessibilityLabel("移除排除目录「\(rule.pattern)」")
+                    }
+                }
+            }
+
             Divider()
                 .accessibilityHidden(true)
 
@@ -173,7 +267,7 @@ struct GitScanRootSettingsView: View {
             .toggleStyle(.switch)
             .accessibilityHint("启用后，TinyBuddy 会在你登录 macOS 时自动启动")
         }
-        .frame(minWidth: 560, minHeight: 380)
+        .frame(minWidth: 560, minHeight: 460)
         .scenePadding()
     }
 

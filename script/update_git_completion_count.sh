@@ -17,6 +17,8 @@ RECENT_PROJECT_DAY_KEY="tinybuddy.gitTodayRecentProject.dayIdentifier"
 RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
 TRUSTED_SNAPSHOT_KEY="tinybuddy.gitTodayActivity.trustedSnapshot"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
+EXCLUDED_PATHS="${TINYBUDDY_GIT_EXCLUDED_PATHS:-}"
+INVALIDATED_ROOTS="${TINYBUDDY_GIT_INVALIDATED_ROOTS:-}"
 TODAY="${TINYBUDDY_TODAY:-$(/bin/date +%F)}"
 TIME_SCOPE_IDENTIFIER="${TINYBUDDY_TIME_SCOPE_IDENTIFIER:-${TZ:-system-default}}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
@@ -31,6 +33,7 @@ GIT_BIN="${TINYBUDDY_GIT_BIN:-git}"
 PERL_BIN="${TINYBUDDY_PERL_BIN:-}"
 DUPLICATE_EVENT_WINDOW_SECONDS="${TINYBUDDY_DUPLICATE_EVENT_WINDOW_SECONDS:-120}"
 REPOSITORY_CACHE_MAX_AGE_SECONDS="${TINYBUDDY_GIT_REPOSITORY_CACHE_MAX_AGE_SECONDS:-300}"
+REPOSITORY_SCAN_MAX_DEPTH="${TINYBUDDY_GIT_SCAN_MAX_DEPTH:-12}"
 SCAN_ROOT_TIMEOUT_SECONDS="${TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS:-15}"
 REPOSITORY_READ_TIMEOUT_SECONDS="${TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS:-5}"
 REPOSITORY_PARSE_TIMEOUT_SECONDS="${TINYBUDDY_GIT_REPOSITORY_PARSE_TIMEOUT_SECONDS:-30}"
@@ -41,6 +44,7 @@ CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
 CACHE_REPO_STATS_CHECKSUM_FILE="$CACHE_DIR/repository-stats.cksum"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
+CACHE_EXCLUDED_PATHS_FILE="$CACHE_DIR/excluded-paths.txt"
 EMPTY_CACHE_VALUE="__TINYBUDDY_EMPTY__"
 MISSING_PLIST_VALUE="__TINYBUDDY_MISSING_PLIST_VALUE__"
 
@@ -94,6 +98,10 @@ readable_reflog_repo_count=0
 successful_reflog_repo_count=0
 failed_reflog_repo_count=0
 scan_roots_file="$(mktemp)"
+excluded_paths_file="$(mktemp)"
+raw_excluded_paths_file="$(mktemp)"
+invalidated_roots_file="$(mktemp)"
+raw_invalidated_roots_file="$(mktemp)"
 valid_scan_roots_file=""
 repo_list_file="$(mktemp)"
 repo_scan_file="$(mktemp)"
@@ -198,7 +206,7 @@ cleanup() {
     rmdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null || true
     rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
   fi
-  rm -f "$scan_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
+  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
 emit_runtime_diagnostics_once() {
@@ -304,6 +312,44 @@ path_is_within_authorized_roots() {
   return 1
 }
 
+path_is_authorized_root() {
+  local candidate_path
+  local authorized_root
+  candidate_path="$(normalized_scan_root_path "$1")"
+  while IFS= read -r authorized_root; do
+    [ "$candidate_path" = "$authorized_root" ] && return 0
+  done < "$scan_roots_file"
+  return 1
+}
+
+path_is_explicitly_excluded() {
+  local candidate_path
+  local authorized_root
+  local exclusion
+  local relative_path
+  candidate_path="$(normalized_scan_root_path "$1")"
+
+  while IFS= read -r authorized_root; do
+    if ! path_is_within_root "$candidate_path" "$authorized_root"; then
+      continue
+    fi
+    relative_path="${candidate_path#"$authorized_root"}"
+    relative_path="${relative_path#/}"
+    while IFS= read -r exclusion; do
+      if [[ "$exclusion" == */* ]]; then
+        [ "$relative_path" = "$exclusion" ] || [[ "$relative_path" == "$exclusion/"* ]] || continue
+      else
+        case "/$relative_path/" in
+          *"/$exclusion/"*) ;;
+          *) continue ;;
+        esac
+      fi
+      return 0
+    done < "$excluded_paths_file"
+  done < "$scan_roots_file"
+  return 1
+}
+
 is_broad_scan_root() {
   local path
   path="$(normalized_scan_root_path "$1")"
@@ -324,6 +370,17 @@ resolve_git_dir() {
   local dot_git_path="$repo_root/.git"
   local gitdir_line
   local git_dir
+
+  # A bare repository has no work tree and therefore no nested `.git` entry.
+  # Treat its root as the metadata directory only when the characteristic
+  # metadata directories are present; a stray HEAD file is not sufficient.
+  if [ ! -e "$dot_git_path" ] &&
+     [ -f "$repo_root/HEAD" ] &&
+     [ -d "$repo_root/objects" ] &&
+     [ -d "$repo_root/refs" ]; then
+    resolve_existing_directory_path "$repo_root"
+    return
+  fi
 
   if [ -d "$dot_git_path" ]; then
     resolve_existing_directory_path "$dot_git_path"
@@ -366,6 +423,9 @@ repository_candidate_is_allowed() {
   local repo_root="$1"
 
   if path_contains_noise_component "$repo_root"; then
+    return 1
+  fi
+  if path_is_explicitly_excluded "$repo_root"; then
     return 1
   fi
 
@@ -423,6 +483,35 @@ resolve_common_git_dir() {
   common_dir_path="$(sed -n '1p' "$common_dir_path_file")"
   [ -n "$common_dir_path" ] || return 1
   resolve_git_metadata_dir "$git_dir" "$common_dir_path"
+}
+
+resolve_repository_reflog_path() {
+  local git_dir="$1"
+  local head_path="$git_dir/HEAD"
+  local head_line
+  local head_ref
+
+  if [ -e "$git_dir/logs/HEAD" ]; then
+    printf '%s\n' "$git_dir/logs/HEAD"
+    return
+  fi
+
+  head_line="$(sed -n '1p' "$head_path")" || return 1
+  case "$head_line" in
+    ref:\ refs/*)
+      head_ref="${head_line#ref: }"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  case "$head_ref" in
+    *..*|/*|*//*|*$'\t'*|*$'\n'*|*$'\r'*)
+      return 1
+      ;;
+  esac
+  [ -e "$git_dir/logs/$head_ref" ] || return 1
+  printf '%s\n' "$git_dir/logs/$head_ref"
 }
 
 repository_display_name() {
@@ -932,7 +1021,7 @@ build_scan_root_signature() {
     root_entries_file="$(mktemp)"
     if run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" \
       "$FIND_BIN" "$scan_root" -mindepth 1 -maxdepth 1 \
-      -exec "$STAT_BIN" -f 'ENTRY\t%N\t%z\t%m\t%i' {} \; \
+      -exec "$STAT_BIN" -f 'ENTRY\t%N\t%z\t%m\t%i' {} + \
       > "$root_entries_file" 2>> "$find_stderr_file"; then
       LC_ALL=C sort "$root_entries_file" >> "$signature_file"
     else
@@ -943,8 +1032,15 @@ build_scan_root_signature() {
 }
 
 refresh_repository_list_from_scan() {
+  local bare_root
+  local exclusion
   local find_exit_code=0
+  local find_max_depth=$((REPOSITORY_SCAN_MAX_DEPTH + 1))
   local scan_root
+  local roots_to_scan_file="${1:-$scan_roots_file}"
+  local resolve_symlink_exit_code
+  local symlink_target
+  local -a prune_expression
 
   : > "$repo_git_paths_file"
   : > "$repo_scan_file"
@@ -957,8 +1053,7 @@ refresh_repository_list_from_scan() {
       continue
     fi
 
-    run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" "$FIND_BIN" "$scan_root" \
-      \( \
+    prune_expression=( \( \
         -path "$USER_HOME/Library" -o \
         -path "$USER_HOME/.Trash" -o \
         -path "$USER_HOME/.cache" -o \
@@ -967,14 +1062,57 @@ refresh_repository_list_from_scan() {
         -path "$USER_HOME/Pictures" -o \
         -path '*/node_modules' -o \
         -path '*/.build' -o \
-        -path '*/DerivedData' \
-      \) -prune -o \
+        -path '*/DerivedData' )
+    while IFS= read -r exclusion; do
+      if [[ "$exclusion" == */* ]]; then
+        prune_expression+=( -o -path "$scan_root/$exclusion" )
+      else
+        prune_expression+=( -o -type d -name "$exclusion" )
+      fi
+    done < "$excluded_paths_file"
+    prune_expression+=( \) -prune -o )
+
+    run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" "$FIND_BIN" "$scan_root" \
+      -mindepth 1 -maxdepth "$find_max_depth" \
+      "${prune_expression[@]}" \
       -type d -name .git -print0 -prune -o \
-      -type f -name .git -print0 >> "$repo_git_paths_file" 2>> "$find_stderr_file" || find_exit_code="$?"
-  done < "$scan_roots_file"
+      -type f -name .git -print0 -o \
+      -type f -name HEAD -print0 -o \
+      -type l -print0 >> "$repo_git_paths_file" 2>> "$find_stderr_file" || find_exit_code="$?"
+  done < "$roots_to_scan_file"
 
   while IFS= read -r -d '' git_path; do
-    printf '%s\n' "${git_path%/.git}"
+    case "$git_path" in
+      */.git)
+        printf '%s\n' "${git_path%/.git}"
+        ;;
+      */HEAD)
+        bare_root="${git_path%/HEAD}"
+        if [ -d "$bare_root/objects" ] && [ -d "$bare_root/refs" ]; then
+          printf '%s\n' "$bare_root"
+        fi
+        ;;
+      *)
+        if path_is_explicitly_excluded "$git_path"; then
+          continue
+        fi
+        trap - ERR
+        if symlink_target="$(resolve_existing_directory_path "$git_path")"; then
+          resolve_symlink_exit_code=0
+        else
+          resolve_symlink_exit_code="$?"
+        fi
+        enable_error_trap
+        if [ "$resolve_symlink_exit_code" -ne 0 ] ||
+           ! path_is_within_authorized_roots "$symlink_target"; then
+          continue
+        fi
+        if [ -e "$symlink_target/.git" ] ||
+           { [ -f "$symlink_target/HEAD" ] && [ -d "$symlink_target/objects" ] && [ -d "$symlink_target/refs" ]; }; then
+          printf '%s\n' "$git_path"
+        fi
+        ;;
+    esac
   done < "$repo_git_paths_file" > "$repo_scan_file"
 
   if [ "$find_exit_code" -ne 0 ]; then
@@ -992,6 +1130,7 @@ write_repository_cache() {
   local cache_signature_file
   local cache_repository_file
   local cache_roots_file
+  local cache_exclusions_file
   local cache_signature_destination
   cache_signature_file="$(mktemp)"
 
@@ -999,12 +1138,15 @@ write_repository_cache() {
   build_scan_root_signature "$cache_signature_file"
   cache_repository_file="$(mktemp "$CACHE_REPO_LIST_FILE.XXXXXX")"
   cache_roots_file="$(mktemp "$CACHE_SCAN_ROOTS_FILE.XXXXXX")"
+  cache_exclusions_file="$(mktemp "$CACHE_EXCLUDED_PATHS_FILE.XXXXXX")"
   cache_signature_destination="$(mktemp "$CACHE_SCAN_ROOTS_SIGNATURE_FILE.XXXXXX")"
   cp "$validated_repo_list_file" "$cache_repository_file"
   cp "$scan_roots_file" "$cache_roots_file"
+  cp "$excluded_paths_file" "$cache_exclusions_file"
   cp "$cache_signature_file" "$cache_signature_destination"
   mv "$cache_repository_file" "$CACHE_REPO_LIST_FILE"
   mv "$cache_roots_file" "$CACHE_SCAN_ROOTS_FILE"
+  mv "$cache_exclusions_file" "$CACHE_EXCLUDED_PATHS_FILE"
   mv "$cache_signature_destination" "$CACHE_SCAN_ROOTS_SIGNATURE_FILE"
   rm -f "$cache_signature_file"
 }
@@ -1016,7 +1158,8 @@ cache_matches_current_roots() {
   local cache_age
   current_signature_file="$(mktemp)"
 
-  if [ ! -f "$CACHE_REPO_LIST_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_SIGNATURE_FILE" ]; then
+  if [ ! -f "$CACHE_REPO_LIST_FILE" ] || [ ! -f "$CACHE_SCAN_ROOTS_FILE" ] ||
+     [ ! -f "$CACHE_SCAN_ROOTS_SIGNATURE_FILE" ] || [ ! -f "$CACHE_EXCLUDED_PATHS_FILE" ]; then
     rm -f "$current_signature_file"
     return 1
   fi
@@ -1043,6 +1186,10 @@ cache_matches_current_roots() {
     rm -f "$current_signature_file"
     return 1
   fi
+  if ! cmp -s "$excluded_paths_file" "$CACHE_EXCLUDED_PATHS_FILE"; then
+    rm -f "$current_signature_file"
+    return 1
+  fi
 
   build_scan_root_signature "$current_signature_file"
   if ! cmp -s "$current_signature_file" "$CACHE_SCAN_ROOTS_SIGNATURE_FILE"; then
@@ -1055,6 +1202,51 @@ cache_matches_current_roots() {
 
 load_cached_repository_list() {
   cp "$CACHE_REPO_LIST_FILE" "$repo_list_file"
+}
+
+cache_supports_partial_refresh() {
+  local cache_mtime
+  local current_epoch
+  local cache_age
+
+  [ -s "$invalidated_roots_file" ] || return 1
+  [ -f "$CACHE_REPO_LIST_FILE" ] && [ -f "$CACHE_SCAN_ROOTS_FILE" ] &&
+    [ -f "$CACHE_EXCLUDED_PATHS_FILE" ] || return 1
+  cmp -s "$scan_roots_file" "$CACHE_SCAN_ROOTS_FILE" || return 1
+  cmp -s "$excluded_paths_file" "$CACHE_EXCLUDED_PATHS_FILE" || return 1
+  cache_mtime="$("$STAT_BIN" -f '%m' "$CACHE_REPO_LIST_FILE" 2>/dev/null)" || return 1
+  current_epoch="$(/bin/date +%s)" || return 1
+  [ "$current_epoch" -ge "$cache_mtime" ] || return 1
+  cache_age=$((current_epoch - cache_mtime))
+  [ "$cache_age" -lt "$REPOSITORY_CACHE_MAX_AGE_SECONDS" ]
+}
+
+refresh_invalidated_repository_roots() {
+  local cached_repo
+  local invalidated_root
+  local should_retain
+  local retained_repositories_file
+  local merged_repositories_file
+  retained_repositories_file="$(mktemp)"
+  merged_repositories_file="$(mktemp)"
+
+  while IFS= read -r cached_repo; do
+    should_retain=1
+    while IFS= read -r invalidated_root; do
+      if path_is_within_root "$cached_repo" "$invalidated_root"; then
+        should_retain=0
+        break
+      fi
+    done < "$invalidated_roots_file"
+    if [ "$should_retain" -eq 1 ]; then
+      printf '%s\n' "$cached_repo" >> "$retained_repositories_file"
+    fi
+  done < "$CACHE_REPO_LIST_FILE"
+
+  refresh_repository_list_from_scan "$invalidated_roots_file"
+  awk '1' "$retained_repositories_file" "$repo_list_file" | LC_ALL=C sort -u > "$merged_repositories_file"
+  mv "$merged_repositories_file" "$repo_list_file"
+  rm -f "$retained_repositories_file"
 }
 
 load_cached_repository_stats() {
@@ -1336,6 +1528,7 @@ process_repository_list() {
   local repository_identity
   local display_name
   local reflog_path
+  local resolve_reflog_exit_code
   local reflog_mtime
   local verified_reflog_signature
   local read_verified_signature_exit_code
@@ -1446,8 +1639,14 @@ process_repository_list() {
     fi
     printf '%s\n' "$repository_identity" >> "$repository_identity_file"
 
-    reflog_path="$git_dir/logs/HEAD"
-    if [ ! -e "$reflog_path" ]; then
+    trap - ERR
+    if reflog_path="$(resolve_repository_reflog_path "$git_dir")"; then
+      resolve_reflog_exit_code=0
+    else
+      resolve_reflog_exit_code="$?"
+    fi
+    enable_error_trap
+    if [ "$resolve_reflog_exit_code" -ne 0 ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
         log_error "cached repository reflog is no longer available; rebuilding repository cache"
         return 2
@@ -1832,6 +2031,21 @@ if [ "$REPOSITORY_CACHE_MAX_AGE_SECONDS" -gt 86400 ]; then
   exit 64
 fi
 
+case "$REPOSITORY_SCAN_MAX_DEPTH" in
+  ""|*[!0-9]*)
+    log_error "repository scan maximum depth is invalid"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+    ;;
+esac
+if [ "$REPOSITORY_SCAN_MAX_DEPTH" -lt 1 ] || [ "$REPOSITORY_SCAN_MAX_DEPTH" -gt 64 ]; then
+  log_error "repository scan maximum depth is outside the supported range"
+  refresh_outcome_override="failed"
+  emit_refresh_metrics
+  exit 64
+fi
+
 case "$SCAN_ROOT_TIMEOUT_SECONDS:$REPOSITORY_READ_TIMEOUT_SECONDS:$REPOSITORY_PARSE_TIMEOUT_SECONDS" in
   *[!0-9:]*|:*|*:|*::* )
     log_error "git scan timeout configuration is invalid"
@@ -1922,6 +2136,31 @@ printf '%s' "$SCAN_ROOTS" | while IFS= read -r scan_root || [ -n "$scan_root" ];
   fi
 done
 
+printf '%s' "$EXCLUDED_PATHS" | while IFS= read -r exclusion || [ -n "$exclusion" ]; do
+  if [ -n "$exclusion" ]; then
+    printf '%s\n' "$exclusion" >> "$raw_excluded_paths_file"
+  fi
+done
+
+while IFS= read -r exclusion; do
+  while [[ "$exclusion" == ./* ]]; do
+    exclusion="${exclusion#./}"
+  done
+  while [ "${#exclusion}" -gt 1 ] && [[ "$exclusion" == */ ]]; do
+    exclusion="${exclusion%/}"
+  done
+  case "$exclusion" in
+    ""|/*|..|../*|*/../*|*/..|*//*|*$'\t'*|*$'\r'*|*'*'*|*'?'*|*'['*|*']'*)
+      log_error "git exclusion rule is invalid; preserving previous shared data"
+      refresh_outcome_override="failed"
+      emit_refresh_metrics
+      exit 64
+      ;;
+  esac
+  printf '%s\n' "$exclusion" >> "$excluded_paths_file"
+done < "$raw_excluded_paths_file"
+LC_ALL=C sort -u "$excluded_paths_file" -o "$excluded_paths_file"
+
 valid_scan_roots_file="$(mktemp)"
 while IFS= read -r scan_root; do
   normalized_scan_root="$(normalized_scan_root_path "$scan_root")"
@@ -1947,6 +2186,23 @@ if [ ! -s "$scan_roots_file" ]; then
   exit 0
 fi
 
+printf '%s' "$INVALIDATED_ROOTS" | while IFS= read -r invalidated_root || [ -n "$invalidated_root" ]; do
+  if [ -n "$invalidated_root" ]; then
+    printf '%s\n' "$invalidated_root" >> "$raw_invalidated_roots_file"
+  fi
+done
+while IFS= read -r invalidated_root; do
+  normalized_invalidated_root="$(normalized_scan_root_path "$invalidated_root")"
+  if ! path_is_authorized_root "$normalized_invalidated_root"; then
+    log_error "repository discovery invalidation escaped authorized roots; preserving previous shared data"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 64
+  fi
+  printf '%s\n' "$normalized_invalidated_root" >> "$invalidated_roots_file"
+done < "$raw_invalidated_roots_file"
+LC_ALL=C sort -u "$invalidated_roots_file" -o "$invalidated_roots_file"
+
 # A refresh must be single-flight across cache construction and publication.
 # Serializing only the final plist write allowed an older scan to receive a
 # newer revision and overwrite a more recent scan's payload.
@@ -1960,7 +2216,23 @@ fi
 
 using_cached_repo_list=0
 cache_was_reused=0
-if cache_matches_current_roots; then
+if cache_supports_partial_refresh; then
+  refresh_invalidated_repository_roots
+  if [ "$repository_scan_failed" -eq 1 ] && [ ! -s "$repo_list_file" ]; then
+    log_error "repository scan failed; preserving previous shared data"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 1
+  fi
+  if [ "$had_cached_repository_list" -eq 1 ] && [ ! -s "$repo_list_file" ] &&
+     [ ! -s "$invalidated_roots_file" ]; then
+    log_error "repository rescan found no repositories; preserving previous shared data"
+    refresh_outcome_override="failed"
+    emit_refresh_metrics
+    exit 1
+  fi
+  load_cached_repository_stats
+elif cache_matches_current_roots; then
   load_cached_repository_list
   load_cached_repository_stats
   using_cached_repo_list=1
@@ -1973,7 +2245,8 @@ else
     emit_refresh_metrics
     exit 1
   fi
-  if [ "$had_cached_repository_list" -eq 1 ] && [ ! -s "$repo_list_file" ]; then
+  if [ "$had_cached_repository_list" -eq 1 ] && [ ! -s "$repo_list_file" ] &&
+     [ ! -s "$invalidated_roots_file" ]; then
     log_error "repository rescan found no repositories; preserving previous shared data"
     refresh_outcome_override="failed"
     emit_refresh_metrics

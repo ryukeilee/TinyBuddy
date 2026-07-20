@@ -30,6 +30,29 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testReloadPersistedExclusionsRebuildsMonitoringAndPublishesConfig() {
+        var rebuildCount = 0
+        var rescheduleCount = 0
+        let (coordinator, _, store, _, _) = makeCoordinator(
+            rebuildClosure: { rebuildCount += 1 },
+            rescheduleClosure: { rescheduleCount += 1 }
+        )
+        let initial = TinyBuddyAppConfig(configVersion: 1, dayIdentifier: dayID)
+        XCTAssertEqual(store.save(initial), .saved)
+        coordinator.start()
+        let updated = initial.withIncrementedVersion(exclusionRules: [
+            TinyBuddyExclusionRule(id: "private", pattern: "Teams/Private")
+        ])
+        XCTAssertEqual(store.save(updated), .saved)
+
+        coordinator.reloadPersistedConfig()
+
+        XCTAssertEqual(coordinator.currentConfig(), updated)
+        XCTAssertEqual(rebuildCount, 1)
+        XCTAssertEqual(rescheduleCount, 1)
+    }
+
+    @MainActor
     func testStartPublishesInitialConfigWhenNoPersistedConfig() {
         let (coordinator, _, _, _, _) = makeCoordinator()
         coordinator.start()
