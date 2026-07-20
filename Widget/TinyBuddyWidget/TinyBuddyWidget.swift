@@ -18,6 +18,8 @@ struct TinyBuddyProvider: TimelineProvider {
     private let sharedDefaults: UserDefaults
     private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
 
+    private let configStore: TinyBuddyConfigStore
+
     init() {
         let timeEnvironment = TinyBuddyTimeEnvironment()
         self.timeEnvironment = timeEnvironment
@@ -27,6 +29,7 @@ struct TinyBuddyProvider: TimelineProvider {
             timeEnvironment: timeEnvironment
         )
         self.sharedDefaults = TinyBuddySharedData.makeUserDefaults()
+        self.configStore = TinyBuddyConfigStore()
     }
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
@@ -91,6 +94,16 @@ struct TinyBuddyProvider: TimelineProvider {
         let refreshStatus = refreshStatusStore.load().flatMap { status in
             status.isForDisplayDay(in: timeContext) ? status : nil
         }
+
+        let configVersion = configStore.loadConfigVersion()
+        let configState: String
+        if let configVersion {
+            configState = "loaded version=\(configVersion)"
+        } else {
+            configState = "unavailable"
+        }
+        Self.logger.notice("app config \(configState, privacy: .public)")
+
         let combinedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
         )

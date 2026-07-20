@@ -133,12 +133,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store: gitScanRootAuthorizationStore,
         onboardingStore: onboardingStore
     )
+    private lazy var configCoordinator: TinyBuddyConfigCoordinator = {
+        TinyBuddyConfigCoordinator(
+            configStore: configStore,
+            scanRootsProvider: { [gitScanRootAuthorizationStore] in
+                gitScanRootAuthorizationStore.accessAuthorizedRootResult()
+            },
+            rebuildRepositoryChangeMonitor: { [weak self] in
+                self?.gitActivityRefreshCoordinator.handleConfigChanged()
+            },
+            rescheduleTimer: { [weak self] in
+                self?.gitActivityRefreshCoordinator.handleConfigStrategyChanged()
+            }
+        )
+    }()
+    private lazy var configStore = TinyBuddyConfigStore()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
+        registerSettingsChangeObserver()
         timeEnvironmentChangeMonitor.start()
+        configCoordinator.start()
         gitActivityRefreshCoordinator.start(
             isApplicationActive: NSApp.isActive,
             isInterfaceVisible: isHUDVisible,
@@ -146,6 +163,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         powerStateMonitor.start()
         hudVisibilityMonitor.start()
+    }
+
+    private func registerSettingsChangeObserver() {
+        authorizationCommandObservers.append(
+            notificationCenter.addObserver(
+                forName: .tinyBuddySettingsDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.configCoordinator.proposeScanRootsChange()
+                }
+            }
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -263,6 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
         gitActivityRefreshCoordinator.handleAuthorizationChanged()
+        configCoordinator.proposeScanRootsChange()
         restoreHUDWindow(from: NSApp)
     }
 

@@ -19,6 +19,9 @@ extension Notification.Name {
     static let gitScanRootAuthorizationsDidChange = Notification.Name(
         "TinyBuddy.gitScanRootAuthorizationsDidChange"
     )
+    static let tinyBuddySettingsDidChange = Notification.Name(
+        "TinyBuddy.settingsDidChange"
+    )
 }
 
 enum GitScanRootAuthorizationCommand {
@@ -146,6 +149,10 @@ struct GitScanRootSettingsView: View {
                 get: { TinyBuddyLoginItemManager.shared.isEnabled },
                 set: { newValue in
                     try? TinyBuddyLoginItemManager.shared.setEnabled(newValue)
+                    NotificationCenter.default.post(
+                        name: .tinyBuddySettingsDidChange,
+                        object: nil
+                    )
                 }
             )) {
                 VStack(alignment: .leading, spacing: 2) {

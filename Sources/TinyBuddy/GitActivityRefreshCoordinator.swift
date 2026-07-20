@@ -574,6 +574,27 @@ final class GitActivityRefreshCoordinator {
         cancelScript()
     }
 
+    func handleConfigChanged() {
+        isPeriodicRefreshSuspended = false
+        repositoryChangeMonitor?.stop()
+        updateRepositoryChangeMonitoring()
+        if isRefreshing {
+            enqueuePendingRefresh(
+                kind: .authorization,
+                trigger: .reopen,
+                requestedAt: activeTimeContext.now
+            )
+            cancelScript()
+            return
+        }
+        _ = refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
+    }
+
+    func handleConfigStrategyChanged() {
+        scheduleTimerIfNeeded(forceReschedule: true)
+        updateRepositoryChangeMonitoring()
+    }
+
     func handleAuthorizationChanged() {
         isPeriodicRefreshSuspended = false
         repositoryChangeMonitor?.stop()
