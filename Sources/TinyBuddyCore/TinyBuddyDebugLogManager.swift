@@ -23,7 +23,7 @@ public final class TinyBuddyDebugLogManager: @unchecked Sendable {
 
     // MARK: - Configuration
 
-    public struct Configuration: Equatable {
+    public struct Configuration: Equatable, Sendable {
         /// Maximum age of a log file before it is eligible for cleanup (seconds).
         public var maxLogAge: TimeInterval
         /// Maximum total size of all debug logs before rotation kicks in (bytes).
@@ -188,8 +188,11 @@ public final class TinyBuddyDebugLogManager: @unchecked Sendable {
         #endif
     }
 
+    /// Checks whether the currently configured log directory is active and
+    /// cleans up expired entries. Must NOT call `isActive` because this method
+    /// is called with the lock already held from `enable()`.
     private func cleanupExpiredLogs() {
-        guard isActive else {
+        guard isEnabled, let expiration = expirationDate, Date() < expiration else {
             purgeAllLogs()
             return
         }

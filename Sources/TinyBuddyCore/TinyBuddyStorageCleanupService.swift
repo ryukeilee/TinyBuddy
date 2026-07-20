@@ -248,8 +248,8 @@ public final class TinyBuddyStorageCleanupService {
         //    If the container is unavailable (unit tests, sandbox), file-based
         //    cleanup is skipped but preference cleanup still proceeds.
         let hasMarker = placeCleanupMarker()
-        if hasMarker {
-            defer { removeCleanupMarker() }
+        defer {
+            if hasMarker { removeCleanupMarker() }
         }
 
         // 3. Run preference-level cleanup.

@@ -33,7 +33,7 @@ struct TinyBuddyHiddenSnapshotDiagnosticSummary: Equatable {
     }
 }
 
-final class TinyBuddySharedSnapshotDiagnosticRecorder {
+final class TinyBuddySharedSnapshotDiagnosticRecorder: @unchecked Sendable {
     static let shared = TinyBuddySharedSnapshotDiagnosticRecorder()
 
     private let lock = NSLock()

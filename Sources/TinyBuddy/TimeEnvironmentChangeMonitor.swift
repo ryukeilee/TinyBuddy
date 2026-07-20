@@ -21,8 +21,8 @@ final class TimeEnvironmentChangeMonitor<Context> {
     private let contextProvider: ContextProvider
     private let eventHandler: EventHandler
     private let scheduler: Scheduler
-    private var notificationObservers: [NSObjectProtocol] = []
-    private var workspaceNotificationObservers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var notificationObservers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var workspaceNotificationObservers: [NSObjectProtocol] = []
     private var isEnvironmentEmissionScheduled = false
     private var isStarted = false
     private var lifecycleGeneration = 0

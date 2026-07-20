@@ -127,7 +127,7 @@ struct GitRefreshScriptResultParser {
     }
 }
 
-private final class GitRefreshScriptExecutionController {
+private final class GitRefreshScriptExecutionController: @unchecked Sendable {
     private let lock = NSLock()
     private weak var process: Process?
     private var cancellationRequested = false
@@ -178,8 +178,8 @@ private struct GitRefreshScriptExecutionError: LocalizedError {
     }
 }
 
-final class GitActivityRefreshCoordinator {
-    typealias ScriptRunner = (
+final class GitActivityRefreshCoordinator: @unchecked Sendable {
+    typealias ScriptRunner = @Sendable (
         URL,
         [URL],
         TinyBuddyTimeContext,

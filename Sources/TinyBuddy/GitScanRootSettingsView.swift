@@ -34,7 +34,7 @@ final class GitScanRootSettingsViewModel: ObservableObject {
 
     private let store: GitScanRootAuthorizationStore
     private let notificationCenter: NotificationCenter
-    private var authorizationsDidChangeObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var authorizationsDidChangeObserver: NSObjectProtocol?
 
     init(
         store: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),

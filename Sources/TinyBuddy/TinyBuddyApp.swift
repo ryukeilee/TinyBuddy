@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import Foundation
 import OSLog
 import SwiftUI
 import TinyBuddyCore
@@ -281,7 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { notification in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 handler(notification)
             }
         }

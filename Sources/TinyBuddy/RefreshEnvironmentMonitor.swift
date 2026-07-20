@@ -44,7 +44,7 @@ final class TinyBuddyPowerStateMonitor {
     private let stateProvider: StateProvider
     private let eventHandler: EventHandler
     private let scheduler: Scheduler
-    private var powerStateObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var powerStateObserver: NSObjectProtocol?
     private var lastPublishedState: TinyBuddyPowerState?
     private var isEmissionScheduled = false
     private var isStarted = false
@@ -159,7 +159,7 @@ final class HUDVisibilityMonitor {
     private let visibilityProvider: VisibilityProvider
     private let eventHandler: EventHandler
     private let scheduler: Scheduler
-    private var observers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
     private var lastPublishedVisibility: Bool?
     private var isEmissionScheduled = false
     private var isStarted = false

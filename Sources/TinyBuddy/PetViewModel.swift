@@ -132,7 +132,7 @@ final class PetViewModel: ObservableObject {
     private var latestLifecycleGeneration = 0
     private var latestLifecycleNotificationSequence = 0
     private var lastRecordedHUDRevision: Int64?
-    private var observers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
     init(
         onboardingStore: TinyBuddyOnboardingStore = TinyBuddyOnboardingStore(),
@@ -249,18 +249,21 @@ final class PetViewModel: ObservableObject {
         observers.append(notificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] notification in
-            Task { @MainActor [weak self] in
+            let generation = notification.userInfo?[TinyBuddyLifecycleNotification.generationKey] as? Int
+            let sequence = notification.userInfo?[TinyBuddyLifecycleNotification.sequenceKey] as? Int
+            let notificationObject = notification.object as? GitActivityRefreshStatus
+            MainActor.assumeIsolated {
                 guard let self else {
                     return
                 }
-                guard self.acceptLifecycleNotification(notification) else {
+                guard self.acceptLifecycleGeneration(generation, sequence: sequence) else {
                     return
                 }
 
                 let timeContext = self.timeEnvironment.capture()
-                let candidate = notification.object as? GitActivityRefreshStatus
+                let candidate = notificationObject
                     ?? self.newestRefreshStatus(self.refreshStatusStore.load())
                 let refreshStatus = Self.displayRefreshStatus(
                     candidate,
@@ -275,13 +278,15 @@ final class PetViewModel: ObservableObject {
         observers.append(notificationCenter.addObserver(
             forName: .gitActivityRefreshDidStart,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] notification in
-            Task { @MainActor [weak self] in
+            let generation = notification.userInfo?[TinyBuddyLifecycleNotification.generationKey] as? Int
+            let sequence = notification.userInfo?[TinyBuddyLifecycleNotification.sequenceKey] as? Int
+            MainActor.assumeIsolated {
                 guard let self else {
                     return
                 }
-                guard self.acceptLifecycleNotification(notification) else {
+                guard self.acceptLifecycleGeneration(generation, sequence: sequence) else {
                     return
                 }
                 self.latestRefreshStatus = Self.displayRefreshStatus(
@@ -296,20 +301,22 @@ final class PetViewModel: ObservableObject {
         observers.append(notificationCenter.addObserver(
             forName: .gitScanRootAuthorizationsDidChange,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.updateDisplayPresentation()
             }
         })
         observers.append(notificationCenter.addObserver(
             forName: .gitActivitySnapshotDidChange,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] notification in
-            Task { @MainActor [weak self] in
+            let generation = notification.userInfo?[TinyBuddyLifecycleNotification.generationKey] as? Int
+            let sequence = notification.userInfo?[TinyBuddyLifecycleNotification.sequenceKey] as? Int
+            MainActor.assumeIsolated {
                 guard let self,
-                      self.acceptLifecycleNotification(notification) else {
+                      self.acceptLifecycleGeneration(generation, sequence: sequence) else {
                     return
                 }
                 self.reloadCommittedHUDState()
@@ -318,11 +325,13 @@ final class PetViewModel: ObservableObject {
         observers.append(notificationCenter.addObserver(
             forName: .tinyBuddyTimeEnvironmentDidChange,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] notification in
-            Task { @MainActor [weak self] in
+            let generation = notification.userInfo?[TinyBuddyLifecycleNotification.generationKey] as? Int
+            let sequence = notification.userInfo?[TinyBuddyLifecycleNotification.sequenceKey] as? Int
+            MainActor.assumeIsolated {
                 guard let self,
-                      self.acceptLifecycleNotification(notification) else {
+                      self.acceptLifecycleGeneration(generation, sequence: sequence) else {
                     return
                 }
                 self.handleTimeEnvironmentDidChange()
@@ -331,9 +340,9 @@ final class PetViewModel: ObservableObject {
         observers.append(notificationCenter.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.restorePersistedState()
             }
         })
@@ -404,9 +413,8 @@ final class PetViewModel: ObservableObject {
         }
     }
 
-    private func acceptLifecycleNotification(_ notification: Notification) -> Bool {
-        guard let generation = notification.userInfo?[TinyBuddyLifecycleNotification.generationKey]
-            as? Int else {
+    private func acceptLifecycleGeneration(_ generation: Int?, sequence: Int?) -> Bool {
+        guard let generation else {
             return true
         }
         guard generation >= latestLifecycleGeneration else {
@@ -417,8 +425,7 @@ final class PetViewModel: ObservableObject {
         }
         latestLifecycleGeneration = generation
 
-        guard let sequence = notification.userInfo?[TinyBuddyLifecycleNotification.sequenceKey]
-            as? Int else {
+        guard let sequence else {
             return true
         }
         guard sequence > latestLifecycleNotificationSequence else {

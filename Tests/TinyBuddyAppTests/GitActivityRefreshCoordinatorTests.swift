@@ -2371,7 +2371,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
     }
 }
 
-private final class RefreshHarness {
+private final class RefreshHarness: @unchecked Sendable {
     private let testCase: XCTestCase
     private let state: State
     private let refreshExpectationQueue = DispatchQueue(label: "TinyBuddyTests.RefreshHarness")
@@ -2899,7 +2899,7 @@ private final class RefreshHarness {
         return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
-    private final class State {
+    private final class State: @unchecked Sendable {
         var currentDate: Date
         var monotonicTime: TimeInterval = 1_000
         var currentTimeZone = TimeZone(secondsFromGMT: 0)!

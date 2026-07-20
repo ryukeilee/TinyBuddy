@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import TinyBuddyCore
 
-final class ScopedGitScanRoot {
+final class ScopedGitScanRoot: @unchecked Sendable {
     let url: URL
     private let lock = NSLock()
     private var stopAccessingAction: (() -> Void)?
@@ -74,7 +74,7 @@ enum GitScanRootAccessIssue: Equatable {
     case authorizationInvalid
 }
 
-struct GitScanRootAccessResult {
+struct GitScanRootAccessResult: Sendable {
     let roots: [ScopedGitScanRoot]
     let issue: GitScanRootAccessIssue?
     let authorizations: [GitScanRootAuthorization]

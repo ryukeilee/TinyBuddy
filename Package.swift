@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 
 import PackageDescription
 
@@ -19,23 +19,33 @@ let package = Package(
         )
     ],
     targets: [
-        .target(name: "TinyBuddyCore"),
+        .target(
+            name: "TinyBuddyCore",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "TinyBuddy",
-            dependencies: ["TinyBuddyCore"]
+            dependencies: ["TinyBuddyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-        .executableTarget(name: "TinyBuddyReleaseInstaller"),
+        .executableTarget(
+            name: "TinyBuddyReleaseInstaller",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "TinyBuddyReleaseVerifier",
-            dependencies: ["TinyBuddyCore"]
+            dependencies: ["TinyBuddyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "TinyBuddyCoreTests",
-            dependencies: ["TinyBuddyCore"]
+            dependencies: ["TinyBuddyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "TinyBuddyAppTests",
-            dependencies: ["TinyBuddy", "TinyBuddyCore"]
+            dependencies: ["TinyBuddy", "TinyBuddyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]
 )

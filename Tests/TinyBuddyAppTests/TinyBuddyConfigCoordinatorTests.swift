@@ -301,7 +301,7 @@ private final class InMemoryConfigStorage: @unchecked Sendable {
 }
 
 enum TinyBuddyTestConfigRootsProvider {
-    static var currentRoots: [String] = []
+    static nonisolated(unsafe) var currentRoots: [String] = []
 
     static func result() -> GitScanRootAccessResult {
         let roots = currentRoots.map { path in
