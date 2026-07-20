@@ -23,6 +23,9 @@ extension Notification.Name {
     static let tinyBuddySettingsDidChange = Notification.Name(
         "TinyBuddy.settingsDidChange"
     )
+    static let tinyBuddyResetRequested = Notification.Name(
+        "TinyBuddy.resetRequested"
+    )
 }
 
 enum GitScanRootAuthorizationCommand {
@@ -157,6 +160,9 @@ final class GitScanRootSettingsViewModel: ObservableObject {
 struct GitScanRootSettingsView: View {
     @StateObject private var viewModel: GitScanRootSettingsViewModel
     @State private var exclusionPattern = ""
+    @State private var pendingResetLevel: TinyBuddyResetLevel?
+    @State private var authorizationPendingRemoval: GitScanRootAuthorization?
+    @State private var isConfirmingRemoveAllAuthorizations = false
 
     init(viewModel: GitScanRootSettingsViewModel? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel ?? GitScanRootSettingsViewModel())
@@ -202,7 +208,7 @@ struct GitScanRootSettingsView: View {
                 Spacer()
 
                 Button("移除全部", role: .destructive) {
-                    viewModel.removeAllAuthorizations()
+                    isConfirmingRemoveAllAuthorizations = true
                 }
                 .disabled(viewModel.authorizations.isEmpty)
                 .accessibilityLabel("移除全部授权目录")
@@ -266,9 +272,85 @@ struct GitScanRootSettingsView: View {
             }
             .toggleStyle(.switch)
             .accessibilityHint("启用后，TinyBuddy 会在你登录 macOS 时自动启动")
+
+            Divider()
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("重置与数据")
+                    .font(.headline)
+                Text("所有重置只会处理 TinyBuddy 自己创建的数据，绝不会删除或修改你的仓库或 Git 数据。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Button("重置运行状态", role: .destructive) {
+                        pendingResetLevel = .runtimeState
+                    }
+                    Button("重置设置", role: .destructive) {
+                        pendingResetLevel = .settings
+                    }
+                    Button("清除全部 App 数据", role: .destructive) {
+                        pendingResetLevel = .allAppData
+                    }
+                }
+            }
         }
         .frame(minWidth: 560, minHeight: 460)
         .scenePadding()
+        .confirmationDialog(
+            pendingResetLevel?.title ?? "确认重置",
+            isPresented: Binding(
+                get: { pendingResetLevel != nil },
+                set: { if !$0 { pendingResetLevel = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("继续并退出 TinyBuddy", role: .destructive) {
+                guard let pendingResetLevel else { return }
+                NotificationCenter.default.post(
+                    name: .tinyBuddyResetRequested,
+                    object: pendingResetLevel
+                )
+                self.pendingResetLevel = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingResetLevel = nil
+            }
+        } message: {
+            Text(pendingResetLevel?.confirmationMessage ?? "")
+        }
+        .confirmationDialog(
+            "移除全部 Git 目录授权？",
+            isPresented: $isConfirmingRemoveAllAuthorizations,
+            titleVisibility: .visible
+        ) {
+            Button("移除全部授权", role: .destructive) {
+                viewModel.removeAllAuthorizations()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这只会移除 TinyBuddy 保存的 security-scoped bookmarks，不会删除或修改任何目录、仓库或 Git 数据。")
+        }
+        .confirmationDialog(
+            "移除此 Git 目录授权？",
+            isPresented: Binding(
+                get: { authorizationPendingRemoval != nil },
+                set: { if !$0 { authorizationPendingRemoval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("移除授权", role: .destructive) {
+                guard let authorizationPendingRemoval else { return }
+                viewModel.removeAuthorization(id: authorizationPendingRemoval.id)
+                self.authorizationPendingRemoval = nil
+            }
+            Button("取消", role: .cancel) {
+                authorizationPendingRemoval = nil
+            }
+        } message: {
+            Text("这只会移除 TinyBuddy 对该目录保存的 security-scoped bookmark，不会删除或修改该目录、仓库或 Git 数据。")
+        }
     }
 
     @ViewBuilder
@@ -304,7 +386,7 @@ struct GitScanRootSettingsView: View {
                 .accessibilityHint("重新选择该目录以刷新授权")
 
                 Button("移除", role: .destructive) {
-                    viewModel.removeAuthorization(id: authorization.id)
+                    authorizationPendingRemoval = authorization
                 }
                 .accessibilityLabel("移除「\(authorization.displayName)」")
                 .accessibilityHint("从授权列表中移除该目录")

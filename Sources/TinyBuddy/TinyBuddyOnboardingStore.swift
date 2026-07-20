@@ -13,13 +13,17 @@ final class TinyBuddyOnboardingStore {
 
     private let userDefaults: UserDefaults
     private let sharedDefaults: UserDefaults
+    private let legacyAuthorizationIsValid: () -> Bool
 
     init(
         userDefaults: UserDefaults = .standard,
-        sharedDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults()
+        sharedDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults(),
+        legacyAuthorizationIsValid: (() -> Bool)? = nil
     ) {
         self.userDefaults = userDefaults
         self.sharedDefaults = sharedDefaults
+        self.legacyAuthorizationIsValid = legacyAuthorizationIsValid
+            ?? { Self.hasStructurallyValidLegacyAuthorization(userDefaults: userDefaults) }
 
         if let persistedState = userDefaults.string(forKey: Key.state).flatMap(State.init(rawValue:)) {
             TinyBuddyDisplaySharedState.saveOnboardingCompleted(
@@ -39,10 +43,7 @@ final class TinyBuddyOnboardingStore {
             return
         }
 
-        let initialState: State = Self.hasLegacyInstallationEvidence(
-            userDefaults: userDefaults,
-            sharedDefaults: sharedDefaults
-        ) ? .completed : .pending
+        let initialState: State = self.legacyAuthorizationIsValid() ? .completed : .pending
         userDefaults.set(initialState.rawValue, forKey: Key.state)
         TinyBuddyDisplaySharedState.saveOnboardingCompleted(
             initialState == .completed,
@@ -71,26 +72,38 @@ final class TinyBuddyOnboardingStore {
         return true
     }
 
-    private static func hasLegacyInstallationEvidence(
-        userDefaults: UserDefaults,
-        sharedDefaults: UserDefaults
+    private static func hasStructurallyValidLegacyAuthorization(
+        userDefaults: UserDefaults
     ) -> Bool {
-        let standardKeys = [
-            GitScanRootAuthorizationStore.Constants.bookmarkDataKey,
-            GitScanRootAuthorizationStore.Constants.authorizationRecordsKey
-        ]
-        if standardKeys.contains(where: { userDefaults.object(forKey: $0) != nil }) {
+        // Snapshot, refresh-status and daily-stat values are caches, not a
+        // configuration contract. A stale or malformed shared snapshot must
+        // never turn an uninstall/reinstall into a completed onboarding.
+        if let records = userDefaults.array(
+            forKey: GitScanRootAuthorizationStore.Constants.authorizationRecordsKey
+        ), records.contains(where: isStructurallyValidAuthorizationRecord) {
             return true
         }
 
-        let sharedKeys = [
-            "tinybuddy.dailyStats.dayIdentifier",
-            "tinybuddy.currentStatus",
-            GitActivityRefreshStatusStore.Key.refreshedAt,
-            TinyBuddyCombinedSnapshotStore.Key.snapshot,
-            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA,
-            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB
-        ]
-        return sharedKeys.contains(where: { sharedDefaults.object(forKey: $0) != nil })
+        // The pre-v2 format contains only bookmark blobs. Require at least one
+        // nonempty blob rather than trusting an arbitrary key or a corrupt
+        // property-list value.
+        return (userDefaults.array(
+            forKey: GitScanRootAuthorizationStore.Constants.bookmarkDataKey
+        ) as? [Data])?.contains(where: { !$0.isEmpty }) == true
+    }
+
+    private static func isStructurallyValidAuthorizationRecord(_ value: Any) -> Bool {
+        guard let record = value as? [String: Any],
+              let id = record["id"] as? String,
+              !id.isEmpty,
+              let bookmarkData = record["bookmarkData"] as? Data,
+              !bookmarkData.isEmpty,
+              let displayName = record["displayName"] as? String,
+              !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let path = record["lastKnownPath"] as? String,
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return true
     }
 }

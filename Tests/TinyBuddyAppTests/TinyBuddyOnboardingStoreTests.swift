@@ -92,6 +92,55 @@ final class TinyBuddyOnboardingStoreTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: TinyBuddyOnboardingStore.Key.state), "completed")
     }
 
+    func testReinstallWithOnlyCorruptSnapshotAndMalformedAuthorizationStartsOnboarding() {
+        let defaults = makeDefaults(prefix: "onboarding")
+        let sharedDefaults = makeDefaults(prefix: "shared")
+        defaults.set([["id": "broken", "bookmarkData": Data(), "displayName": "", "lastKnownPath": ""]],
+                     forKey: GitScanRootAuthorizationStore.Constants.authorizationRecordsKey)
+        sharedDefaults.set("not-a-snapshot", forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot)
+        sharedDefaults.set("2026-07-20", forKey: "tinybuddy.dailyStats.dayIdentifier")
+
+        let store = TinyBuddyOnboardingStore(
+            userDefaults: defaults,
+            sharedDefaults: sharedDefaults
+        )
+
+        XCTAssertEqual(store.state, .pending)
+        XCTAssertEqual(TinyBuddyDisplaySharedState.onboardingCompleted(userDefaults: sharedDefaults), false)
+        XCTAssertEqual(sharedDefaults.string(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot), "not-a-snapshot")
+    }
+
+    func testReinstallWithLegacyNonemptyBookmarkRecoversCompletedOnboarding() {
+        let defaults = makeDefaults(prefix: "onboarding")
+        let sharedDefaults = makeDefaults(prefix: "shared")
+        defaults.set([Data("legacy-bookmark".utf8)],
+                     forKey: GitScanRootAuthorizationStore.Constants.bookmarkDataKey)
+
+        let store = TinyBuddyOnboardingStore(
+            userDefaults: defaults,
+            sharedDefaults: sharedDefaults
+        )
+
+        XCTAssertEqual(store.state, .completed)
+        XCTAssertEqual(TinyBuddyDisplaySharedState.onboardingCompleted(userDefaults: sharedDefaults), true)
+    }
+
+    func testReinstallDoesNotTrustStructurallyValidButUnresolvableAuthorization() {
+        let defaults = makeDefaults(prefix: "onboarding")
+        let sharedDefaults = makeDefaults(prefix: "shared")
+        defaults.set([["id": "saved", "bookmarkData": Data("stale".utf8), "displayName": "Saved", "lastKnownPath": "/missing"]],
+                     forKey: GitScanRootAuthorizationStore.Constants.authorizationRecordsKey)
+
+        let store = TinyBuddyOnboardingStore(
+            userDefaults: defaults,
+            sharedDefaults: sharedDefaults,
+            legacyAuthorizationIsValid: { false }
+        )
+
+        XCTAssertEqual(store.state, .pending)
+        XCTAssertEqual(TinyBuddyDisplaySharedState.onboardingCompleted(userDefaults: sharedDefaults), false)
+    }
+
     private func makeDefaults(prefix: String) -> UserDefaults {
         let suiteName = "TinyBuddyOnboardingStoreTests.\(prefix).\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

@@ -54,25 +54,67 @@ struct TinyBuddyApp: App {
 
     var body: some Scene {
         WindowGroup {
-            PetView(viewModel: appDelegate.petViewModel)
+            if let recoveryError = appDelegate.startupRecoveryError {
+                TinyBuddyResetRecoveryBlockedView(error: recoveryError)
+            } else {
+                PetView(viewModel: appDelegate.petViewModel)
+            }
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
 
         Settings {
-            GitScanRootSettingsView()
+            if let recoveryError = appDelegate.startupRecoveryError {
+                TinyBuddyResetRecoveryBlockedView(error: recoveryError)
+            } else {
+                GitScanRootSettingsView()
+            }
         }
+    }
+}
+
+private struct TinyBuddyResetRecoveryBlockedView: View {
+    let error: TinyBuddyResetError
+
+    var body: some View {
+        ContentUnavailableView(
+            "TinyBuddy 重置未完成",
+            systemImage: "exclamationmark.triangle.fill",
+            description: Text("\(error.localizedDescription) 修复后请退出并重新打开 TinyBuddy。")
+        )
+        .frame(minWidth: 460, minHeight: 260)
+        .scenePadding()
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let onboardingStore = TinyBuddyOnboardingStore()
-    private let gitScanRootAuthorizationStore = GitScanRootAuthorizationStore()
+    private var onboardingStore: TinyBuddyOnboardingStore!
+    private var gitScanRootAuthorizationStore: GitScanRootAuthorizationStore!
     private let notificationCenter = NotificationCenter.default
     private let timeEnvironment = TinyBuddyTimeEnvironment()
+    private let resetService: TinyBuddyResetService
+    private let resetRecoveryError: TinyBuddyResetError?
     private var authorizationCommandObservers: [NSObjectProtocol] = []
+    private var isPerformingReset = false
+    private lazy var resetExecutionCoordinator = TinyBuddyResetExecutionCoordinator(
+        quiesceRuntime: { [weak self] in
+            self?.quiesceRuntimeForReset()
+        },
+        performReset: { [weak self] level in
+            self?.resetService.perform(level: level) ?? .failure(.removalFailed)
+        },
+        reloadWidget: {
+            WidgetCenter.shared.reloadAllTimelines()
+        },
+        terminate: {
+            NSApp.terminate(nil)
+        },
+        reportFailure: { [weak self] error in
+            self?.presentResetFailureAndTerminate(error)
+        }
+    )
     private lazy var dailyStatsStore = DailyStatsStore(timeEnvironment: timeEnvironment)
     private lazy var activityStore = GitTodayActivityStore(timeEnvironment: timeEnvironment)
     private lazy var refreshStatusStore = GitActivityRefreshStatusStore(
@@ -100,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeEnvironment: timeEnvironment,
         repositoryChangeMonitorFactory: { [gitScanRootAuthorizationStore] changeHandler in
             GitRepositoryChangeMonitor(
-                authorizedRootsProvider: gitScanRootAuthorizationStore.accessAuthorizedRootResult,
+                authorizedRootsProvider: gitScanRootAuthorizationStore!.accessAuthorizedRootResult,
                 changeHandler: changeHandler
             )
         }
@@ -141,7 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TinyBuddyConfigCoordinator(
             configStore: configStore,
             scanRootsProvider: { [gitScanRootAuthorizationStore] in
-                gitScanRootAuthorizationStore.accessAuthorizedRootResult()
+                gitScanRootAuthorizationStore!.accessAuthorizedRootResult()
             },
             rebuildRepositoryChangeMonitor: { [weak self] in
                 self?.gitActivityRefreshCoordinator.handleConfigChanged()
@@ -153,7 +195,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
     private lazy var configStore = TinyBuddyConfigStore()
 
+    var startupRecoveryError: TinyBuddyResetError? {
+        resetRecoveryError
+    }
+
+    override init() {
+        let resetService = TinyBuddyResetService()
+        self.resetService = resetService
+        switch resetService.recoverInterruptedResetIfNeeded() {
+        case .success:
+            resetRecoveryError = nil
+        case .failure(let error):
+            resetRecoveryError = error
+        }
+        super.init()
+        if resetRecoveryError == nil {
+            initializePersistentStores()
+        }
+    }
+
+    private func initializePersistentStores() {
+        // This runs only after reset recovery succeeds. A failed recovery must
+        // not migrate bookmarks, infer onboarding, or republish stale state.
+        let gitScanRootAuthorizationStore = GitScanRootAuthorizationStore()
+        self.gitScanRootAuthorizationStore = gitScanRootAuthorizationStore
+        onboardingStore = TinyBuddyOnboardingStore(
+            legacyAuthorizationIsValid: {
+                let result = gitScanRootAuthorizationStore.accessAuthorizedRootResult()
+                result.roots.forEach { $0.stopAccessing() }
+                return result.issue == nil && !result.roots.isEmpty
+            }
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let resetRecoveryError {
+            NSApp.setActivationPolicy(.regular)
+            tinyBuddyStartupLogger.error(
+                "reset recovery blocked normal startup reason=\(resetRecoveryError.localizedDescription, privacy: .public)"
+            )
+            return
+        }
         // === Single-instance enforcement ===
         //
         // Attempt to become the primary instance. If another instance is already
@@ -208,7 +290,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Relinquish primary instance ownership so the next launch can claim it.
-        TinyBuddyInstanceCoordinator.shared.relinquishOwnership()
+        TinyBuddyInstanceCoordinator.shared.relinquishOwnership(
+            removingStateFile: isPerformingReset
+        )
+        guard resetRecoveryError == nil else {
+            return
+        }
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()
         hudVisibilityMonitor.stop()
@@ -297,8 +384,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             observeAuthorizationCommand(named: .gitActivityRefreshRequested) { [weak self] _ in
                 self?.gitActivityRefreshCoordinator.handleManualRefresh()
+            },
+            observeAuthorizationCommand(named: .tinyBuddyResetRequested) { [weak self] notification in
+                guard let level = notification.object as? TinyBuddyResetLevel else {
+                    return
+                }
+                self?.performReset(level)
             }
         ]
+    }
+
+    private func performReset(_ level: TinyBuddyResetLevel) {
+        guard !isPerformingReset else { return }
+        isPerformingReset = true
+        _ = resetExecutionCoordinator.execute(level)
+    }
+
+    private func quiesceRuntimeForReset() {
+        // Stop every component that can schedule work or write state before
+        // the journal is consumed. `stop()` advances the refresh generation,
+        // cancels its child process and makes late queue completions no-ops.
+        hudVisibilityMonitor.stop()
+        powerStateMonitor.stop()
+        timeEnvironmentChangeMonitor.stop()
+        gitActivityRefreshCoordinator.stop()
+        HUDWindowPositionController.shared.stop()
+        authorizationCommandObservers.forEach(notificationCenter.removeObserver)
+        authorizationCommandObservers.removeAll()
+    }
+
+    private func presentResetFailureAndTerminate(_ error: TinyBuddyResetError) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "TinyBuddy 重置未完成"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "退出")
+        alert.runModal()
+        NSApp.terminate(nil)
     }
 
     private func observeAuthorizationCommand(

@@ -195,6 +195,22 @@ final class TinyBuddyInstanceCoordinatorTests: XCTestCase {
         }
     }
 
+    func testResetRelinquishRemovesOnlyTheReleasedInstanceStateFile() {
+        let lockURL = makeLockFileURL()
+        let exp = expectation(description: "reset relinquish")
+        Task { @MainActor in
+            let coordinator = TinyBuddyInstanceCoordinator(testLockFileURL: lockURL)
+            XCTAssertEqual(coordinator.claimInstance(), .primary)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: lockURL.path))
+
+            coordinator.relinquishOwnership(removingStateFile: true)
+
+            XCTAssertFalse(FileManager.default.fileExists(atPath: lockURL.path))
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2)
+    }
+
     // MARK: - Edge cases
 
     func testDoubleRelinquishIsSafe() {

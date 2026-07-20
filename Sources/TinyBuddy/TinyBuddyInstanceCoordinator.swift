@@ -145,7 +145,8 @@ public final class TinyBuddyInstanceCoordinator {
     }
 
     /// Relinquish primary ownership. Called on graceful app termination.
-    public func relinquishOwnership() {
+    public func relinquishOwnership(removingStateFile: Bool = false) {
+        let stateFileURL = removingStateFile ? lockFileURL() : nil
         if let observer = wakeObserver {
             DistributedNotificationCenter.default().removeObserver(observer)
             wakeObserver = nil
@@ -155,6 +156,9 @@ public final class TinyBuddyInstanceCoordinator {
             fileDescriptor = -1
         }
         role = nil
+        if let stateFileURL {
+            try? FileManager.default.removeItem(at: stateFileURL)
+        }
         Self.logger.notice("Relinquished primary instance ownership")
     }
 
