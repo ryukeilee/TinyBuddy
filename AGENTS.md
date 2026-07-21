@@ -76,27 +76,6 @@ Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-fa
 - Reject diagnostics that expose repository paths, user data, credentials, or unstable raw identifiers. Confirm new shell commands and their indirect dependencies are allowed by the signed runtime boundary.
 - Require relevant regression coverage and exact validation evidence. Do not accept weakened assertions, hidden failures, or an unrelated refactor bundled with the fix.
 
-## Delegation to Subagents
-
-Global delegation decision rules are in `~/.config/opencode/AGENTS.md`. This section adds project-specific thresholds and empirical baselines only.
-
-### Project-specific verifier commands
-
-- `swift test --filter <TestClass>` — single test class
-- `swift test --filter "<TestClass>/<testMethod>"` — single test method  
-- `swift build` — full build
-- `/bin/bash -n script/update_git_completion_count.sh` — shell syntax check
-- `swift test` — full test suite (only at final gate; workers should use narrow filters)
-
-### Empirical baseline (2026-07-21)
-
-Worker one-shot success rate on single-file pattern-following tasks in this repo: **3/3 (100%)**. This covers XCTest additions following existing test patterns with `swift test --filter` as the verifier, including parallel dispatch on non-overlapping files. No data yet on SwiftUI view implementations or multi-file store adapter tasks.
-
-### When NOT to delegate (project-specific)
-
-- **Cross-module type propagation.** Changing a field in `FocusSession` forces coordinated edits in `FocusSessionEngine`, `validate`, Codable fallback, and 3+ test files. The propagation is serial; parallel workers produce merge conflicts or type errors.
-- **No self-verification path in Swift projects.** Workers must be given a narrow `swift test --filter` or `swift build` that isolates their change. Full-suite runners belong to Root at final gate.
-
 ## Commit & Pull Request Guidelines
 
 Use short imperative commit subjects, matching the existing history style, such as `Verify release signing and widget registration`, `Add daily stats widget state`, or `Fix session persistence reset`. Pull requests should describe the user-visible behavior change, list the exact validation performed, note any signing or widget-specific verification, link related issues when available, and include screenshots only when the change is meaningfully visual.
