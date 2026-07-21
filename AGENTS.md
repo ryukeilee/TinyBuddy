@@ -78,25 +78,24 @@ Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-fa
 
 ## Delegation to Subagents
 
-### When to delegate (high-confidence, low-friction)
+Global delegation decision rules are in `~/.config/opencode/AGENTS.md`. This section adds project-specific thresholds and empirical baselines only.
 
-- **Single-file changes with a reference pattern in the same file or module.** Example: adding tests to an existing test class, following the style of the surrounding tests. Worker can read the reference, produce matching code, and run `swift test --filter <TestClass>` to self-verify.
-- **Read-only exploration.** Dispatch `explorer` for cross-module searches, dependency tracing, or gathering evidence across multiple files. Explorer has no side effects and the returned report is consumed once.
-- **Fill-in implementation after Root has frozen the API signature.** Root writes the protocol/type definition and one canonical implementation first, then delegates parallel copies (additional test cases, widget view variants, similar store adapters).
+### Project-specific verifier commands
 
-### When NOT to delegate (Root does it directly)
-
-- **Cross-module changes that propagate type definitions.** Changing a field in `FocusSession` → updating engine validation → fixing codable fallback → adjusting 3 test files. The propagation chain is serial; parallel workers produce merge conflicts.
-- **New API or state machine design.** Worker lacks the full context of all consumers (HUD, Widget, menu bar, persistence) and will produce a locally-correct design that breaks integration.
-- **No self-verification path.** If the worker cannot run a decisive test or build to validate its own output, the cost of Root re-verifying and debugging exceeds direct implementation.
-
-### Task packet minimum
-
-When delegating, include: exact file path(s), a reference example (line range or function name), the expected verifier command, and the exact return format. Omit: full conversation history, unrelated project context, long raw logs.
+- `swift test --filter <TestClass>` — single test class
+- `swift test --filter "<TestClass>/<testMethod>"` — single test method  
+- `swift build` — full build
+- `/bin/bash -n script/update_git_completion_count.sh` — shell syntax check
+- `swift test` — full test suite (only at final gate; workers should use narrow filters)
 
 ### Empirical baseline (2026-07-21)
 
-Worker one-shot success rate on single-file pattern-following tasks in this repo: **1/1 (100%)**. This covers XCTest additions following existing test patterns with `swift test --filter` as the verifier. No data yet on UI view implementations, store adapters, or multi-file tasks.
+Worker one-shot success rate on single-file pattern-following tasks in this repo: **3/3 (100%)**. This covers XCTest additions following existing test patterns with `swift test --filter` as the verifier, including parallel dispatch on non-overlapping files. No data yet on SwiftUI view implementations or multi-file store adapter tasks.
+
+### When NOT to delegate (project-specific)
+
+- **Cross-module type propagation.** Changing a field in `FocusSession` forces coordinated edits in `FocusSessionEngine`, `validate`, Codable fallback, and 3+ test files. The propagation is serial; parallel workers produce merge conflicts or type errors.
+- **No self-verification path in Swift projects.** Workers must be given a narrow `swift test --filter` or `swift build` that isolates their change. Full-suite runners belong to Root at final gate.
 
 ## Commit & Pull Request Guidelines
 
