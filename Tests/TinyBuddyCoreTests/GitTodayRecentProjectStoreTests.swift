@@ -42,6 +42,30 @@ final class GitTodayRecentProjectStoreTests: XCTestCase {
         XCTAssertNil(store.loadTodayProjectName())
     }
 
+    func testStableProjectIDFollowsSameDayAndClearsAtomicallyWithName() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 7, day: 2)
+        let store = GitTodayRecentProjectStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { currentDate },
+            sharedFallbacksEnabled: false
+        )
+        let id = TinyBuddyProjectID(rawValue: "stable-project")
+
+        store.saveTodayProject(id: id, displayName: "Renamed")
+        XCTAssertEqual(store.loadTodayProjectID(), id)
+        XCTAssertEqual(store.loadTodayProjectName(), "Renamed")
+
+        currentDate = makeDate(year: 2026, month: 7, day: 3)
+        XCTAssertNil(store.loadTodayProjectID())
+        XCTAssertNil(store.loadTodayProjectName())
+
+        store.saveTodayProject(id: nil, displayName: nil)
+        XCTAssertNil(defaults.string(forKey: GitTodayRecentProjectStore.Key.projectID))
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "TinyBuddyGitTodayRecentProjectTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

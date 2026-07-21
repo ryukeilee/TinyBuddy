@@ -255,6 +255,9 @@ final class TinyBuddyResetService {
                 preferences.appendingPathComponent(".tinybuddy-git-repository-cache", isDirectory: true),
                 preferences.appendingPathComponent(".tinybuddy-time-scope")
             ]
+            if level == .allAppData {
+                ownedURLs.append(containerURL.appendingPathComponent("projects", isDirectory: true))
+            }
         }
 
         var removedFileCount = 0
@@ -305,6 +308,9 @@ final class TinyBuddyResetService {
         GitTodayCommitCountStore.Key.count,
         GitTodayRecentProjectStore.Key.dayIdentifier,
         GitTodayRecentProjectStore.Key.projectName,
+        GitTodayRecentProjectStore.Key.projectID,
+        TinyBuddyProjectDiscoveryStore.Key.manifest,
+        TinyBuddyProjectDiscoveryStore.Key.recentRepositoryFingerprint,
         GitActivityRefreshStatusStore.Key.refreshedAt,
         GitActivityRefreshStatusStore.Key.trigger,
         GitActivityRefreshStatusStore.Key.outcome,
@@ -331,7 +337,8 @@ final class TinyBuddyResetService {
         GitTodayCommitCountStore.Key.dayIdentifier,
         GitTodayCommitCountStore.Key.count,
         GitTodayRecentProjectStore.Key.dayIdentifier,
-        GitTodayRecentProjectStore.Key.projectName
+        GitTodayRecentProjectStore.Key.projectName,
+        GitTodayRecentProjectStore.Key.projectID
     ]
 
     private let settingsSharedKeys = [

@@ -52,6 +52,15 @@ public enum TinyBuddySharedData {
             .appendingPathComponent(".tinybuddy-time-scope")
     }
 
+    public static func projectRegistryURL(fileManager: FileManager = .default) -> URL? {
+        guard let containerURL = appGroupContainerURL(fileManager: fileManager) else {
+            return nil
+        }
+        return containerURL
+            .appendingPathComponent("projects", isDirectory: true)
+            .appendingPathComponent("registry.json")
+    }
+
     public static func loadTimeScopeToken(fileManager: FileManager = .default) -> String? {
         guard let tokenURL = timeScopeTokenURL(fileManager: fileManager),
               let value = try? String(contentsOf: tokenURL, encoding: .utf8),

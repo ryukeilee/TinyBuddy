@@ -293,6 +293,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let powerStateProvider: PowerStateProvider
     private let timeScopePublisher: TimeScopePublisher
     private let beforeActivityCommit: ActivityCommitHook
+    private let projectDiscoveryCommit: @Sendable (_ completeScan: Bool) -> Void
     private let repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory?
     private let repositoryDiscoveryCacheInvalidator: RepositoryDiscoveryCacheInvalidator
     private let workspaceNotificationCenter: NotificationCenter
@@ -381,6 +382,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         },
         timeScopePublisher: TimeScopePublisher? = nil,
         beforeActivityCommit: @escaping ActivityCommitHook = {},
+        projectDiscoveryCommit: @escaping @Sendable (_ completeScan: Bool) -> Void = { _ in },
         repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory? = nil,
         repositoryDiscoveryCacheInvalidator: @escaping RepositoryDiscoveryCacheInvalidator = GitActivityRefreshCoordinator.invalidateRepositoryDiscoveryCache,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
@@ -450,6 +452,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         self.timeScopePublisher = timeScopePublisher
             ?? GitActivityRefreshCoordinator.publishTimeScopeToken
         self.beforeActivityCommit = beforeActivityCommit
+        self.projectDiscoveryCommit = projectDiscoveryCommit
         self.repositoryChangeMonitorFactory = repositoryChangeMonitorFactory
         self.repositoryDiscoveryCacheInvalidator = repositoryDiscoveryCacheInvalidator
         self.workspaceNotificationCenter = workspaceNotificationCenter
@@ -1433,6 +1436,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             )
         )
         lastRefreshFailureMonotonicTime = nil
+        projectDiscoveryCommit(!hasPartialRecovery)
         finishRefresh(succeeded: true)
     }
 

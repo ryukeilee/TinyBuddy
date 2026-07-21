@@ -15,6 +15,8 @@ FOCUS_BLOCK_DAY_KEY="tinybuddy.gitTodayFocusBlockCount.dayIdentifier"
 FOCUS_BLOCK_COUNT_KEY="tinybuddy.gitTodayFocusBlockCount.count"
 RECENT_PROJECT_DAY_KEY="tinybuddy.gitTodayRecentProject.dayIdentifier"
 RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
+RECENT_PROJECT_FINGERPRINT_KEY="tinybuddy.gitTodayRecentProject.repositoryFingerprint.v1"
+PROJECT_DISCOVERY_KEY="tinybuddy.gitProjects.discovery.v1"
 TRUSTED_SNAPSHOT_KEY="tinybuddy.gitTodayActivity.trustedSnapshot"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
 EXCLUDED_PATHS="${TINYBUDDY_GIT_EXCLUDED_PATHS:-}"
@@ -94,6 +96,7 @@ SNAPSHOT_WRITE_LOCK_OWNER="$SNAPSHOT_WRITE_LOCK/owner-$$"
 total_count=0
 latest_activity_timestamp=""
 recent_project_name=""
+recent_project_fingerprint=""
 readable_reflog_repo_count=0
 successful_reflog_repo_count=0
 failed_reflog_repo_count=0
@@ -113,6 +116,8 @@ validated_repo_list_file="$(mktemp)"
 repository_identity_file="$(mktemp)"
 repository_records_file="$(mktemp)"
 unique_repository_records_file="$(mktemp)"
+project_discovery_records_file="$(mktemp)"
+repository_fingerprint_roots_file="$(mktemp)"
 raw_activity_events_file="$(mktemp)"
 normalized_activity_events_file="$(mktemp)"
 repo_activity_events_file="$(mktemp)"
@@ -206,7 +211,7 @@ cleanup() {
     rmdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null || true
     rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
   fi
-  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
+  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$project_discovery_records_file" "$repository_fingerprint_roots_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
 emit_runtime_diagnostics_once() {
@@ -1519,6 +1524,33 @@ write_reflog_events_to_cache() {
   done < "$repo_activity_events_file"
 }
 
+# Prefer immutable Git root object IDs as path/name-independent evidence. The
+# filesystem identity is a fallback for a repository with no commits; it stays
+# stable across an in-volume move and is replaced by root evidence after the
+# first commit without changing the registry's retained path alias.
+repository_stable_fingerprint() {
+  local repo_root="$1"
+  local common_dir="$2"
+  local roots=""
+  local filesystem_identity=""
+
+  : > "$repository_fingerprint_roots_file"
+  if run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+    "$GIT_BIN" -C "$repo_root" rev-list --max-parents=0 --all \
+    > "$repository_fingerprint_roots_file" 2>/dev/null; then
+    roots="$(LC_ALL=C sort -u "$repository_fingerprint_roots_file" | paste -sd, -)"
+  fi
+  if [ -n "$roots" ]; then
+    printf 'git-roots:%s\n' "$roots"
+    return 0
+  fi
+
+  filesystem_identity="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+    "$STAT_BIN" -f '%d:%i' "$common_dir")" || return $?
+  [ -n "$filesystem_identity" ] || return 1
+  printf 'filesystem:%s\n' "$filesystem_identity"
+}
+
 process_repository_list() {
   local using_cached_repo_list="$1"
   local repo_root
@@ -1526,6 +1558,7 @@ process_repository_list() {
   local git_dir
   local common_dir
   local repository_identity
+  local repository_fingerprint
   local display_name
   local reflog_path
   local resolve_reflog_exit_code
@@ -1542,6 +1575,7 @@ process_repository_list() {
 
   reset_activity_snapshot
   : > "$validated_repo_list_file"
+  : > "$project_discovery_records_file"
 
   while IFS= read -r repo_root; do
     current_repository_candidate="$repo_root"
@@ -1630,7 +1664,16 @@ process_repository_list() {
 
     repository_identity="$common_dir"
     display_name="$(repository_display_name "$repo_root" "$common_dir")"
+    if ! repository_fingerprint="$(repository_stable_fingerprint "$repo_root" "$common_dir")"; then
+      if [ "$using_cached_repo_list" -eq 1 ]; then
+        log_error "cached repository identity evidence is no longer available; rebuilding repository cache"
+        return 2
+      fi
+      record_invalid_repository "repository-fingerprint-failed"
+      continue
+    fi
     if ! record_field_is_supported "$repository_identity" ||
+       ! record_field_is_supported "$repository_fingerprint" ||
        ! record_field_is_supported "$display_name" ||
        ! record_field_is_supported "$repo_root" ||
        ! record_field_is_supported "$git_dir"; then
@@ -1638,6 +1681,8 @@ process_repository_list() {
       continue
     fi
     printf '%s\n' "$repository_identity" >> "$repository_identity_file"
+    printf '%s\t%s\t%s\n' \
+      "$repository_fingerprint" "$repository_identity" "$display_name" >> "$project_discovery_records_file"
 
     trap - ERR
     if reflog_path="$(resolve_repository_reflog_path "$git_dir")"; then
@@ -1780,6 +1825,7 @@ process_repository_list() {
       latest_activity_timestamp="$event_epoch"
       recent_repository_identity="$repository_identity"
       recent_project_name="$display_name"
+      recent_project_fingerprint="$(awk -F '\t' -v identity="$repository_identity" '$2 == identity { print $1; exit }' "$project_discovery_records_file")"
     fi
   done < "$normalized_activity_events_file"
 }
@@ -1852,6 +1898,25 @@ write_plist_integer_if_changed() {
 
   shared_data_rewritten=1
   write_plist_integer "$key" "$value"
+}
+
+project_discovery_payload() {
+  local fingerprint
+  local repository_alias
+  local display_name
+  local encoded_fingerprint
+  local encoded_alias
+  local encoded_name
+
+  printf 'v1\n'
+  LC_ALL=C sort -u "$project_discovery_records_file" |
+    while IFS=$'\t' read -r fingerprint repository_alias display_name; do
+      [ -n "$fingerprint" ] || continue
+      encoded_fingerprint="$(printf '%s' "$fingerprint" | /usr/bin/base64 | tr -d '\n')"
+      encoded_alias="$(printf '%s' "$repository_alias" | /usr/bin/base64 | tr -d '\n')"
+      encoded_name="$(printf '%s' "$display_name" | /usr/bin/base64 | tr -d '\n')"
+      printf '%s\t%s\t%s\n' "$encoded_fingerprint" "$encoded_alias" "$encoded_name"
+    done
 }
 
 acquire_snapshot_write_lock() {
@@ -2347,6 +2412,8 @@ if [ "$trusted_snapshot_stale" -eq 0 ]; then
   write_plist_integer_if_changed "$FOCUS_BLOCK_COUNT_KEY" "$focus_block_count"
   write_plist_string_if_changed "$RECENT_PROJECT_DAY_KEY" "$TODAY"
   write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
+  write_plist_string_if_changed "$RECENT_PROJECT_FINGERPRINT_KEY" "$recent_project_fingerprint"
+  write_plist_string_if_changed "$PROJECT_DISCOVERY_KEY" "$(project_discovery_payload)"
 fi
 if [ "$invalid_repository_count" -eq 0 ]; then
   if [ "$cache_was_reused" -eq 0 ]; then

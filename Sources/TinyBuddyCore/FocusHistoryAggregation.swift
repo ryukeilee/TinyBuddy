@@ -203,12 +203,17 @@ public struct FocusHistoryAggregationCache: Sendable {
 
     private var contributions: [UUID: Contribution] = [:]
     private var days: [String: DayAccumulator] = [:]
+    private let projectResolver: @Sendable (FocusProjectContext) -> FocusProjectContext
 
     /// Initial construction scans the supplied archive once. Subsequent
     /// `apply` calls only remove/add the supplied changed records.
-    public init(sessions: [FocusSession] = []) {
+    public init(
+        sessions: [FocusSession] = [],
+        projectResolver: @escaping @Sendable (FocusProjectContext) -> FocusProjectContext = { $0 }
+    ) {
+        self.projectResolver = projectResolver
         for session in sessions {
-            replaceContribution(for: session.id, with: Self.contribution(from: session))
+            replaceContribution(for: session.id, with: contribution(from: session))
         }
     }
 
@@ -225,7 +230,7 @@ public struct FocusHistoryAggregationCache: Sendable {
                 replaceContribution(for: previous.id, with: nil)
             }
             if let current = change.current,
-               let contribution = Self.contribution(from: current) {
+               let contribution = contribution(from: current) {
                 affectedDays.insert(contribution.dayIdentifier)
                 replaceContribution(for: current.id, with: contribution)
             }
@@ -268,12 +273,13 @@ public struct FocusHistoryAggregationCache: Sendable {
         )
     }
 
-    private static func contribution(from session: FocusSession) -> Contribution? {
+    private func contribution(from session: FocusSession) -> Contribution? {
         guard session.status == .ended, let endedAt = session.endedAt else { return nil }
+        let project = projectResolver(session.project)
         return Contribution(
             dayIdentifier: session.dayIdentifier,
-            projectKey: session.project.key,
-            displayName: session.project.displayName,
+            projectKey: project.key,
+            displayName: project.displayName,
             endedAt: endedAt,
             duration: session.activeDuration(now: endedAt)
         )

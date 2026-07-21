@@ -4,6 +4,7 @@ public final class GitTodayRecentProjectStore {
     public enum Key {
         public static let dayIdentifier = "tinybuddy.gitTodayRecentProject.dayIdentifier"
         public static let projectName = "tinybuddy.gitTodayRecentProject.projectName"
+        public static let projectID = "tinybuddy.gitTodayRecentProject.projectID.v1"
     }
 
     private let userDefaults: UserDefaults
@@ -85,6 +86,24 @@ public final class GitTodayRecentProjectStore {
         } else {
             userDefaults.removeObject(forKey: Key.projectName)
         }
+    }
+
+    public func loadTodayProjectID() -> TinyBuddyProjectID? {
+        guard let context = timeEnvironment.capture(),
+              userDefaults.string(forKey: Key.dayIdentifier) == context.dayIdentifier,
+              let value = userDefaults.string(forKey: Key.projectID) else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : TinyBuddyProjectID(rawValue: normalized)
+    }
+
+    public func saveTodayProject(id: TinyBuddyProjectID?, displayName: String?) {
+        saveTodayProjectName(displayName)
+        if let id {
+            userDefaults.set(id.rawValue, forKey: Key.projectID)
+        } else {
+            userDefaults.removeObject(forKey: Key.projectID)
+        }
+        userDefaults.synchronize()
     }
 
     private func loadTodayProjectName(

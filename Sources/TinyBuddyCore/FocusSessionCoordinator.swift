@@ -24,6 +24,7 @@ public final class FocusSessionCoordinator {
     private let engine: FocusSessionEngine
     private let policy: FocusAttributionPolicy
     private let clock: FocusClock
+    private let gitProjectResolver: @MainActor (String, String) -> FocusProjectContext?
 
     private var foreground: (bundleID: String, displayName: String, isCodeEditor: Bool)?
     private var recentGit: (key: String, displayName: String, at: Date)?
@@ -33,11 +34,15 @@ public final class FocusSessionCoordinator {
     public init(
         engine: FocusSessionEngine,
         policy: FocusAttributionPolicy = FocusAttributionPolicy(),
-        clock: FocusClock
+        clock: FocusClock,
+        gitProjectResolver: @escaping @MainActor (String, String) -> FocusProjectContext? = {
+            FocusProjectContext(key: $0, displayName: $1)
+        }
     ) {
         self.engine = engine
         self.policy = policy
         self.clock = clock
+        self.gitProjectResolver = gitProjectResolver
     }
 
     // MARK: - App‑facing events
@@ -68,7 +73,11 @@ public final class FocusSessionCoordinator {
     ) {
         guard !automated else { return }
         let when = date ?? clock.now
-        recentGit = (repoKey, displayName, when)
+        guard let project = gitProjectResolver(repoKey, displayName) else {
+            recentGit = nil
+            return
+        }
+        recentGit = (project.key, project.displayName, when)
         engine.userActivity(in: focusProject(), at: when)
     }
 

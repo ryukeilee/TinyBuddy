@@ -250,7 +250,9 @@ final class FocusSessionAppBridge {
 extension FocusSessionAppBridge {
     /// Creates a standard bridge using the App Group container for persistence.
     @MainActor
-    static func createStandard() -> FocusSessionAppBridge? {
+    static func createStandard(
+        projectRegistry: TinyBuddyProjectRegistry? = nil
+    ) -> FocusSessionAppBridge? {
         guard let appGroupURL = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: "group.com.ryukeili.TinyBuddy") else {
             Logger(
@@ -284,6 +286,28 @@ extension FocusSessionAppBridge {
             nextDayBoundary: nextDayBoundary,
             historyGoalMinutes: {
                 historyGoalPreferences.loadConfiguration().dailyFocusGoalMinutes
+            },
+            historyActiveProjectKeys: { sessions in
+                projectRegistry.map { registry in
+                    var activeKeys = Set(registry.currentSnapshot.projects.compactMap { project in
+                        project.state == .active ? project.id.rawValue : nil
+                    })
+                    // Foreground-app projects are outside the Git registry and
+                    // remain active under their existing bundle-ID identity.
+                    for session in sessions where registry.resolve(projectKey: session.project.key) == nil {
+                        activeKeys.insert(session.project.key)
+                    }
+                    return activeKeys
+                }
+            },
+            projectContextResolver: { context in
+                guard let project = projectRegistry?.resolve(projectKey: context.key) else {
+                    return context
+                }
+                return FocusProjectContext(
+                    key: project.id.rawValue,
+                    displayName: project.displayName
+                )
             }
         )
         let coordinator = FocusSessionCoordinator(

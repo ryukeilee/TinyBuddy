@@ -3,6 +3,34 @@ import Foundation
 import XCTest
 
 final class GitActivityRealRepositoryFixtureTests: XCTestCase {
+    func testProjectDiscoveryFingerprintSurvivesRepositoryMoveAndRename() throws {
+        let fixture = try RealGitFixture()
+        let original = try fixture.makeRepository(named: "IdentityBefore")
+        try fixture.commit(
+            in: original,
+            file: "identity.txt",
+            contents: "stable\n",
+            message: "identity root",
+            date: "2024-01-15T09:05:00Z"
+        )
+
+        let first = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        XCTAssertEqual(first.exitCode, 0, first.standardError)
+        let firstManifest = try discoveryRows(from: fixture.readPreferencesPlist())
+        XCTAssertEqual(firstManifest.count, 1)
+
+        let moved = fixture.scanRootURL.appendingPathComponent("IdentityAfter", isDirectory: true)
+        try fixture.fileManager.moveItem(at: original, to: moved)
+        let second = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        XCTAssertEqual(second.exitCode, 0, second.standardError)
+        let secondManifest = try discoveryRows(from: fixture.readPreferencesPlist())
+
+        XCTAssertEqual(secondManifest.count, 1)
+        XCTAssertEqual(secondManifest[0].fingerprint, firstManifest[0].fingerprint)
+        XCTAssertNotEqual(secondManifest[0].alias, firstManifest[0].alias)
+        XCTAssertEqual(secondManifest[0].name, "IdentityAfter")
+    }
+
     func testCanonicalRepositoryIdentityDeduplicatesWorktreesSymlinkRootsAndRepeatedRoots() throws {
         let fixture = try RealGitFixture()
         let repository = try fixture.makeRepository(named: "ProjectAlpha")
@@ -77,6 +105,27 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
             repeatedPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
             firstSnapshot
         )
+    }
+
+    private func discoveryRows(
+        from plist: [String: Any]
+    ) throws -> [(fingerprint: String, alias: String, name: String)] {
+        let payload = try XCTUnwrap(
+            plist[TinyBuddyProjectDiscoveryStore.Key.manifest] as? String
+        )
+        let lines = payload.split(separator: "\n")
+        XCTAssertEqual(lines.first, "v1")
+        return try lines.dropFirst().map { line in
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count == 3 else {
+                throw NSError(domain: "GitActivityRealRepositoryFixtureTests", code: 1)
+            }
+            let values = try fields.map { field -> String in
+                let data = try XCTUnwrap(Data(base64Encoded: String(field)))
+                return try XCTUnwrap(String(data: data, encoding: .utf8))
+            }
+            return (values[0], values[1], values[2])
+        }
     }
 
     func testSubmoduleGitFileResolvesIntoParentMetadataWithoutDuplicateDiscovery() throws {

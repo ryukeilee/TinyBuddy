@@ -71,6 +71,12 @@ struct TinyBuddyApp: App {
                 TabView {
                     GitScanRootSettingsView()
                         .tabItem { Label("Git 项目", systemImage: "folder") }
+                    ProjectManagementView(
+                        registryProvider: { appDelegate.projectIdentityRegistry },
+                        sessionEngineProvider: { appDelegate.focusSessionEngine },
+                        recentProjectStore: appDelegate.recentProjectStore
+                    )
+                        .tabItem { Label("项目身份", systemImage: "point.3.connected.trianglepath.dotted") }
                     FocusSessionReviewView(engineProvider: { appDelegate.focusSessionEngine })
                         .tabItem { Label("专注记录", systemImage: "clock.arrow.circlepath") }
                     FocusHistoryView(
@@ -134,6 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private lazy var dailyStatsStore = DailyStatsStore(timeEnvironment: timeEnvironment)
     private lazy var activityStore = GitTodayActivityStore(timeEnvironment: timeEnvironment)
+    lazy var recentProjectStore = GitTodayRecentProjectStore(timeEnvironment: timeEnvironment)
+    private lazy var projectDiscoveryStore = TinyBuddyProjectDiscoveryStore()
+    private lazy var projectRegistry: TinyBuddyProjectRegistry? = {
+        guard let url = TinyBuddySharedData.projectRegistryURL() else { return nil }
+        return TinyBuddyProjectRegistry(store: TinyBuddyProjectRegistryFileStore(fileURL: url))
+    }()
     private lazy var refreshStatusStore = GitActivityRefreshStatusStore(
         timeEnvironment: timeEnvironment
     )
@@ -158,6 +170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             configStore.load()?.exclusionRules.map(\.pattern) ?? []
         },
         timeEnvironment: timeEnvironment,
+        projectDiscoveryCommit: { [weak self] completeScan in
+            Task { @MainActor [weak self] in
+                self?.reconcileProjectDiscovery(completeScan: completeScan)
+            }
+        },
         repositoryChangeMonitorFactory: { [gitScanRootAuthorizationStore] changeHandler in
             GitRepositoryChangeMonitor(
                 authorizedRootsProvider: gitScanRootAuthorizationStore!.accessAuthorizedRootResult,
@@ -223,6 +240,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var focusSessionEngine: FocusSessionEngine? {
         focusSessionBridge?.sessionEngine
+    }
+
+    var projectIdentityRegistry: TinyBuddyProjectRegistry? {
+        projectRegistry
     }
 
     lazy var focusGoalCoordinator = FocusGoalCoordinator()
@@ -294,7 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isInterfaceVisible: isHUDVisible,
             powerState: TinyBuddyPowerState.current()
         )
-        let focusBridge = FocusSessionAppBridge.createStandard()
+        let focusBridge = FocusSessionAppBridge.createStandard(projectRegistry: projectRegistry)
         focusSessionBridge = focusBridge
         // Keep the legacy callback solely for existing manual-reminder
         // behavior. History publication below is the one source for App/HUD/
@@ -314,6 +335,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshFocusHistoryForPresentation()
         powerStateMonitor.start()
         hudVisibilityMonitor.start()
+    }
+
+    private func reconcileProjectDiscovery(completeScan: Bool) {
+        guard let projectRegistry,
+              let manifest = projectDiscoveryStore.loadManifest(),
+              TinyBuddyProjectDiscoveryReconciler.reconcile(
+                manifest,
+                registry: projectRegistry,
+                completeScan: completeScan,
+                at: Date()
+              ) != nil else { return }
+
+        if !completeScan {
+            let unavailableRoots = Set(gitScanRootAuthorizationStore.authorizationStatuses().compactMap {
+                authorization -> String? in
+                guard case .unavailable = authorization.state,
+                      !authorization.lastKnownPath.isEmpty else { return nil }
+                return authorization.lastKnownPath
+            })
+            if !unavailableRoots.isEmpty {
+                _ = projectRegistry.markTemporarilyUnavailable(
+                    aliasPrefixes: unavailableRoots,
+                    at: Date()
+                )
+            }
+        }
+
+        if let fingerprint = projectDiscoveryStore.loadRecentRepositoryFingerprint(),
+           let project = projectRegistry.resolve(projectKey: fingerprint) {
+            recentProjectStore.saveTodayProject(id: project.id, displayName: project.displayName)
+        } else {
+            recentProjectStore.saveTodayProject(id: nil, displayName: nil)
+        }
+        focusSessionBridge?.sessionEngine.refreshProjectIdentityPresentation()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+                object: nil
+            )
+        }
     }
 
     /// The Settings report reads the same committed payload as the Widget.

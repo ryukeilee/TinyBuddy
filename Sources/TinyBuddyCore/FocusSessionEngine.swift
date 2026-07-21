@@ -27,6 +27,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private let nextDayBoundaryProvider: (Date) -> Date?
     private let historyGoalMinutesProvider: () -> Int
     private let historyActiveProjectKeysProvider: ([FocusSession]) -> Set<String>?
+    private let projectContextResolver: @Sendable (FocusProjectContext) -> FocusProjectContext
 
     // MARK: State (protected by lock)
     private var lock: NSLock = .init()
@@ -82,7 +83,8 @@ public final class FocusSessionEngine: @unchecked Sendable {
         },
         historyActiveProjectKeys: @escaping ([FocusSession]) -> Set<String>? = { _ in
             nil
-        }
+        },
+        projectContextResolver: @escaping @Sendable (FocusProjectContext) -> FocusProjectContext = { $0 }
     ) {
         let loaded = Self.loadInitialArchive(from: persisting)
         self.clock = clock
@@ -92,22 +94,32 @@ public final class FocusSessionEngine: @unchecked Sendable {
         self.nextDayBoundaryProvider = nextDayBoundary
         self.historyGoalMinutesProvider = historyGoalMinutes
         self.historyActiveProjectKeysProvider = historyActiveProjectKeys
+        self.projectContextResolver = projectContextResolver
         let now = clock.now
         self.currentDay = dayProvider(now)
         self.sessions = loaded.sessions
         self.archiveRevision = loaded.revision
         self.archiveHistoryCompleteness = loaded.historyCompleteness
         self.historySource = loaded.source
-        self.historyCache = FocusHistoryAggregationCache(sessions: loaded.sessions)
+        self.historyCache = FocusHistoryAggregationCache(
+            sessions: loaded.sessions,
+            projectResolver: projectContextResolver
+        )
         self.confirmedRevision = sessions.compactMap(\.manualRevision).max() ?? 0
         let beforeReconcile = sessions
         if reconcileOnLoad(now: now) {
             guard persistAfterReconcile() else {
                 sessions = beforeReconcile
-                historyCache = FocusHistoryAggregationCache(sessions: beforeReconcile)
+                historyCache = FocusHistoryAggregationCache(
+                    sessions: beforeReconcile,
+                    projectResolver: projectContextResolver
+                )
                 return
             }
-            historyCache = FocusHistoryAggregationCache(sessions: sessions)
+            historyCache = FocusHistoryAggregationCache(
+                sessions: sessions,
+                projectResolver: projectContextResolver
+            )
         }
     }
 
@@ -246,9 +258,26 @@ public final class FocusSessionEngine: @unchecked Sendable {
         let n = now ?? clock.now
         var result: [String: TimeInterval] = [:]
         for s in sessions where s.dayIdentifier == currentDay {
-            result[s.project.key, default: 0] += s.activeDuration(now: n)
+            result[projectContextResolver(s.project).key, default: 0] += s.activeDuration(now: n)
         }
         return result
+    }
+
+    /// Rebuilds only the derived identity view after a registry transaction.
+    /// Raw session rows stay immutable, which makes a project merge reversible;
+    /// the registry redirect atomically controls which stable project receives
+    /// every historical contribution.
+    public func refreshProjectIdentityPresentation() {
+        lock.lock()
+        historyCache = FocusHistoryAggregationCache(
+            sessions: sessions,
+            projectResolver: projectContextResolver
+        )
+        let publication = makeFocusHistoryPublication()
+        lock.unlock()
+        if let publication {
+            committedHistorySnapshotHandler?(publication)
+        }
     }
 
     public var currentProject: FocusProjectContext? {
