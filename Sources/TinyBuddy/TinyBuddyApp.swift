@@ -77,11 +77,17 @@ struct TinyBuddyApp: App {
                         recentProjectStore: appDelegate.recentProjectStore
                     )
                         .tabItem { Label("项目身份", systemImage: "point.3.connected.trianglepath.dotted") }
-                    FocusSessionReviewView(engineProvider: { appDelegate.focusSessionEngine })
+                    FocusSessionReviewView(
+                        engineProvider: { appDelegate.focusSessionEngine },
+                        historyController: appDelegate.historyQueryController ?? HistoryQueryController(
+                            queryService: FocusSessionQueryService(sessionProvider: { [] })
+                        )
+                    )
                         .tabItem { Label("专注记录", systemImage: "clock.arrow.circlepath") }
                     FocusHistoryView(
                         publicationProvider: { appDelegate.focusHistoryPublication },
-                        refresh: { appDelegate.refreshFocusHistoryForPresentation() }
+                        refresh: { appDelegate.refreshFocusHistoryForPresentation() },
+                        historyController: appDelegate.historyQueryController
                     )
                         .tabItem { Label("历史与周报", systemImage: "chart.bar.xaxis") }
                     FocusGoalSettingsView(
@@ -275,6 +281,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     lazy var focusGoalCoordinator = FocusGoalCoordinator()
+
+    /// Lazy-initialised history query controller shared by the history list and
+    /// review views. Created once the focus session engine is available.
+    lazy var historyQueryController: HistoryQueryController? = {
+        guard let engine = focusSessionBridge?.sessionEngine else { return nil }
+        let queryService = FocusSessionQueryService(sessionProvider: { [weak engine] in
+            engine?.allSessions ?? []
+        })
+        return HistoryQueryController(queryService: queryService)
+    }()
 
     override init() {
         let resetService = TinyBuddyResetService()

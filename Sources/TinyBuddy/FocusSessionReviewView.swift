@@ -3,8 +3,12 @@ import TinyBuddyCore
 
 /// Settings-only correction surface. Every command carries a session UUID to
 /// the engine; it never indexes into a rescanned list or writes the journal.
+///
+/// Sessions are loaded via `HistoryQueryController` with cursor-based pagination
+/// instead of loading all sessions at once.
 struct FocusSessionReviewView: View {
     let engineProvider: () -> FocusSessionEngine?
+    let historyController: HistoryQueryController
 
     @State private var selected = Set<UUID>()
     @State private var projectKey = ""
@@ -18,7 +22,7 @@ struct FocusSessionReviewView: View {
     private var engine: FocusSessionEngine? { engineProvider() }
     private var sessions: [FocusSession] {
         _ = refreshID
-        return engine?.allSessions.sorted { $0.startedAt > $1.startedAt } ?? []
+        return historyController.allSessions
     }
     private var selectedSession: FocusSession? {
         guard selected.count == 1, let id = selected.first else { return nil }
@@ -46,21 +50,10 @@ struct FocusSessionReviewView: View {
                 }
 
                 HStack(spacing: 16) {
-                    List(sessions, selection: $selected) { session in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(session.project.displayName)
-                            Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) – \(session.endedAt?.formatted(date: .omitted, time: .shortened) ?? "进行中")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(authorityLabel(session))
-                                .font(.caption2)
-                                .foregroundStyle(authorityColor(session))
-                        }
-                        .tag(session.id)
-                    }
-                    .frame(minWidth: 300)
-                    .onChange(of: selected) { _, _ in loadSelection() }
+                    // Paginated session list
+                    sessionList
 
+                    // Editor panel
                     ScrollView {
                         editor
                             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -72,6 +65,9 @@ struct FocusSessionReviewView: View {
             }
         }
         .padding()
+        .task {
+            await initialLoad()
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: .focusSessionSnapshotSynchronizationDidFinish
         )) { notification in
@@ -82,6 +78,101 @@ struct FocusSessionReviewView: View {
             refreshID = UUID()
         }
     }
+
+    // MARK: - Paginated Session List
+
+    @ViewBuilder
+    private var sessionList: some View {
+        VStack(spacing: 0) {
+            // Filter/search toolbar
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                TextField("搜索项目", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .onChange(of: searchText) { _, newValue in
+                        let trimmed = newValue.trimmingCharacters(in: .whitespaces)
+                        Task {
+                            var q = historyController.query
+                            q.keyword = trimmed.isEmpty ? nil : trimmed
+                            await historyController.updateQuery(q, debounceSeconds: 0.3)
+                        }
+                    }
+                if !searchText.isEmpty {
+                    Button { searchText = ""; Task { await resetQuery() } } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+
+            Divider()
+
+            // Session list with loading states
+            Group {
+                if case .loading = historyController.loadState, sessions.isEmpty {
+                    VStack {
+                        Spacer()
+                        ProgressView()
+                            .scaleEffect(0.6)
+                        Spacer()
+                    }
+                } else if sessions.isEmpty {
+                    VStack {
+                        Spacer()
+                        Text("无匹配记录")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                } else {
+                    List(sessions, selection: $selected) { session in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(session.project.displayName)
+                            Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) – \(session.endedAt?.formatted(date: .omitted, time: .shortened) ?? "进行中")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(authorityLabel(session))
+                                .font(.caption2)
+                                .foregroundStyle(authorityColor(session))
+                        }
+                        .tag(session.id)
+                        .onAppear {
+                            if session.id == sessions.last?.id {
+                                Task { await historyController.loadMore() }
+                            }
+                        }
+                    }
+                    .onChange(of: selected) { _, _ in loadSelection() }
+                }
+            }
+        }
+        .frame(minWidth: 300)
+    }
+
+    @State private var searchText = ""
+
+    private func initialLoad() async {
+        // Show ended sessions by default in review view
+        var q = FocusSessionQuery()
+        q.status = .ended
+        await historyController.updateQuery(q, debounceSeconds: 0)
+    }
+
+    private func resetQuery() async {
+        searchText = ""
+        var q = FocusSessionQuery()
+        q.status = .ended
+        await historyController.updateQuery(q, debounceSeconds: 0)
+    }
+
+    // MARK: - Editor
 
     @ViewBuilder
     private var editor: some View {
@@ -136,11 +227,15 @@ struct FocusSessionReviewView: View {
         guard let result else { message = "专注记录尚未就绪"; return }
         switch result {
         case .saved:
-            // The durable session journal is committed here. The App bridge
-            // separately confirms the shared HUD/Widget snapshot, so do not
-            // claim a presentation update before that checkpoint succeeds.
             message = "记录已保存，正在同步今日统计与展示。"
             selected.removeAll()
+            // Invalidate query cache and reload after edit
+            Task {
+                await historyController.notifyChanges([])
+                await historyController.reload()
+                refreshID = UUID()
+            }
+            return
         case .rejected(let error):
             message = errorMessage(error)
         }

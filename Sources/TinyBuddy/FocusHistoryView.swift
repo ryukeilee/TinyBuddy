@@ -6,15 +6,19 @@ import TinyBuddyCore
 struct FocusHistoryView: View {
     let publicationProvider: () -> FocusHistoryPublication?
     let refresh: () -> Void
+    let historyController: HistoryQueryController?
 
     @State private var publication: FocusHistoryPublication?
+    @State private var showSessionList = false
 
     init(
         publicationProvider: @escaping () -> FocusHistoryPublication?,
-        refresh: @escaping () -> Void
+        refresh: @escaping () -> Void,
+        historyController: HistoryQueryController? = nil
     ) {
         self.publicationProvider = publicationProvider
         self.refresh = refresh
+        self.historyController = historyController
         _publication = State(initialValue: publicationProvider())
     }
 
@@ -45,11 +49,14 @@ struct FocusHistoryView: View {
     private func history(_ snapshot: FocusHistorySnapshot) -> some View {
         switch snapshot.state {
         case .noHistory:
-            ContentUnavailableView(
-                "暂无专注历史",
-                systemImage: "clock",
-                description: Text("已确认的专注会话会在这里汇总为最近七天和本周趋势。")
-            )
+            VStack {
+                ContentUnavailableView(
+                    "暂无专注历史",
+                    systemImage: "clock",
+                    description: Text("已确认的专注会话会在这里汇总为最近七天和本周趋势。")
+                )
+                sessionListView
+            }
         case .unknown:
             ContentUnavailableView(
                 "专注历史未知",
@@ -81,8 +88,36 @@ struct FocusHistoryView: View {
                 Section("主要项目") {
                     projectDistribution(snapshot.currentWeek.projectDistribution)
                 }
+
+                // Paginated session list embedded below the summary
+                if historyController != nil {
+                    Section {
+                        Button {
+                            showSessionList.toggle()
+                        } label: {
+                            HStack {
+                                Text(showSessionList ? "收起会话列表" : "查看全部会话记录")
+                                Spacer()
+                                Image(systemName: showSessionList ? "chevron.up" : "chevron.down")
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        if showSessionList {
+                            sessionListView
+                        }
+                    }
+                }
             }
             .formStyle(.grouped)
+        }
+    }
+
+    @ViewBuilder
+    private var sessionListView: some View {
+        if let controller = historyController {
+            FocusHistoryListView(controller: controller)
+                .frame(minHeight: 300)
         }
     }
 
