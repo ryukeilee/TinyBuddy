@@ -73,9 +73,15 @@ struct TinyBuddyApp: App {
                         .tabItem { Label("Git 项目", systemImage: "folder") }
                     FocusSessionReviewView(engineProvider: { appDelegate.focusSessionEngine })
                         .tabItem { Label("专注记录", systemImage: "clock.arrow.circlepath") }
+                    FocusHistoryView(
+                        publicationProvider: { appDelegate.focusHistoryPublication },
+                        refresh: { appDelegate.refreshFocusHistoryForPresentation() }
+                    )
+                        .tabItem { Label("历史与周报", systemImage: "chart.bar.xaxis") }
                     FocusGoalSettingsView(
                         engineProvider: { appDelegate.focusSessionEngine },
-                        coordinator: appDelegate.focusGoalCoordinator
+                        coordinator: appDelegate.focusGoalCoordinator,
+                        onConfigurationSaved: { appDelegate.refreshFocusHistoryForPresentation() }
                     )
                         .tabItem { Label("专注目标", systemImage: "target") }
                 }
@@ -290,92 +296,161 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let focusBridge = FocusSessionAppBridge.createStandard()
         focusSessionBridge = focusBridge
-        focusBridge?.sessionEngine.committedSnapshotHandler = { [weak self] derived in
+        // Keep the legacy callback solely for existing manual-reminder
+        // behavior. History publication below is the one source for App/HUD/
+        // Widget/weekly presentation and also covers automatic completions.
+        focusBridge?.sessionEngine.committedSnapshotHandler = { [weak self] _ in
             DispatchQueue.main.async {
-                guard let self else { return }
-                guard self.focusSessionPublicationJournal.stage(derived) else {
-                    self.notificationCenter.post(
-                        name: .focusSessionSnapshotSynchronizationDidFinish,
-                        object: nil,
-                        userInfo: ["succeeded": false]
-                    )
-                    return
-                }
-                let current = self.dailyStatsStore.loadSnapshot()
-                guard current.stats.dayIdentifier == derived.dayIdentifier else {
-                    _ = self.focusSessionPublicationJournal.clear(expected: derived)
-                    return
-                }
-                let derivedPresentation = TinyBuddySnapshot(
-                    status: current.status,
-                    stats: DailyStats(
-                        dayIdentifier: derived.dayIdentifier,
-                        focusCount: derived.completedSessionCount,
-                        completionCount: current.stats.completionCount
-                    )
-                )
-                let update = self.combinedSnapshotStore.updateFocusSessionSlice(
-                    derived,
-                    fallbackSnapshot: derivedPresentation
-                )
-                guard update.didPersist || update.outcome == .alreadyCurrent else {
-                    self.notificationCenter.post(
-                        name: .focusSessionSnapshotSynchronizationDidFinish,
-                        object: nil,
-                        userInfo: ["succeeded": false]
-                    )
-                    return
-                }
-                // A delayed callback may be accepted as an idempotent read of
-                // a newer committed slice. Never mirror that older count into
-                // DailyStats, or HUD could briefly disagree with Widget.
-                guard update.snapshot?.focusSessionSnapshot?.revision == derived.revision else {
-                    if update.snapshot?.focusSessionSnapshot?.revision ?? -1 > derived.revision {
-                        _ = self.focusSessionPublicationJournal.clear(expected: derived)
-                    }
-                    return
-                }
-                _ = self.dailyStatsStore.replaceFocusCount(
-                    derived.completedSessionCount,
-                    forDayIdentifier: derived.dayIdentifier
-                )
-                self.petViewModel.focusSessionStatsDidChange()
-                // Evaluate focus goal reminders after session state changes.
-                if let engine = self.focusSessionBridge?.sessionEngine {
-                    let snapshot = engine.derivedSnapshot()
-                    self.focusGoalCoordinator.evaluateReminders(
-                        sessions: engine.allSessions,
-                        now: Date(),
-                        dayIdentifier: snapshot.dayIdentifier
-                    )
-                }
-                guard self.focusSessionPublicationJournal.clear(expected: derived) else {
-                    self.notificationCenter.post(
-                        name: .focusSessionSnapshotSynchronizationDidFinish,
-                        object: nil,
-                        userInfo: ["succeeded": false]
-                    )
-                    return
-                }
-                self.notificationCenter.post(
-                    name: .focusSessionSnapshotSynchronizationDidFinish,
-                    object: nil,
-                    userInfo: ["succeeded": true]
-                )
+                self?.evaluateFocusRemindersAfterManualCorrection()
+            }
+        }
+        focusBridge?.sessionEngine.committedHistorySnapshotHandler = { [weak self] publication in
+            DispatchQueue.main.async {
+                self?.synchronizeFocusHistoryPublication(publication)
             }
         }
         focusBridge?.start()
-        // If the process ended after a confirmed session journal write but
-        // before its shared-snapshot publication, replay the durable journal
-        // once on primary-instance startup. Automatic-only sessions retain the
-        // established Git presentation path and are intentionally excluded.
-        if let engine = focusBridge?.sessionEngine,
-           (focusSessionPublicationJournal.pending != nil
-                || engine.allSessions.contains(where: \.isManuallyConfirmed)) {
-            engine.committedSnapshotHandler?(engine.derivedSnapshot())
-        }
+        replayPendingFocusSessionPublicationIfNeeded()
+        refreshFocusHistoryForPresentation()
         powerStateMonitor.start()
         hudVisibilityMonitor.start()
+    }
+
+    /// The Settings report reads the same committed payload as the Widget.
+    /// It never opens or aggregates the raw session journal itself.
+    var focusHistoryPublication: FocusHistoryPublication? {
+        let fallback = dailyStatsStore.loadSnapshot()
+        let expectedDay = timeEnvironment.capture()?.dayIdentifier
+            ?? fallback.stats.dayIdentifier
+        return combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDay
+        ).snapshot?.focusHistoryPublication
+    }
+
+    /// User-driven and lifecycle-driven refresh. The engine only re-emits its
+    /// in-memory aggregation cache; this does not start a scanner or timer.
+    func refreshFocusHistoryForPresentation() {
+        guard let engine = focusSessionBridge?.sessionEngine else { return }
+        if let context = timeEnvironment.capture(),
+           engine.currentDayIdentifier != context.dayIdentifier {
+            _ = engine.timeChanged(at: context.now, dayIdentifier: context.dayIdentifier)
+        }
+        engine.republishFocusHistory()
+    }
+
+    private func synchronizeFocusHistoryPublication(
+        _ publication: FocusHistoryPublication
+    ) {
+        switch focusSessionPublicationJournal.stage(publication) {
+        case .persistenceFailed:
+            postFocusHistorySynchronization(succeeded: false)
+            return
+        case .rejectedStale:
+            // A newer archive revision is already staged for recovery. The
+            // delayed callback is intentionally invisible to all consumers.
+            return
+        case .staged, .alreadyCurrent:
+            break
+        }
+
+        let current = dailyStatsStore.loadSnapshot()
+        guard publication.snapshot.recentDays.last?.dayIdentifier == current.stats.dayIdentifier else {
+            _ = focusSessionPublicationJournal.clear(expected: publication)
+            return
+        }
+
+        let update = combinedSnapshotStore.updateFocusHistorySlice(
+            publication,
+            fallbackSnapshot: current
+        )
+        guard update.didPersist || update.outcome == .alreadyCurrent else {
+            postFocusHistorySynchronization(succeeded: false)
+            return
+        }
+        guard update.snapshot?.focusHistoryPublication == publication else {
+            // A later session archive is already committed. Do not make an
+            // older callback visible through DailyStats or the HUD.
+            if update.snapshot?.focusHistoryPublication?.revision ?? -1 >= publication.revision {
+                _ = focusSessionPublicationJournal.clear(expected: publication)
+            }
+            return
+        }
+
+        if let completedSessionCount = publication.snapshot.recentDays.last?.completedSessionCount {
+            _ = dailyStatsStore.replaceFocusCount(
+                completedSessionCount,
+                forDayIdentifier: current.stats.dayIdentifier
+            )
+        }
+        petViewModel.focusSessionStatsDidChange()
+        guard focusSessionPublicationJournal.clear(expected: publication) else {
+            postFocusHistorySynchronization(succeeded: false)
+            return
+        }
+        // An equal publication has already reached every reader. Emitting a
+        // success notification here would make a report view re-publish the
+        // same payload and create a feedback loop.
+        if update.didPersist {
+            postFocusHistorySynchronization(succeeded: true)
+        }
+    }
+
+    private func replayPendingFocusSessionPublicationIfNeeded() {
+        if let legacy = focusSessionPublicationJournal.pending {
+            synchronizeLegacyFocusSessionPublication(legacy)
+        }
+        if let history = focusSessionPublicationJournal.pendingHistory {
+            synchronizeFocusHistoryPublication(history)
+        }
+    }
+
+    /// Supports one surviving pre-history journal entry during upgrade. New
+    /// commits use `FocusHistoryPublication` exclusively.
+    private func synchronizeLegacyFocusSessionPublication(
+        _ derived: FocusSessionDerivedSnapshot
+    ) {
+        let current = dailyStatsStore.loadSnapshot()
+        guard current.stats.dayIdentifier == derived.dayIdentifier else {
+            _ = focusSessionPublicationJournal.clear(expected: derived)
+            return
+        }
+        let fallback = TinyBuddySnapshot(
+            status: current.status,
+            stats: DailyStats(
+                dayIdentifier: derived.dayIdentifier,
+                focusCount: derived.completedSessionCount,
+                completionCount: current.stats.completionCount
+            )
+        )
+        let update = combinedSnapshotStore.updateFocusSessionSlice(
+            derived,
+            fallbackSnapshot: fallback
+        )
+        guard update.didPersist || update.outcome == .alreadyCurrent else { return }
+        guard update.snapshot?.focusSessionSnapshot?.revision == derived.revision else { return }
+        _ = dailyStatsStore.replaceFocusCount(
+            derived.completedSessionCount,
+            forDayIdentifier: derived.dayIdentifier
+        )
+        _ = focusSessionPublicationJournal.clear(expected: derived)
+    }
+
+    private func evaluateFocusRemindersAfterManualCorrection() {
+        guard let engine = focusSessionBridge?.sessionEngine else { return }
+        let snapshot = engine.derivedSnapshot()
+        focusGoalCoordinator.evaluateReminders(
+            sessions: engine.allSessions,
+            now: Date(),
+            dayIdentifier: snapshot.dayIdentifier
+        )
+    }
+
+    private func postFocusHistorySynchronization(succeeded: Bool) {
+        notificationCenter.post(
+            name: .focusSessionSnapshotSynchronizationDidFinish,
+            object: nil,
+            userInfo: ["succeeded": succeeded]
+        )
     }
 
     private func registerSettingsChangeObserver() {
@@ -417,6 +492,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         gitActivityRefreshCoordinator.handleDidBecomeActive()
+        // A foreground return is a user-driven chance to roll the week/day
+        // view forward. This only reuses the in-memory session cache.
+        refreshFocusHistoryForPresentation()
     }
 
     func applicationDidResignActive(_ notification: Notification) {

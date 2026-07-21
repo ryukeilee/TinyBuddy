@@ -35,6 +35,41 @@ struct PetView: View {
         viewModel.displayPresentation
     }
 
+    private var focusWeekSummary: String? {
+        guard let history = viewModel.focusHistoryPublication else { return nil }
+        switch history.snapshot.state {
+        case .unknown:
+            return "本周专注历史未知"
+        case .noHistory:
+            return "本周暂无专注历史"
+        case .available, .partial:
+            guard let seconds = history.snapshot.currentWeek.focusDuration else {
+                return "本周专注历史未知"
+            }
+            let minutes = Int(seconds / 60)
+            return "本周专注 \(minutes / 60) 小时 \(minutes % 60) 分"
+        }
+    }
+
+    /// The legacy daily counter is retained for compatibility, but its value
+    /// is shown only when the shared history publication establishes that the
+    /// current day is known. This prevents a fallback zero from masquerading
+    /// as a confirmed focus result after a journal migration/read failure.
+    private var focusMetricText: String {
+        focusMetricIsKnown ? presentation.focusCountText : "未知"
+    }
+
+    private var focusMetricNumericValue: Int {
+        focusMetricIsKnown ? presentation.focusCount : 0
+    }
+
+    private var focusMetricIsKnown: Bool {
+        guard let day = viewModel.focusHistoryPublication?.snapshot.recentDays.last else {
+            return false
+        }
+        return day.state != .unknown && day.completedSessionCount != nil
+    }
+
     private var increasedContrast: Bool {
         colorSchemeContrast == .increased
     }
@@ -229,6 +264,13 @@ struct PetView: View {
                         .truncationMode(.middle)
                 }
 
+                if let focusWeekSummary {
+                    Text(focusWeekSummary)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(secondaryText)
+                        .lineLimit(1)
+                }
+
                 Label(presentation.statusTitle, systemImage: presentation.systemImage)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(statusAccent)
@@ -252,8 +294,10 @@ struct PetView: View {
         if let projectName = presentation.recentProjectName {
             parts.append("最近项目：\(projectName)")
         }
-        if presentation.focusCount > 0 {
-            parts.append("专注：\(presentation.focusCountText)")
+        if focusMetricIsKnown, focusMetricNumericValue > 0 {
+            parts.append("专注：\(focusMetricText)")
+        } else if !focusMetricIsKnown {
+            parts.append("今日专注未知")
         }
         if presentation.completionCount > 0 {
             parts.append("完成：\(presentation.completionCountText)")
@@ -266,8 +310,8 @@ struct PetView: View {
         let metrics = Group {
             CounterView(
                 title: "今日专注",
-                value: presentation.focusCountText,
-                numericValue: presentation.focusCount,
+                value: focusMetricText,
+                numericValue: focusMetricNumericValue,
                 accent: HUDTheme.energyBlueWhite,
                 primaryText: primaryText,
                 secondaryText: secondaryText,

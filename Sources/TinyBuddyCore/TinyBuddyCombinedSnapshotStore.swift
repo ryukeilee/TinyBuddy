@@ -8,6 +8,9 @@ public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
     public let activityRevision: Int64?
     /// Optional session-review slice. Older committed payloads decode without it.
     public let focusSessionSnapshot: FocusSessionDerivedSnapshot?
+    /// Optional authoritative focus-history publication. Older committed
+    /// payloads decode without it while newer writers publish it atomically.
+    public let focusHistoryPublication: FocusHistoryPublication?
 
     public init(
         revision: Int64,
@@ -15,7 +18,8 @@ public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot,
         activityRevision: Int64? = nil,
-        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
+        focusHistoryPublication: FocusHistoryPublication? = nil
     ) {
         self.revision = revision
         self.dayIdentifier = dayIdentifier
@@ -23,6 +27,7 @@ public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
         self.activitySnapshot = activitySnapshot
         self.activityRevision = activityRevision
         self.focusSessionSnapshot = focusSessionSnapshot
+        self.focusHistoryPublication = focusHistoryPublication
     }
 }
 
@@ -634,6 +639,62 @@ public final class TinyBuddyCombinedSnapshotStore {
         )
     }
 
+    /// Publishes the session-archive-derived history view in the same atomic
+    /// snapshot consumed by every presentation entry point. The archive
+    /// revision is the ordering authority: a delayed publication cannot undo
+    /// a newer confirmed archive, while equal revisions may refresh changed
+    /// goal/project configuration.
+    @discardableResult
+    public func updateFocusHistorySlice(
+        _ focusHistoryPublication: FocusHistoryPublication,
+        fallbackSnapshot: TinyBuddySnapshot
+    ) -> UpdateResult {
+        Self.writerLock.lock()
+        defer { Self.writerLock.unlock() }
+        guard !isInWriteCooldown else { return cooldownResult() }
+
+        let state = readStateLocked(repair: true)
+        let current = state.snapshot
+        guard state.diagnosticReason != .versionIncompatible else {
+            return UpdateResult(snapshot: nil, outcome: .versionIncompatible, didPersist: false)
+        }
+        guard Self.isValidFocusHistoryPublication(
+            focusHistoryPublication,
+            dayIdentifier: fallbackSnapshot.stats.dayIdentifier
+        ) else {
+            return UpdateResult(snapshot: current, outcome: .persistenceFailed, didPersist: false)
+        }
+
+        let currentPayload = current?.dayIdentifier == fallbackSnapshot.stats.dayIdentifier
+            ? current
+            : nil
+        if let existing = currentPayload?.focusHistoryPublication {
+            if existing.revision > focusHistoryPublication.revision {
+                return UpdateResult(
+                    snapshot: currentPayload,
+                    outcome: .alreadyCurrent,
+                    didPersist: false
+                )
+            }
+            if existing == focusHistoryPublication {
+                return UpdateResult(
+                    snapshot: currentPayload,
+                    outcome: .alreadyCurrent,
+                    didPersist: false
+                )
+            }
+        }
+
+        return saveLocked(
+            snapshot: currentPayload?.snapshot ?? fallbackSnapshot,
+            activitySnapshot: currentPayload?.activitySnapshot,
+            activityRevision: currentPayload?.activityRevision,
+            focusHistoryPublication: focusHistoryPublication,
+            highestRevision: state.revisionFloor,
+            current: current
+        )
+    }
+
     // V1 payload codec. It remains public for compatibility and migration tests.
     public static func encode(_ snapshot: TinyBuddyCombinedSnapshot) -> String {
         let projectName = snapshot.activitySnapshot.recentProjectName ?? ""
@@ -807,6 +868,13 @@ public final class TinyBuddyCombinedSnapshotStore {
             dict["fsc"] = max(0, focus.completedSessionCount)
             dict["fsp"] = focus.projectDurations.mapValues { max(0, $0) }
         }
+        if let history = snapshot.focusHistoryPublication {
+            guard isValidFocusHistoryPublication(history, dayIdentifier: snapshot.dayIdentifier),
+                  let historyData = try? PropertyListEncoder().encode(history) else {
+                return nil
+            }
+            dict["fh"] = historyData
+        }
         return try? PropertyListSerialization.data(
             fromPropertyList: dict,
             format: .binary,
@@ -855,6 +923,21 @@ public final class TinyBuddyCombinedSnapshotStore {
             focusSessionSnapshot = nil
         }
 
+        let focusHistoryPublication: FocusHistoryPublication?
+        if let historyData = dict["fh"] as? Data {
+            guard let decoded = try? PropertyListDecoder().decode(
+                FocusHistoryPublication.self,
+                from: historyData
+            ), Self.isValidFocusHistoryPublication(decoded, dayIdentifier: dayIdentifier) else {
+                return nil
+            }
+            focusHistoryPublication = decoded
+        } else if dict["fh"] != nil {
+            return nil
+        } else {
+            focusHistoryPublication = nil
+        }
+
         let normalizedProjectName = recentProjectName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return TinyBuddyCombinedSnapshot(
@@ -874,7 +957,8 @@ public final class TinyBuddyCombinedSnapshotStore {
                 recentProjectName: normalizedProjectName?.isEmpty == false ? normalizedProjectName : nil
             ),
             activityRevision: activityRevision,
-            focusSessionSnapshot: focusSessionSnapshot
+            focusSessionSnapshot: focusSessionSnapshot,
+            focusHistoryPublication: focusHistoryPublication
         )
     }
 
@@ -1480,7 +1564,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             focusSessionSnapshot: normalizedFocusSessionSnapshot(
                 snapshot.focusSessionSnapshot,
                 dayIdentifier: snapshot.dayIdentifier
-            )
+            ),
+            focusHistoryPublication: snapshot.focusHistoryPublication
         )
     }
 
@@ -1511,6 +1596,164 @@ public final class TinyBuddyCombinedSnapshotStore {
             projectDurations: snapshot.projectDurations.mapValues { max(0, $0) },
             completedSessionCount: snapshot.completedSessionCount
         )
+    }
+
+    private static func isValidFocusHistoryPublication(
+        _ publication: FocusHistoryPublication,
+        dayIdentifier: String
+    ) -> Bool {
+        guard publication.revision >= 0,
+              TinyBuddyTimeContext.isValidDayIdentifier(dayIdentifier) else {
+            return false
+        }
+
+        let recentDays = publication.snapshot.recentDays
+        guard !recentDays.isEmpty,
+              recentDays.last?.dayIdentifier == dayIdentifier,
+              recentDays.allSatisfy({ TinyBuddyTimeContext.isValidDayIdentifier($0.dayIdentifier) }),
+              zip(recentDays, recentDays.dropFirst()).allSatisfy({ earlier, later in
+                  earlier.dayIdentifier < later.dayIdentifier
+              }),
+              TinyBuddyTimeContext.isValidDayIdentifier(
+                publication.snapshot.currentWeek.endDayIdentifier
+              ),
+              publication.snapshot.currentWeek.endDayIdentifier <= dayIdentifier else {
+            return false
+        }
+
+        let snapshot = publication.snapshot
+        guard recentDays.allSatisfy(isValidFocusHistoryDay),
+              isValidFocusHistoryWeek(snapshot.currentWeek),
+              snapshot.currentGoalStreakDays.map({ $0 >= 0 }) ?? true else {
+            return false
+        }
+
+        switch snapshot.sourceHealth {
+        case .unavailable:
+            return snapshot.state == .unknown
+                && recentDays.allSatisfy({ $0.state == .unknown })
+                && snapshot.currentWeek.state == .unknown
+                && snapshot.currentGoalStreakDays == nil
+        case .partial:
+            return snapshot.state == .partial
+        case .available:
+            switch snapshot.state {
+            case .unknown:
+                return false
+            case .noHistory:
+                return recentDays.allSatisfy({ $0.state == .noSessions })
+            case .available, .partial:
+                return true
+            }
+        }
+    }
+
+    private static func isValidFocusHistoryDay(_ day: FocusHistoryDay) -> Bool {
+        guard TinyBuddyTimeContext.isValidDayIdentifier(day.dayIdentifier) else {
+            return false
+        }
+
+        switch day.state {
+        case .unknown:
+            return day.focusDuration == nil
+                && day.completedSessionCount == nil
+                && day.goalMinutes == nil
+                && day.goalCompletionRate == nil
+                && day.isGoalMet == nil
+        case .noSessions:
+            guard day.focusDuration == 0, day.completedSessionCount == 0 else {
+                return false
+            }
+        case .sessions:
+            guard let duration = day.focusDuration,
+                  duration.isFinite,
+                  duration >= 0,
+                  let count = day.completedSessionCount,
+                  count > 0 else {
+                return false
+            }
+        }
+
+        if let goal = day.goalMinutes {
+            guard goal > 0 else { return false }
+        }
+        if let rate = day.goalCompletionRate {
+            guard day.goalMinutes != nil,
+                  rate.isFinite,
+                  (0 ... 1).contains(rate),
+                  day.isGoalMet == (rate >= 1) else {
+                return false
+            }
+        } else if day.isGoalMet != nil {
+            return false
+        }
+        return true
+    }
+
+    private static func isValidFocusHistoryWeek(_ week: FocusHistoryWeek) -> Bool {
+        guard TinyBuddyTimeContext.isValidDayIdentifier(week.startDayIdentifier),
+              TinyBuddyTimeContext.isValidDayIdentifier(week.endDayIdentifier),
+              week.startDayIdentifier <= week.endDayIdentifier else {
+            return false
+        }
+
+        switch week.state {
+        case .unknown:
+            return week.focusDuration == nil
+                && week.completedSessionCount == nil
+                && week.goalCompletionRate == nil
+                && week.goalMetDayCount == nil
+                && week.configuredGoalDayCount == nil
+                && week.projectDistribution == nil
+        case .available, .partial:
+            let hasTotals = week.focusDuration != nil || week.completedSessionCount != nil
+            guard !hasTotals || (week.focusDuration != nil && week.completedSessionCount != nil) else {
+                return false
+            }
+            if let duration = week.focusDuration,
+               (!duration.isFinite || duration < 0) {
+                return false
+            }
+            if let count = week.completedSessionCount, count < 0 {
+                return false
+            }
+            let hasGoalValues = week.goalCompletionRate != nil
+                || week.goalMetDayCount != nil
+                || week.configuredGoalDayCount != nil
+            guard !hasGoalValues || (week.goalCompletionRate != nil
+                && week.goalMetDayCount != nil
+                && week.configuredGoalDayCount != nil) else {
+                return false
+            }
+            if let rate = week.goalCompletionRate,
+               (!rate.isFinite || !(0 ... 1).contains(rate)) {
+                return false
+            }
+            if let met = week.goalMetDayCount,
+               let configured = week.configuredGoalDayCount,
+               (met < 0 || configured < 0 || met > configured) {
+                return false
+            }
+            if let projects = week.projectDistribution {
+                return projects.allSatisfy { project in
+                    !project.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        && project.focusDuration.isFinite
+                        && project.focusDuration >= 0
+                        && project.completedSessionCount >= 0
+                        && project.focusShare.isFinite
+                        && (0 ... 1).contains(project.focusShare)
+                }
+            }
+            return true
+        }
+    }
+
+    private static func completedSessionCount(
+        in publication: FocusHistoryPublication,
+        for dayIdentifier: String
+    ) -> Int? {
+        publication.snapshot.recentDays.first(where: { $0.dayIdentifier == dayIdentifier })?
+            .completedSessionCount
     }
 
     private func shouldAcceptIncomingActivity(
@@ -1544,6 +1787,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         activitySnapshot: GitTodayActivitySnapshot?,
         activityRevision: Int64?,
         focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
+        focusHistoryPublication: FocusHistoryPublication? = nil,
         highestRevision: Int64,
         current: TinyBuddyCombinedSnapshot?
     ) -> UpdateResult {
@@ -1565,12 +1809,29 @@ public final class TinyBuddyCombinedSnapshotStore {
             ?? (current?.dayIdentifier == snapshot.stats.dayIdentifier
                 ? current?.focusSessionSnapshot
                 : nil)
+        let retainedFocusHistoryPublication = focusHistoryPublication
+            ?? (current?.dayIdentifier == snapshot.stats.dayIdentifier
+                ? current?.focusHistoryPublication
+                : nil)
         // Every later activity/status write retains the confirmed focus slice.
         // Keep the legacy count mirror synchronized as well, otherwise a Git
         // refresh between the combined write and its legacy-mirror update can
         // make HUD regress while Widget still renders the newer focus slice.
         let synchronizedSnapshot: TinyBuddySnapshot
-        if let retainedFocusSessionSnapshot,
+        if let retainedFocusHistoryPublication,
+           let completedSessionCount = Self.completedSessionCount(
+                in: retainedFocusHistoryPublication,
+                for: snapshot.stats.dayIdentifier
+           ) {
+            synchronizedSnapshot = TinyBuddySnapshot(
+                status: snapshot.status,
+                stats: DailyStats(
+                    dayIdentifier: snapshot.stats.dayIdentifier,
+                    focusCount: completedSessionCount,
+                    completionCount: snapshot.stats.completionCount
+                )
+            )
+        } else if let retainedFocusSessionSnapshot,
            retainedFocusSessionSnapshot.dayIdentifier == snapshot.stats.dayIdentifier {
             synchronizedSnapshot = TinyBuddySnapshot(
                 status: snapshot.status,
@@ -1593,7 +1854,8 @@ public final class TinyBuddyCombinedSnapshotStore {
                 recentProjectName: nil
             ),
             activityRevision: activityRevision,
-            focusSessionSnapshot: retainedFocusSessionSnapshot
+            focusSessionSnapshot: retainedFocusSessionSnapshot,
+            focusHistoryPublication: retainedFocusHistoryPublication
         ))
 
         guard let directSource = sourceValues().first,

@@ -25,6 +25,8 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private let config: FocusSessionConfiguration
     private let dayProvider: (Date) -> String
     private let nextDayBoundaryProvider: (Date) -> Date?
+    private let historyGoalMinutesProvider: () -> Int
+    private let historyActiveProjectKeysProvider: ([FocusSession]) -> Set<String>?
 
     // MARK: State (protected by lock)
     private var lock: NSLock = .init()
@@ -36,8 +38,22 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private var lastEditUndo: [FocusSession]?
     private var committedRevision: Int64 = 0
     private var confirmedRevision: Int64 = 0
+    /// Monotonic revision stored with the session archive. Unlike the manual
+    /// revision, it advances for every durable authority-record mutation.
+    private var archiveRevision: Int64 = 0
+    private var archiveHistoryCompleteness: FocusSessionArchiveCompleteness = .complete
+    /// The only in-process history cache. It is updated by session deltas only
+    /// after the matching archive write succeeds.
+    private var historyCache = FocusHistoryAggregationCache()
+    /// A corrupt archive remains unknown/partial rather than becoming a false
+    /// all-zero history after the next successful live session write.
+    private var historySource = FocusHistorySource(health: .available)
     /// Set by the primary app bridge. Called only after a journal commit.
     public var committedSnapshotHandler: (@Sendable (FocusSessionDerivedSnapshot) -> Void)?
+    /// Set by the primary app bridge. This covers automatic completed sessions
+    /// as well as manual edits, while the legacy current-day handler above
+    /// remains for compatibility with the review journal tests.
+    public var committedHistorySnapshotHandler: (@Sendable (FocusHistoryPublication) -> Void)?
 
     private struct PendingSwitch: Equatable {
         let fromSessionId: UUID
@@ -60,19 +76,39 @@ public final class FocusSessionEngine: @unchecked Sendable {
         nextDayBoundary: @escaping (Date) -> Date? = { date in
             let calendar = Calendar.current
             return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+        },
+        historyGoalMinutes: @escaping () -> Int = {
+            FocusGoalConfiguration.default.dailyFocusGoalMinutes
+        },
+        historyActiveProjectKeys: @escaping ([FocusSession]) -> Set<String>? = { _ in
+            nil
         }
     ) {
+        let loaded = Self.loadInitialArchive(from: persisting)
         self.clock = clock
         self.persisting = persisting
         self.config = config
         self.dayProvider = dayIdentifier
         self.nextDayBoundaryProvider = nextDayBoundary
+        self.historyGoalMinutesProvider = historyGoalMinutes
+        self.historyActiveProjectKeysProvider = historyActiveProjectKeys
         let now = clock.now
         self.currentDay = dayProvider(now)
-        self.sessions = persisting.load() ?? []
+        self.sessions = loaded.sessions
+        self.archiveRevision = loaded.revision
+        self.archiveHistoryCompleteness = loaded.historyCompleteness
+        self.historySource = loaded.source
+        self.historyCache = FocusHistoryAggregationCache(sessions: loaded.sessions)
         self.confirmedRevision = sessions.compactMap(\.manualRevision).max() ?? 0
-        reconcileOnLoad(now: now)
-        persistAfterReconcile()
+        let beforeReconcile = sessions
+        if reconcileOnLoad(now: now) {
+            guard persistAfterReconcile() else {
+                sessions = beforeReconcile
+                historyCache = FocusHistoryAggregationCache(sessions: beforeReconcile)
+                return
+            }
+            historyCache = FocusHistoryAggregationCache(sessions: sessions)
+        }
     }
 
     // MARK: - Public API
@@ -151,8 +187,9 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// Called when the wall‑clock time has jumped (manual change, NTP, DST, day boundary).
     @discardableResult
     public func timeChanged(at date: Date, dayIdentifier newDay: String) -> FocusSessionUpdateOutcome {
+        let previousDay = currentDayIdentifier
         let when = clampToNow(date)
-        return apply { sessions in
+        let outcome = apply { sessions in
             guard newDay != currentDay else { return }
             // Day rolled: finalise any open session at its last known event (no backfill).
             if let idx = sessions.firstIndex(where: \.isOpen) {
@@ -162,6 +199,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
             pendingSwitch = nil
             currentDay = newDay
         }
+        // A new day/week changes the visible report even when there was no
+        // open session to close. This is event-driven, never a background poll.
+        if previousDay != newDay, outcome != .saved {
+            republishFocusHistory()
+        }
+        return outcome
     }
 
     @discardableResult
@@ -216,6 +259,24 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public func derivedSnapshot(now: Date? = nil) -> FocusSessionDerivedSnapshot {
         lock.lock(); defer { lock.unlock() }
         return makeDerivedSnapshot(sessions: sessions, now: now ?? clock.now)
+    }
+
+    /// Returns the cache-backed, revision-bound history view. All consumers
+    /// must publish/read this value rather than scanning raw sessions again.
+    public func focusHistoryPublication() -> FocusHistoryPublication? {
+        lock.lock(); defer { lock.unlock() }
+        return makeFocusHistoryPublication()
+    }
+
+    /// Re-emits the existing cache when a user explicitly opens the report or
+    /// changes the focus target. It performs no discovery or session scan.
+    public func republishFocusHistory() {
+        lock.lock()
+        let publication = makeFocusHistoryPublication()
+        lock.unlock()
+        if let publication {
+            committedHistorySnapshotHandler?(publication)
+        }
     }
 
     /// Updates an ended session by stable identifier. Crossing local-day
@@ -307,18 +368,34 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public func undoLastEdit() -> FocusSessionEditResult {
         lock.lock()
         guard let previous = lastEditUndo else { lock.unlock(); return .rejected(.nothingToUndo) }
-        guard confirmedRevision < Int64.max else { lock.unlock(); return .rejected(.persistenceFailed) }
+        guard confirmedRevision < Int64.max, archiveRevision < Int64.max else {
+            lock.unlock()
+            return .rejected(.persistenceFailed)
+        }
         let nextRevision = confirmedRevision + 1
+        let nextArchiveRevision = archiveRevision + 1
         var restored = previous
         markConfirmedSessions(in: &restored, revision: nextRevision)
-        guard persisting.save(restored) else { lock.unlock(); return .rejected(.persistenceFailed) }
+        guard saveSessions(restored, revision: nextArchiveRevision) else {
+            lock.unlock()
+            return .rejected(.persistenceFailed)
+        }
+        let update = historyCache.apply(historyChanges(from: sessions, to: restored))
+        recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = restored
         lastEditUndo = nil
         committedRevision += 1
         confirmedRevision = nextRevision
+        archiveRevision = nextArchiveRevision
         let snapshot = makeDerivedSnapshot(sessions: restored, now: clock.now)
+        let history = update.affectedDayIdentifiers.isEmpty
+            ? nil
+            : makeFocusHistoryPublication()
         lock.unlock()
         committedSnapshotHandler?(snapshot)
+        if let history {
+            committedHistorySnapshotHandler?(history)
+        }
         return .saved(replacedSessionIDs: restored.map(\.id), snapshot: snapshot)
     }
 }
@@ -342,16 +419,29 @@ private extension FocusSessionEngine {
             lock.unlock()
             return .noChange
         }
-        if persisting.save(working) {
-            sessions = working
-            committedRevision += 1
-            lock.unlock()
-            return .saved
-        } else {
-            // Retain last valid state on persistence failure.
+        guard archiveRevision < Int64.max else {
             lock.unlock()
             return .persistenceFailed
         }
+        let nextArchiveRevision = archiveRevision + 1
+        guard saveSessions(working, revision: nextArchiveRevision) else {
+            // Retain the prior session archive and history cache together.
+            lock.unlock()
+            return .persistenceFailed
+        }
+        let update = historyCache.apply(historyChanges(from: previous, to: working))
+        recordTrustedHistoryDays(update.affectedDayIdentifiers)
+        sessions = working
+        archiveRevision = nextArchiveRevision
+        committedRevision += 1
+        let history = update.affectedDayIdentifiers.isEmpty
+            ? nil
+            : makeFocusHistoryPublication()
+        lock.unlock()
+        if let history {
+            committedHistorySnapshotHandler?(history)
+        }
+        return .saved
     }
 
     func validate(_ list: [FocusSession]) -> Bool {
@@ -387,20 +477,36 @@ private extension FocusSessionEngine {
         let previous = sessions
         var working = sessions
         if let error = mutation(&working) { lock.unlock(); return .rejected(error) }
-        guard confirmedRevision < Int64.max else { lock.unlock(); return .rejected(.persistenceFailed) }
+        guard confirmedRevision < Int64.max, archiveRevision < Int64.max else {
+            lock.unlock()
+            return .rejected(.persistenceFailed)
+        }
         let nextRevision = confirmedRevision + 1
+        let nextArchiveRevision = archiveRevision + 1
         markConfirmedSessions(in: &working, revision: nextRevision)
         guard validate(working) else { lock.unlock(); return .rejected(.overlappingSession) }
         guard working != previous else { lock.unlock(); return .rejected(.invalidTimeRange) }
-        guard persisting.save(working) else { lock.unlock(); return .rejected(.persistenceFailed) }
+        guard saveSessions(working, revision: nextArchiveRevision) else {
+            lock.unlock()
+            return .rejected(.persistenceFailed)
+        }
+        let update = historyCache.apply(historyChanges(from: previous, to: working))
+        recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
         lastEditUndo = previous
         pendingSwitch = nil
         committedRevision += 1
         confirmedRevision = nextRevision
+        archiveRevision = nextArchiveRevision
         let snapshot = makeDerivedSnapshot(sessions: working, now: clock.now)
+        let history = update.affectedDayIdentifiers.isEmpty
+            ? nil
+            : makeFocusHistoryPublication()
         lock.unlock()
         committedSnapshotHandler?(snapshot)
+        if let history {
+            committedHistorySnapshotHandler?(history)
+        }
         return .saved(replacedSessionIDs: working.map(\.id), snapshot: snapshot)
     }
 
@@ -416,6 +522,129 @@ private extension FocusSessionEngine {
             projects[label, default: 0] += session.activeDuration(now: now)
         }
         return FocusSessionDerivedSnapshot(revision: confirmedRevision, dayIdentifier: currentDay, focusDuration: todays.reduce(0) { $0 + $1.activeDuration(now: now) }, projectDurations: projects, completedSessionCount: todays.filter { $0.status == .ended }.count)
+    }
+
+    func makeFocusHistoryPublication() -> FocusHistoryPublication? {
+        guard TinyBuddyTimeContext.isValidDayIdentifier(currentDay) else {
+            return nil
+        }
+        let goalMinutes = max(1, historyGoalMinutesProvider())
+        let query = FocusHistoryQuery(
+            referenceDayIdentifier: currentDay,
+            source: historySource,
+            activeProjectKeys: historyActiveProjectKeysProvider(sessions),
+            defaultDailyGoalMinutes: goalMinutes
+        )
+        guard let snapshot = try? historyCache.snapshot(for: query) else {
+            return nil
+        }
+        return FocusHistoryPublication(revision: archiveRevision, snapshot: snapshot)
+    }
+
+    static func loadInitialArchive(
+        from persisting: FocusSessionPersisting
+    ) -> (
+        sessions: [FocusSession],
+        revision: Int64,
+        source: FocusHistorySource,
+        historyCompleteness: FocusSessionArchiveCompleteness
+    ) {
+        guard let archiveStore = persisting as? any FocusSessionArchivePersisting else {
+            let sessions = persisting.load() ?? []
+            guard FocusSessionArchive(sessions: sessions).isSemanticallyValid else {
+                return (
+                    sessions: [],
+                    revision: 0,
+                    source: FocusHistorySource(health: .unavailable),
+                    historyCompleteness: .partialRecovery
+                )
+            }
+            return (
+                sessions: sessions,
+                revision: 0,
+                source: FocusHistorySource(health: .available),
+                historyCompleteness: .complete
+            )
+        }
+
+        let result = archiveStore.loadArchive()
+        if let archive = result.archive, archive.isSemanticallyValid {
+            return (
+                sessions: archive.sessions,
+                revision: archive.revision,
+                source: FocusHistorySource(
+                    health: archive.historyCompleteness == .complete ? .available : .partial
+                ),
+                historyCompleteness: archive.historyCompleteness
+            )
+        }
+        switch result.health {
+        case .corrupt:
+            return (
+                sessions: [],
+                revision: 0,
+                source: FocusHistorySource(health: .unavailable),
+                historyCompleteness: .partialRecovery
+            )
+        case .missing, .available, .recoveredFromBackup:
+            return (
+                sessions: [],
+                revision: 0,
+                source: FocusHistorySource(health: .available),
+                historyCompleteness: .complete
+            )
+        }
+    }
+
+    func saveSessions(_ sessions: [FocusSession], revision: Int64) -> Bool {
+        guard revision >= 0 else { return false }
+        if let archiveStore = persisting as? any FocusSessionArchivePersisting {
+            return archiveStore.saveArchive(
+                FocusSessionArchive(
+                    revision: revision,
+                    sessions: sessions,
+                    historyCompleteness: historySource.health == .available
+                        ? archiveHistoryCompleteness
+                        : .partialRecovery
+                )
+            )
+        }
+        return persisting.save(sessions)
+    }
+
+    func historyChanges(
+        from previous: [FocusSession],
+        to current: [FocusSession]
+    ) -> [FocusHistorySessionChange] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        return Set(previousByID.keys)
+            .union(currentByID.keys)
+            .sorted { $0.uuidString < $1.uuidString }
+            .compactMap { id in
+                let old = previousByID[id]
+                let new = currentByID[id]
+                guard old != new else { return nil }
+                return FocusHistorySessionChange(previous: old, current: new)
+            }
+    }
+
+    func recordTrustedHistoryDays(_ affectedDays: Set<String>) {
+        guard !affectedDays.isEmpty else { return }
+        switch historySource.health {
+        case .available:
+            return
+        case .partial:
+            historySource = FocusHistorySource(
+                health: .partial,
+                trustedDayIdentifiers: historySource.trustedDayIdentifiers.union(affectedDays)
+            )
+        case .unavailable:
+            historySource = FocusHistorySource(
+                health: .partial,
+                trustedDayIdentifiers: affectedDays
+            )
+        }
     }
 
     func markConfirmedSessions(in sessions: inout [FocusSession], revision: Int64) {
@@ -560,7 +789,8 @@ private extension FocusSessionEngine {
 
     // MARK: Load / reconcile
 
-    func reconcileOnLoad(now: Date) {
+    func reconcileOnLoad(now: Date) -> Bool {
+        var changed = false
         // Any session left open by a crash must not backfill offline time.
         for i in 0 ..< sessions.count where sessions[i].isOpen {
             let end = min(sessions[i].lastStateChangeAt, now)
@@ -571,12 +801,19 @@ private extension FocusSessionEngine {
             sessions[i].endedAt = end
             sessions[i].status = .ended
             sessions[i].lastStateChangeAt = end
+            changed = true
         }
         currentDay = dayProvider(now)
+        return changed
     }
 
-    func persistAfterReconcile() {
-        guard !sessions.isEmpty else { return }
-        persisting.save(sessions)
+    func persistAfterReconcile() -> Bool {
+        guard !sessions.isEmpty else { return true }
+        guard archiveRevision < Int64.max else { return false }
+        let nextRevision = archiveRevision + 1
+        guard saveSessions(sessions, revision: nextRevision) else { return false }
+        archiveRevision = nextRevision
+        committedRevision += 1
+        return true
     }
 }

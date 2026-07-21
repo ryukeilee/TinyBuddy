@@ -64,6 +64,21 @@ final class SnapshotRecorder: @unchecked Sendable {
     }
 }
 
+final class HistoryPublicationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var publications: [FocusHistoryPublication] = []
+
+    func append(_ publication: FocusHistoryPublication) {
+        lock.lock(); defer { lock.unlock() }
+        publications.append(publication)
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return publications.count
+    }
+}
+
 // MARK: - Helpers
 
 private let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000) // arbitrary reference
@@ -853,6 +868,75 @@ extension FocusSessionEngineTests {
         clock.advance(by: 10)
         XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
         XCTAssertEqual(recorder.count, 0)
+    }
+
+    func test_completed_automatic_session_publishes_cache_backed_history_once() throws {
+        let engine = makeEngine(clock: clock, store: store)
+        let recorder = HistoryPublicationRecorder()
+        engine.committedHistorySnapshotHandler = { recorder.append($0) }
+
+        XCTAssertEqual(engine.userActivity(in: projectA, at: t0), .saved)
+        XCTAssertEqual(recorder.count, 0, "Open sessions are not historical facts yet")
+
+        clock.advance(by: 90)
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        XCTAssertEqual(recorder.count, 1)
+
+        let publication = try XCTUnwrap(recorder.publications.first)
+        XCTAssertEqual(publication.revision, 2)
+        XCTAssertEqual(publication.snapshot.recentDays.last?.focusDuration ?? -1, 90, accuracy: 0.001)
+        XCTAssertEqual(publication.snapshot.recentDays.last?.completedSessionCount, 1)
+        XCTAssertEqual(publication.snapshot.currentWeek.completedSessionCount, 1)
+    }
+
+    func test_failed_manual_edit_keeps_history_cache_and_suppresses_history_publication() throws {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+        let before = try XCTUnwrap(engine.focusHistoryPublication())
+        let recorder = HistoryPublicationRecorder()
+        engine.committedHistorySnapshotHandler = { recorder.append($0) }
+        store.shouldFail = true
+
+        XCTAssertEqual(engine.editSession(id: id, project: projectB), .rejected(.persistenceFailed))
+
+        XCTAssertEqual(engine.focusHistoryPublication(), before)
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertEqual(engine.allSessions.first(where: { $0.id == id })?.project, projectA)
+    }
+
+    func test_republishing_history_uses_same_session_revision_without_scanning_sessions() throws {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+        let before = try XCTUnwrap(engine.focusHistoryPublication())
+        let recorder = HistoryPublicationRecorder()
+        engine.committedHistorySnapshotHandler = { recorder.append($0) }
+
+        engine.republishFocusHistory()
+
+        XCTAssertEqual(recorder.publications, [before])
+        XCTAssertEqual(engine.allSessions.map(\.id), [id])
+    }
+
+    func test_semantically_invalid_loaded_sessions_publish_unknown_history_instead_of_zeroes() throws {
+        var invalid = FocusSession(
+            project: projectA,
+            dayIdentifier: "not-a-local-day",
+            startedAt: t0,
+            endedAt: t0.addingTimeInterval(30),
+            status: .ended,
+            lastUserActivityAt: t0.addingTimeInterval(30),
+            lastStateChangeAt: t0.addingTimeInterval(30)
+        )
+        invalid.isManuallyConfirmed = true
+        store.stored = [invalid]
+
+        let engine = makeEngine(clock: clock, store: store)
+        let publication = try XCTUnwrap(engine.focusHistoryPublication())
+
+        XCTAssertEqual(engine.allSessions, [])
+        XCTAssertEqual(publication.snapshot.state, .unknown)
+        XCTAssertEqual(publication.snapshot.recentDays.last?.state, .unknown)
+        XCTAssertNil(publication.snapshot.recentDays.last?.completedSessionCount)
     }
 
     func test_rapid_successive_edits_are_serialized_and_latest_commit_wins() {

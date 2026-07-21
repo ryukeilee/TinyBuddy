@@ -92,6 +92,9 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var displayPresentation: TinyBuddyDisplayPresentation
     @Published private(set) var refreshDiagnostics: RefreshDiagnostics
     @Published private(set) var hiddenSnapshotDiagnosticSummary: TinyBuddyHiddenSnapshotDiagnosticSummary?
+    /// The same revision-bound session history that the Widget and Settings
+    /// report consume. HUD rendering never re-derives it from raw sessions.
+    @Published private(set) var focusHistoryPublication: FocusHistoryPublication?
 
     var hudPresentation: TinyBuddyWidgetPresentation {
         displayPresentation
@@ -235,6 +238,7 @@ final class PetViewModel: ObservableObject {
             timeContext: timeContext
         )
         self.hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
+        self.focusHistoryPublication = combinedHUDState.committedSnapshot?.focusHistoryPublication
         recordHUDConsumptionIfMatching(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,
@@ -618,6 +622,9 @@ final class PetViewModel: ObservableObject {
         }
         latestActivitySnapshot = activitySnapshot
         latestDataAvailability = dataAvailability
+        if focusHistoryPublication != committedSnapshot?.focusHistoryPublication {
+            focusHistoryPublication = committedSnapshot?.focusHistoryPublication
+        }
         recordHUDConsumptionIfMatching(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,

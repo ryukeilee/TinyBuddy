@@ -265,6 +265,7 @@ extension FocusSessionAppBridge {
         let fileStore = FocusSessionFileStore(fileURL: storeURL)
         let clock = SystemFocusClock()
         let config = FocusSessionConfiguration()
+        let historyGoalPreferences = FocusGoalPreferencesStore()
         let timeEnv = TinyBuddyTimeEnvironment()
         let dayProvider: (Date) -> String = { date in
             timeEnv.capture()?.dayIdentifier(for: date) ?? ""
@@ -280,7 +281,10 @@ extension FocusSessionAppBridge {
             persisting: fileStore,
             config: config,
             dayIdentifier: dayProvider,
-            nextDayBoundary: nextDayBoundary
+            nextDayBoundary: nextDayBoundary,
+            historyGoalMinutes: {
+                historyGoalPreferences.loadConfiguration().dailyFocusGoalMinutes
+            }
         )
         let coordinator = FocusSessionCoordinator(
             engine: engine,

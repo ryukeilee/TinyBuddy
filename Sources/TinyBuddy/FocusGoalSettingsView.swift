@@ -7,6 +7,7 @@ import TinyBuddyCore
 struct FocusGoalSettingsView: View {
     let engineProvider: () -> FocusSessionEngine?
     let coordinator: FocusGoalCoordinator
+    let onConfigurationSaved: () -> Void
 
     @State private var dailyGoalMinutes: Double
     @State private var continuousThresholdMinutes: Double
@@ -27,10 +28,12 @@ struct FocusGoalSettingsView: View {
 
     init(
         engineProvider: @escaping () -> FocusSessionEngine?,
-        coordinator: FocusGoalCoordinator
+        coordinator: FocusGoalCoordinator,
+        onConfigurationSaved: @escaping () -> Void = {}
     ) {
         self.engineProvider = engineProvider
         self.coordinator = coordinator
+        self.onConfigurationSaved = onConfigurationSaved
         let config = coordinator.configuration
         _dailyGoalMinutes = State(initialValue: Double(config.dailyFocusGoalMinutes))
         _continuousThresholdMinutes = State(initialValue: Double(config.continuousFocusThresholdMinutes))
@@ -63,6 +66,8 @@ struct FocusGoalSettingsView: View {
                 }
             } header: {
                 Label("每日专注目标", systemImage: "target")
+            } footer: {
+                Text("保存后会按当前目标重新呈现历史达标进度；已确认会话的时长、次数和归属不会被改写。")
             }
 
             // MARK: Break Reminder
@@ -253,6 +258,9 @@ struct FocusGoalSettingsView: View {
         )
         coordinator.saveConfiguration(config)
         coordinator.resetEvaluationCache()
+        // Reuse the session-derived cache to re-evaluate historical goal
+        // progress; this does not rescan sessions or schedule background work.
+        onConfigurationSaved()
         hasPendingChanges = false
     }
 }

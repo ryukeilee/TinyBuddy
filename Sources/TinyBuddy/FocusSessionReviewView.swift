@@ -33,9 +33,17 @@ struct FocusSessionReviewView: View {
                 .foregroundStyle(.secondary)
 
             if let engine {
-                let summary = engine.derivedSnapshot()
-                Text("今日已记录 \(formatted(summary.focusDuration)) · \(summary.completedSessionCount) 个完成会话")
-                    .font(.subheadline)
+                if let summary = engine.focusHistoryPublication()?.snapshot.recentDays.last {
+                    switch summary.state {
+                    case .sessions, .noSessions:
+                        Text("今日已记录 \(formatted(summary.focusDuration ?? 0)) · \(summary.completedSessionCount ?? 0) 个完成会话")
+                            .font(.subheadline)
+                    case .unknown:
+                        Text("今日历史暂不可用，不会以 0 代替未知结果。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 HStack(spacing: 16) {
                     List(sessions, selection: $selected) { session in

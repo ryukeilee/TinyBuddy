@@ -9,15 +9,18 @@ struct TinyBuddyEntry: TimelineEntry {
     let date: Date
     let presentation: TinyBuddyDisplayPresentation
     let focusSessionSnapshot: FocusSessionDerivedSnapshot?
+    let focusHistoryPublication: FocusHistoryPublication?
 
     init(
         date: Date,
         presentation: TinyBuddyDisplayPresentation,
-        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
+        focusHistoryPublication: FocusHistoryPublication? = nil
     ) {
         self.date = date
         self.presentation = presentation
         self.focusSessionSnapshot = focusSessionSnapshot
+        self.focusHistoryPublication = focusHistoryPublication
     }
 }
 
@@ -137,7 +140,8 @@ struct TinyBuddyProvider: TimelineProvider {
                     hasSnapshot: true
                 ),
                 timeContext: timeContext,
-                focusSessionSnapshot: combinedSnapshot.focusSessionSnapshot
+                focusSessionSnapshot: combinedSnapshot.focusSessionSnapshot,
+                focusHistoryPublication: combinedSnapshot.focusHistoryPublication
             )
         }
 
@@ -194,7 +198,8 @@ struct TinyBuddyProvider: TimelineProvider {
         refreshStatus: GitActivityRefreshStatus?,
         dataAvailability: TinyBuddyDisplayDataAvailability,
         timeContext: TinyBuddyTimeContext,
-        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
+        focusHistoryPublication: FocusHistoryPublication? = nil
     ) -> TinyBuddyEntry {
         TinyBuddyEntry(
             date: date,
@@ -209,7 +214,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 locale: Locale(identifier: timeContext.signature.localeIdentifier),
                 timeZone: timeContext.timeZone
             ),
-            focusSessionSnapshot: focusSessionSnapshot
+            focusSessionSnapshot: focusSessionSnapshot,
+            focusHistoryPublication: focusHistoryPublication
         )
     }
 
@@ -272,9 +278,41 @@ struct TinyBuddyWidgetView: View {
     }
 
     private var focusSessionSummary: String? {
-        guard let focus = entry.focusSessionSnapshot, focus.focusDuration > 0 else { return nil }
-        let minutes = Int(focus.focusDuration / 60)
-        return "已专注 \(minutes / 60) 小时 \(minutes % 60) 分 · \(focus.completedSessionCount) 段"
+        guard let day = entry.focusHistoryPublication?.snapshot.recentDays.last else {
+            return "专注历史尚未就绪"
+        }
+        switch day.state {
+        case .sessions:
+            let minutes = Int((day.focusDuration ?? 0) / 60)
+            return "已专注 \(minutes / 60) 小时 \(minutes % 60) 分 · \(day.completedSessionCount ?? 0) 段"
+        case .noSessions:
+            return "今日暂无已结束会话"
+        case .unknown:
+            return "专注历史未知"
+        }
+    }
+
+    private var focusWeekSummary: String? {
+        guard let week = entry.focusHistoryPublication?.snapshot.currentWeek,
+              let duration = week.focusDuration else {
+            return nil
+        }
+        let minutes = Int(duration / 60)
+        return "本周 \(minutes / 60) 小时 \(minutes % 60) 分"
+    }
+
+    /// Do not fall back to the legacy count when the authoritative history
+    /// publication is absent or unknown. A missing migration/read result is
+    /// semantically different from a known day with zero completed sessions.
+    private var focusMetricText: String {
+        focusMetricIsKnown ? presentation.focusCountText : "未知"
+    }
+
+    private var focusMetricIsKnown: Bool {
+        guard let day = entry.focusHistoryPublication?.snapshot.recentDays.last else {
+            return false
+        }
+        return day.state != .unknown && day.completedSessionCount != nil
     }
 
     private var displayEnvironment: TinyBuddyDisplayEnvironment {
@@ -346,8 +384,10 @@ struct TinyBuddyWidgetView: View {
     private var widgetAccessibilityLabel: String {
         var parts = ["TinyBuddy"]
         parts.append(presentation.statusTitle)
-        if presentation.focusCount > 0 {
-            parts.append("今日专注 \(presentation.focusCountText)")
+        if focusMetricIsKnown, presentation.focusCount > 0 {
+            parts.append("今日专注 \(focusMetricText)")
+        } else if !focusMetricIsKnown {
+            parts.append("今日专注未知")
         }
         if presentation.completionCount > 0 {
             parts.append("今日完成 \(presentation.completionCountText)")
@@ -486,6 +526,12 @@ struct TinyBuddyWidgetView: View {
                     .foregroundStyle(secondaryText)
                     .lineLimit(1)
             }
+            if !compact, let focusWeekSummary {
+                Text(focusWeekSummary)
+                    .font(.caption2)
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(1)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
@@ -495,12 +541,12 @@ struct TinyBuddyWidgetView: View {
     private var metrics: some View {
         if layout.stacksMetricsVertically {
             VStack(spacing: 6) {
-                metric(title: "今日专注", value: presentation.focusCountText)
+                metric(title: "今日专注", value: focusMetricText)
                 metric(title: "今日完成", value: presentation.completionCountText)
             }
         } else {
             HStack(spacing: 6) {
-                metric(title: "今日专注", value: presentation.focusCountText)
+                metric(title: "今日专注", value: focusMetricText)
                 metric(title: "今日完成", value: presentation.completionCountText)
             }
         }
