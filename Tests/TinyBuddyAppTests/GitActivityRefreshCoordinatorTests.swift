@@ -1395,6 +1395,36 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.widgetReloadCount, 1)
     }
 
+    func testCommittedActivityHookReceivesAuthoritativePreviousAndCurrentSnapshots() {
+        let harness = makeHarness()
+        harness.setScriptRunnerHook { runCount in
+            if runCount == 1 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 1,
+                    commitCount: 0,
+                    recentProjectName: "TinyBuddy"
+                )
+            } else if runCount == 2 {
+                harness.setActivitySnapshot(
+                    focusBlockCount: 2,
+                    commitCount: 1,
+                    recentProjectName: "TinyBuddy"
+                )
+            }
+        }
+
+        harness.performAndWaitForRefresh { harness.coordinator.start() }
+        harness.advanceMonotonicTime(by: 61)
+        harness.performAndWaitForWidgetReloadCount(2) {
+            harness.coordinator.handleManualRefresh()
+        }
+
+        XCTAssertEqual(harness.committedActivityPairs.count, 2)
+        XCTAssertEqual(harness.committedActivityPairs.last?.previous?.commitCount, 0)
+        XCTAssertEqual(harness.committedActivityPairs.last?.current.commitCount, 1)
+        XCTAssertEqual(harness.committedActivityPairs.last?.current.focusBlockCount, 2)
+    }
+
     func testDidWakeNotificationTriggersRefreshAndWidgetReload() {
         let harness = makeHarness()
         harness.setScriptRunnerHook { runCount in
@@ -2634,6 +2664,9 @@ private final class RefreshHarness: @unchecked Sendable {
             beforeActivityCommit: { [state] in
                 state.beforeActivityCommitHook?()
             },
+            activityDidCommit: { [state] previous, current in
+                state.committedActivityPairs.append((previous, current))
+            },
             repositoryChangeMonitorFactory: { [state] changeHandler in
                 let monitor = TestGitRepositoryChangeMonitor(changeHandler: changeHandler)
                 state.repositoryChangeMonitor = monitor
@@ -2699,6 +2732,10 @@ private final class RefreshHarness: @unchecked Sendable {
     }
     var combinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.load() }
     var combinedSnapshotWriteWasOnMainThread: Bool? { state.combinedSnapshotWriteWasOnMainThread }
+    var committedActivityPairs: [(
+        previous: GitTodayActivitySnapshot?,
+        current: GitTodayActivitySnapshot
+    )] { state.committedActivityPairs }
     var readOnlyCombinedSnapshot: TinyBuddyCombinedSnapshot? { combinedSnapshotStore.loadReadOnly() }
     var statusNotificationCenterForTesting: NotificationCenter { statusNotificationCenter }
     var authorizedRoots: [URL] {
@@ -3042,6 +3079,10 @@ private final class RefreshHarness: @unchecked Sendable {
         var scriptRunnerHook: ((Int) throws -> Void)?
         var scriptCancellationHook: (() -> Void)?
         var beforeActivityCommitHook: (() -> Void)?
+        var committedActivityPairs: [(
+            previous: GitTodayActivitySnapshot?,
+            current: GitTodayActivitySnapshot
+        )] = []
         var timeScopePublisherHook: ((String) -> URL?)?
         var timeScopePublishCount = 0
         var widgetReloaderHook: (() throws -> Void)?

@@ -79,6 +79,8 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
               Set(sessions.map(\.id)).count == sessions.count else {
             return false
         }
+        let decisionIDs = sessions.compactMap(\.decisionEvents).flatMap { $0 }.map(\.id)
+        guard Set(decisionIDs).count == decisionIDs.count else { return false }
 
         for session in sessions {
             guard TinyBuddyTimeContext.isValidDayIdentifier(session.dayIdentifier),
@@ -91,7 +93,10 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
                   session.lastStateChangeAt >= session.startedAt,
                   session.pausedTotal.isFinite,
                   session.pausedTotal >= 0,
-                  session.manualRevision.map({ $0 >= 0 }) ?? true else {
+                  session.manualRevision.map({ $0 >= 0 }) ?? true,
+                  session.decisionEvents?.allSatisfy({ event in
+                      event.at.timeIntervalSinceReferenceDate.isFinite
+                  }) ?? true else {
                 return false
             }
 

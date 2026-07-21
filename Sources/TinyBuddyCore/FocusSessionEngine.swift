@@ -128,22 +128,32 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// User explicitly interacted with a project (keyboard / mouse / git activity).
     /// - `project == nil` means generic user input not attributable to any project.
     @discardableResult
-    public func userActivity(in project: FocusProjectContext?, at date: Date) -> FocusSessionUpdateOutcome {
+    public func userActivity(
+        in project: FocusProjectContext?,
+        at date: Date,
+        reason: FocusSessionDecisionReason = .userActivity
+    ) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
             guard let p = project else {
-                handleGenericActivity(sessions: &sessions, when: when)
+                handleGenericActivity(sessions: &sessions, when: when, reason: reason)
                 return
             }
             guard let idx = sessions.firstIndex(where: \.isOpen) else {
-                startSession(in: p, at: when, into: &sessions)
+                startSession(in: p, at: when, reason: reason, into: &sessions)
                 return
             }
             let cur = sessions[idx]
             if cur.project == p {
-                sameProjectActivity(idx: idx, sessions: &sessions, when: when)
+                sameProjectActivity(idx: idx, sessions: &sessions, when: when, reason: reason)
             } else {
-                differentProjectActivity(idx: idx, sessions: &sessions, candidate: p, when: when)
+                differentProjectActivity(
+                    idx: idx,
+                    sessions: &sessions,
+                    candidate: p,
+                    when: when,
+                    reason: reason
+                )
             }
         }
     }
@@ -169,13 +179,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
         return apply { sessions in
             guard let idx = sessions.firstIndex(where: \.isOpen),
                   sessions[idx].currentPauseStartedAt == nil else { return }
-            pauseSession(at: idx, at: when, into: &sessions)
+            pauseSession(at: idx, at: when, reason: .idle, into: &sessions)
         }
     }
 
     @discardableResult
     public func lockScreen(at date: Date) -> FocusSessionUpdateOutcome {
-        finalizeOpen(at: date)
+        finalizeOpen(at: date, reason: .lockScreen)
     }
 
     @discardableResult
@@ -188,7 +198,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     @discardableResult
     public func systemSleep(at date: Date) -> FocusSessionUpdateOutcome {
-        finalizeOpen(at: date)
+        finalizeOpen(at: date, reason: .systemSleep)
     }
 
     @discardableResult
@@ -206,7 +216,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
             // Day rolled: finalise any open session at its last known event (no backfill).
             if let idx = sessions.firstIndex(where: \.isOpen) {
                 let lastKnown = sessions[idx].lastStateChangeAt
-                endSession(at: idx, endedAt: min(lastKnown, when), into: &sessions)
+                endSession(
+                    at: idx,
+                    endedAt: min(lastKnown, when),
+                    reason: .dayBoundary,
+                    into: &sessions
+                )
             }
             pendingSwitch = nil
             currentDay = newDay
@@ -221,12 +236,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     @discardableResult
     public func appWillTerminate(at date: Date) -> FocusSessionUpdateOutcome {
-        finalizeOpen(at: date)
+        finalizeOpen(at: date, reason: .appTermination)
     }
 
     @discardableResult
     public func crash(at date: Date) -> FocusSessionUpdateOutcome {
-        finalizeOpen(at: date)
+        finalizeOpen(at: date, reason: .crashRecovery)
     }
 
     // MARK: - Aggregates (read‑only, thread‑safe)
@@ -258,7 +273,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
         let n = now ?? clock.now
         var result: [String: TimeInterval] = [:]
         for s in sessions where s.dayIdentifier == currentDay {
-            result[projectContextResolver(s.project).key, default: 0] += s.activeDuration(now: n)
+            let project = s.decisionAuthority == .manualCorrection
+                ? s.project
+                : projectContextResolver(s.project)
+            result[project.key, default: 0] += s.activeDuration(now: n)
         }
         return result
     }
@@ -329,10 +347,53 @@ public final class FocusSessionEngine: @unchecked Sendable {
             guard config.maxSessionSpan.map({ end.timeIntervalSince(start) <= $0 }) ?? true else {
                 return .invalidTimeRange
             }
-            let replacement = splitForDayBoundaries(
-                source: working[index], project: resolvedProject, start: start, end: end
+            var source = working[index]
+            let projectChanged = resolvedProject != source.project
+            let timeChanged = start != source.startedAt || end != source.endedAt
+            guard projectChanged || timeChanged else { return .invalidTimeRange }
+            if projectChanged {
+                appendDecision(
+                    to: &source,
+                    at: clock.now,
+                    kind: .projectChanged,
+                    reason: .manualCorrection,
+                    source: .manualCorrection
+                )
+            }
+            if timeChanged {
+                appendDecision(
+                    to: &source,
+                    at: clock.now,
+                    kind: .corrected,
+                    reason: .manualCorrection,
+                    source: .manualCorrection
+                )
+            }
+            var replacement = splitForDayBoundaries(
+                source: source, project: resolvedProject, start: start, end: end
             )
             guard !replacement.isEmpty else { return .crossDayBoundaryUnavailable }
+            for replacementIndex in replacement.indices {
+                if replacement[replacementIndex].startedAt != working[index].startedAt {
+                    appendDecision(
+                        to: &replacement[replacementIndex],
+                        at: replacement[replacementIndex].startedAt,
+                        kind: .started,
+                        reason: .manualCorrection,
+                        source: .manualCorrection
+                    )
+                }
+                if replacement[replacementIndex].endedAt != working[index].endedAt,
+                   let segmentEnd = replacement[replacementIndex].endedAt {
+                    appendDecision(
+                        to: &replacement[replacementIndex],
+                        at: segmentEnd,
+                        kind: .ended,
+                        reason: .manualCorrection,
+                        source: .manualCorrection
+                    )
+                }
+            }
             working.remove(at: index)
             working.append(contentsOf: replacement)
             return nil
@@ -344,6 +405,31 @@ public final class FocusSessionEngine: @unchecked Sendable {
             guard let index = working.firstIndex(where: { $0.id == id }) else { return .sessionNotFound }
             guard !working[index].isOpen else { return .sessionIsActive }
             working.remove(at: index)
+            return nil
+        }
+    }
+
+    /// Records an explicit user confirmation without changing measured time or
+    /// project attribution. Automatic processing cannot mutate ended rows, and
+    /// the durable authority marker remains visible after restart.
+    public func confirmSession(id: UUID) -> FocusSessionEditResult {
+        edit { working in
+            guard let index = working.firstIndex(where: { $0.id == id }) else {
+                return .sessionNotFound
+            }
+            guard !working[index].isOpen else { return .sessionIsActive }
+            guard working[index].decisionAuthority != .manualCorrection,
+                  working[index].decisionAuthority != .userConfirmed else {
+                return .alreadyConfirmed
+            }
+            working[index].isManuallyConfirmed = true
+            appendDecision(
+                to: &working[index],
+                at: clock.now,
+                kind: .confirmed,
+                reason: .manualConfirmation,
+                source: .userConfirmed
+            )
             return nil
         }
     }
@@ -365,12 +451,20 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 return .invalidTimeRange
             }
             working.removeAll { selected.contains($0.id) }
-            let base = FocusSession(
+            var base = FocusSession(
                 id: first.id, project: resolvedProject, dayIdentifier: dayProvider(first.startedAt),
                 startedAt: first.startedAt, endedAt: end, status: .ended,
                 lastUserActivityAt: end, lastStateChangeAt: end,
                 pausedTotal: min(first.pausedTotal, end.timeIntervalSince(first.startedAt)),
-                isManuallyConfirmed: true
+                isManuallyConfirmed: true,
+                decisionEvents: mergedDecisionEvents(matches)
+            )
+            appendDecision(
+                to: &base,
+                at: clock.now,
+                kind: .merged,
+                reason: .manualMerge,
+                source: .manualCorrection
             )
             let replacements = splitForDayBoundaries(source: base, project: resolvedProject, start: base.startedAt, end: end)
             guard !replacements.isEmpty else { return .crossDayBoundaryUnavailable }
@@ -385,8 +479,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
             let source = working[index]
             guard !source.isOpen else { return .sessionIsActive }
             guard let end = source.endedAt, boundary > source.startedAt, boundary < end else { return .splitOutsideSession }
-            let first = FocusSession(id: source.id, project: source.project, dayIdentifier: dayProvider(source.startedAt), startedAt: source.startedAt, endedAt: boundary, status: .ended, lastUserActivityAt: boundary, lastStateChangeAt: boundary, pausedTotal: min(source.pausedTotal, boundary.timeIntervalSince(source.startedAt)), isManuallyConfirmed: true)
-            let second = FocusSession(project: source.project, dayIdentifier: dayProvider(boundary), startedAt: boundary, endedAt: end, status: .ended, lastUserActivityAt: end, lastStateChangeAt: end, pausedTotal: 0, isManuallyConfirmed: true)
+            var first = FocusSession(id: source.id, project: source.project, dayIdentifier: dayProvider(source.startedAt), startedAt: source.startedAt, endedAt: boundary, status: .ended, lastUserActivityAt: boundary, lastStateChangeAt: boundary, pausedTotal: min(source.pausedTotal, boundary.timeIntervalSince(source.startedAt)), isManuallyConfirmed: true, decisionEvents: source.decisionEvents?.filter { $0.at < boundary })
+            var second = FocusSession(project: source.project, dayIdentifier: dayProvider(boundary), startedAt: boundary, endedAt: end, status: .ended, lastUserActivityAt: end, lastStateChangeAt: end, pausedTotal: 0, isManuallyConfirmed: true, decisionEvents: source.decisionEvents?.filter { $0.at >= boundary })
+            appendDecision(to: &first, at: boundary, kind: .ended, reason: .manualSplit, source: .manualCorrection)
+            appendDecision(to: &second, at: boundary, kind: .started, reason: .manualSplit, source: .manualCorrection)
+            appendDecision(to: &first, at: clock.now, kind: .split, reason: .manualSplit, source: .manualCorrection)
+            appendDecision(to: &second, at: clock.now, kind: .split, reason: .manualSplit, source: .manualCorrection)
             working.remove(at: index)
             working.append(contentsOf: splitForDayBoundaries(source: first, project: first.project, start: first.startedAt, end: boundary))
             working.append(contentsOf: splitForDayBoundaries(source: second, project: second.project, start: boundary, end: end))
@@ -404,6 +502,16 @@ public final class FocusSessionEngine: @unchecked Sendable {
         let nextRevision = confirmedRevision + 1
         let nextArchiveRevision = archiveRevision + 1
         var restored = previous
+        for index in restored.indices where !restored[index].isOpen {
+            restored[index].isManuallyConfirmed = true
+            appendDecision(
+                to: &restored[index],
+                at: clock.now,
+                kind: .undo,
+                reason: .undo,
+                source: .manualCorrection
+            )
+        }
         markConfirmedSessions(in: &restored, revision: nextRevision)
         guard saveSessions(restored, revision: nextArchiveRevision) else {
             lock.unlock()
@@ -477,6 +585,8 @@ private extension FocusSessionEngine {
         // Unique identifiers.
         let ids = list.map(\.id)
         guard Set(ids).count == ids.count else { return false }
+        let decisionIDs = list.compactMap(\.decisionEvents).flatMap { $0 }.map(\.id)
+        guard Set(decisionIDs).count == decisionIDs.count else { return false }
 
         // At most one open session.
         guard list.filter(\.isOpen).count <= 1 else { return false }
@@ -488,6 +598,10 @@ private extension FocusSessionEngine {
             // end >= start.
             if let end = s.endedAt, end < s.startedAt { return false }
             if s.isOpen && s.isManuallyConfirmed { return false }
+            if let events = s.decisionEvents,
+               events.contains(where: { !$0.at.timeIntervalSinceReferenceDate.isFinite }) {
+                return false
+            }
             // activeDuration must be non‑negative.
             if s.activeDuration(now: clock.now) < 0 { return false }
         }
@@ -694,7 +808,20 @@ private extension FocusSessionEngine {
             let gross = end.timeIntervalSince(start)
             let segmentGross = segmentEnd.timeIntervalSince(cursor)
             let excluded = gross > 0 ? source.pausedTotal * segmentGross / gross : 0
-            result.append(FocusSession(id: keepsOriginalID ? source.id : UUID(), project: project, dayIdentifier: dayProvider(cursor), startedAt: cursor, endedAt: segmentEnd, status: .ended, lastUserActivityAt: segmentEnd, lastStateChangeAt: segmentEnd, pausedTotal: min(excluded, segmentGross), isManuallyConfirmed: true))
+            let segmentEvents = source.decisionEvents?.compactMap { event -> FocusSessionDecisionEvent? in
+                let isLifecycleEvent = event.source == .automatic
+                let isInsideSegment = event.at >= cursor
+                    && (segmentEnd == end ? event.at <= segmentEnd : event.at < segmentEnd)
+                guard !isLifecycleEvent || isInsideSegment else { return nil }
+                guard !keepsOriginalID else { return event }
+                return FocusSessionDecisionEvent(
+                    at: event.at,
+                    kind: event.kind,
+                    reason: event.reason,
+                    source: event.source
+                )
+            }
+            result.append(FocusSession(id: keepsOriginalID ? source.id : UUID(), project: project, dayIdentifier: dayProvider(cursor), startedAt: cursor, endedAt: segmentEnd, status: .ended, lastUserActivityAt: segmentEnd, lastStateChangeAt: segmentEnd, pausedTotal: min(excluded, segmentGross), isManuallyConfirmed: true, decisionEvents: segmentEvents))
             keepsOriginalID = false
             cursor = segmentEnd
         }
@@ -707,19 +834,35 @@ private extension FocusSessionEngine {
         min(date, clock.now)
     }
 
-    func startSession(in project: FocusProjectContext, at when: Date, into sessions: inout [FocusSession]) {
+    func startSession(
+        in project: FocusProjectContext,
+        at when: Date,
+        reason: FocusSessionDecisionReason,
+        into sessions: inout [FocusSession]
+    ) {
         let session = FocusSession(
             project: project,
             dayIdentifier: currentDay,
             startedAt: when,
             status: .active,
             lastUserActivityAt: when,
-            lastStateChangeAt: when
+            lastStateChangeAt: when,
+            decisionEvents: [FocusSessionDecisionEvent(
+                at: when,
+                kind: .started,
+                reason: reason,
+                source: .automatic
+            )]
         )
         sessions.append(session)
     }
 
-    func endSession(at index: Int, endedAt: Date, into sessions: inout [FocusSession]) {
+    func endSession(
+        at index: Int,
+        endedAt: Date,
+        reason: FocusSessionDecisionReason,
+        into sessions: inout [FocusSession]
+    ) {
         guard index < sessions.count else { return }
         // Close any open pause first.
         if let pause = sessions[index].currentPauseStartedAt {
@@ -729,43 +872,120 @@ private extension FocusSessionEngine {
         sessions[index].endedAt = endedAt
         sessions[index].status = .ended
         sessions[index].lastStateChangeAt = endedAt
+        appendDecision(
+            to: &sessions[index],
+            at: endedAt,
+            kind: .ended,
+            reason: reason,
+            source: .automatic
+        )
     }
 
-    func pauseSession(at index: Int, at when: Date, into sessions: inout [FocusSession]) {
+    func pauseSession(
+        at index: Int,
+        at when: Date,
+        reason: FocusSessionDecisionReason,
+        into sessions: inout [FocusSession]
+    ) {
         guard index < sessions.count,
               sessions[index].currentPauseStartedAt == nil else { return }
         sessions[index].currentPauseStartedAt = when
         sessions[index].status = .paused
         sessions[index].lastStateChangeAt = when
+        appendDecision(
+            to: &sessions[index],
+            at: when,
+            kind: .paused,
+            reason: reason,
+            source: .automatic
+        )
     }
 
-    func resumeSession(at index: Int, at when: Date, into sessions: inout [FocusSession]) {
+    func resumeSession(
+        at index: Int,
+        at when: Date,
+        reason: FocusSessionDecisionReason,
+        into sessions: inout [FocusSession]
+    ) {
         guard index < sessions.count else { return }
+        let wasPaused = sessions[index].currentPauseStartedAt != nil
         if let pause = sessions[index].currentPauseStartedAt {
             sessions[index].pausedTotal += max(0, when.timeIntervalSince(pause))
             sessions[index].currentPauseStartedAt = nil
         }
         sessions[index].status = .active
         sessions[index].lastStateChangeAt = when
+        if wasPaused {
+            appendDecision(
+                to: &sessions[index],
+                at: when,
+                kind: .resumed,
+                reason: reason,
+                source: .automatic
+            )
+        }
+    }
+
+    func appendDecision(
+        to session: inout FocusSession,
+        at date: Date,
+        kind: FocusSessionDecisionKind,
+        reason: FocusSessionDecisionReason,
+        source: FocusSessionDecisionSource
+    ) {
+        var events = session.decisionEvents ?? []
+        events.append(FocusSessionDecisionEvent(
+            at: date,
+            kind: kind,
+            reason: reason,
+            source: source
+        ))
+        session.decisionEvents = events
+    }
+
+    func mergedDecisionEvents(_ sessions: [FocusSession]) -> [FocusSessionDecisionEvent]? {
+        let knownEvents = sessions.compactMap(\.decisionEvents).flatMap { $0 }
+        guard !knownEvents.isEmpty else { return nil }
+        return Dictionary(grouping: knownEvents, by: \.id)
+            .compactMap { $0.value.first }
+            .sorted {
+                if $0.at != $1.at { return $0.at < $1.at }
+                return $0.id.uuidString < $1.id.uuidString
+            }
     }
 
     // MARK: Event logic
 
-    func handleGenericActivity(sessions: inout [FocusSession], when: Date) {
+    func handleGenericActivity(
+        sessions: inout [FocusSession],
+        when: Date,
+        reason: FocusSessionDecisionReason
+    ) {
         guard let idx = sessions.firstIndex(where: \.isOpen) else { return }
         sessions[idx].lastUserActivityAt = when
-        resumeSession(at: idx, at: when, into: &sessions)
+        resumeSession(at: idx, at: when, reason: reason, into: &sessions)
     }
 
-    func sameProjectActivity(idx: Int, sessions: inout [FocusSession], when: Date) {
-        resumeSession(at: idx, at: when, into: &sessions)
+    func sameProjectActivity(
+        idx: Int,
+        sessions: inout [FocusSession],
+        when: Date,
+        reason: FocusSessionDecisionReason
+    ) {
+        resumeSession(at: idx, at: when, reason: reason, into: &sessions)
         sessions[idx].lastUserActivityAt = when
         sessions[idx].lastStateChangeAt = when
         // User returned to the original project — brief interruption merge.
         pendingSwitch = nil
     }
 
-    func differentProjectActivity(idx: Int, sessions: inout [FocusSession], candidate: FocusProjectContext, when: Date) {
+    func differentProjectActivity(
+        idx: Int,
+        sessions: inout [FocusSession],
+        candidate: FocusProjectContext,
+        when: Date,
+        reason: FocusSessionDecisionReason
+    ) {
         // User activity in a project different from the current session is a real
         // focus switch — end the current session and start the new one immediately.
         // If a pending switch exists, use its away timestamp as the boundary
@@ -777,13 +997,13 @@ private extension FocusSessionEngine {
         } else {
             startAt = when
         }
-        endSession(at: idx, endedAt: startAt, into: &sessions)
-        startSession(in: candidate, at: startAt, into: &sessions)
+        endSession(at: idx, endedAt: startAt, reason: .projectSwitch, into: &sessions)
+        startSession(in: candidate, at: startAt, reason: reason, into: &sessions)
     }
 
     func handleProjectArrival(sessions: inout [FocusSession], candidate: FocusProjectContext, when: Date) {
         guard let idx = sessions.firstIndex(where: \.isOpen) else {
-            startSession(in: candidate, at: when, into: &sessions)
+            startSession(in: candidate, at: when, reason: .projectSwitch, into: &sessions)
             return
         }
         let cur = sessions[idx]
@@ -794,23 +1014,26 @@ private extension FocusSessionEngine {
             awayStartedAt: when,
             candidate: candidate
         )
-        pauseSession(at: idx, at: when, into: &sessions)
+        pauseSession(at: idx, at: when, reason: .projectSwitch, into: &sessions)
     }
 
     func commitPendingSwitch(sessions: inout [FocusSession], when: Date) {
         guard let pending = pendingSwitch else { return }
         if let idx = sessions.firstIndex(where: { $0.id == pending.fromSessionId && $0.isOpen }) {
-            endSession(at: idx, endedAt: pending.awayStartedAt, into: &sessions)
+            endSession(at: idx, endedAt: pending.awayStartedAt, reason: .projectSwitch, into: &sessions)
         }
-        startSession(in: pending.candidate, at: pending.awayStartedAt, into: &sessions)
+        startSession(in: pending.candidate, at: pending.awayStartedAt, reason: .projectSwitch, into: &sessions)
         pendingSwitch = nil
     }
 
-    func finalizeOpen(at date: Date) -> FocusSessionUpdateOutcome {
+    func finalizeOpen(
+        at date: Date,
+        reason: FocusSessionDecisionReason
+    ) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
             if let idx = sessions.firstIndex(where: \.isOpen) {
-                endSession(at: idx, endedAt: when, into: &sessions)
+                endSession(at: idx, endedAt: when, reason: reason, into: &sessions)
             }
             pendingSwitch = nil
         }
@@ -830,6 +1053,13 @@ private extension FocusSessionEngine {
             sessions[i].endedAt = end
             sessions[i].status = .ended
             sessions[i].lastStateChangeAt = end
+            appendDecision(
+                to: &sessions[i],
+                at: end,
+                kind: .ended,
+                reason: .crashRecovery,
+                source: .automatic
+            )
             changed = true
         }
         currentDay = dayProvider(now)

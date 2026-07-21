@@ -193,6 +193,10 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     typealias DiagnosticRecorder = (GitActivityRefreshDiagnostic, GitTodayActivityRefreshTrigger) -> Void
     typealias TimeScopePublisher = (String) -> URL?
     typealias ActivityCommitHook = () -> Void
+    typealias ActivityDidCommitHook = @Sendable (
+        _ previous: GitTodayActivitySnapshot?,
+        _ current: GitTodayActivitySnapshot
+    ) -> Void
     typealias PowerStateProvider = () -> TinyBuddyPowerState
     typealias RepositoryDiscoveryCacheInvalidator = () -> Void
     typealias RepositoryChangeMonitorFactory = (
@@ -273,7 +277,12 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
 
     private enum ActivityCommitPreparation {
         case failed(GitActivityRefreshDiagnostic)
-        case prepared(didPublishSnapshot: Bool, didChangeWidgetActivity: Bool)
+        case prepared(
+            didPublishSnapshot: Bool,
+            didChangeWidgetActivity: Bool,
+            previousActivity: GitTodayActivitySnapshot?,
+            currentActivity: GitTodayActivitySnapshot
+        )
     }
 
     private let activityStore: GitTodayActivityStore
@@ -293,6 +302,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let powerStateProvider: PowerStateProvider
     private let timeScopePublisher: TimeScopePublisher
     private let beforeActivityCommit: ActivityCommitHook
+    private let activityDidCommit: ActivityDidCommitHook
     private let projectDiscoveryCommit: @Sendable (_ completeScan: Bool) -> Void
     private let repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory?
     private let repositoryDiscoveryCacheInvalidator: RepositoryDiscoveryCacheInvalidator
@@ -382,6 +392,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         },
         timeScopePublisher: TimeScopePublisher? = nil,
         beforeActivityCommit: @escaping ActivityCommitHook = {},
+        activityDidCommit: @escaping ActivityDidCommitHook = { _, _ in },
         projectDiscoveryCommit: @escaping @Sendable (_ completeScan: Bool) -> Void = { _ in },
         repositoryChangeMonitorFactory: RepositoryChangeMonitorFactory? = nil,
         repositoryDiscoveryCacheInvalidator: @escaping RepositoryDiscoveryCacheInvalidator = GitActivityRefreshCoordinator.invalidateRepositoryDiscoveryCache,
@@ -452,6 +463,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         self.timeScopePublisher = timeScopePublisher
             ?? GitActivityRefreshCoordinator.publishTimeScopeToken
         self.beforeActivityCommit = beforeActivityCommit
+        self.activityDidCommit = activityDidCommit
         self.projectDiscoveryCommit = projectDiscoveryCommit
         self.repositoryChangeMonitorFactory = repositoryChangeMonitorFactory
         self.repositoryDiscoveryCacheInvalidator = repositoryDiscoveryCacheInvalidator
@@ -1377,6 +1389,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
 
         let didPublishCommittedSnapshot: Bool
         let didChangePublishedWidgetActivity: Bool
+        let previousActivity: GitTodayActivitySnapshot?
+        let currentActivity: GitTodayActivitySnapshot
         switch commitPreparation {
         case .failed(let diagnostic):
             lastRefreshFailureMonotonicTime = completedAtMonotonicTime
@@ -1396,9 +1410,16 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             )
             finishRefresh(succeeded: false)
             return
-        case .prepared(let didPublishSnapshot, let didChangeWidgetActivity):
+        case .prepared(
+            let didPublishSnapshot,
+            let didChangeWidgetActivity,
+            let committedPreviousActivity,
+            let committedCurrentActivity
+        ):
             didPublishCommittedSnapshot = didPublishSnapshot
             didChangePublishedWidgetActivity = didChangeWidgetActivity
+            previousActivity = committedPreviousActivity
+            currentActivity = committedCurrentActivity
         }
 
         if didPublishCommittedSnapshot {
@@ -1437,6 +1458,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         )
         lastRefreshFailureMonotonicTime = nil
         projectDiscoveryCommit(!hasPartialRecovery)
+        activityDidCommit(previousActivity, currentActivity)
         finishRefresh(succeeded: true)
     }
 
@@ -1593,7 +1615,9 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         return .prepared(
             didPublishSnapshot: didPublishCommittedSnapshot,
             didChangeWidgetActivity: RefreshActivityContent(previouslyPublishedActivity)
-                != RefreshActivityContent(committedSnapshotAfterUpdate.activitySnapshot)
+                != RefreshActivityContent(committedSnapshotAfterUpdate.activitySnapshot),
+            previousActivity: previouslyPublishedActivity,
+            currentActivity: committedSnapshotAfterUpdate.activitySnapshot
         )
     }
 

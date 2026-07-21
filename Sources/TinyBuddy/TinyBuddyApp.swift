@@ -170,15 +170,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             configStore.load()?.exclusionRules.map(\.pattern) ?? []
         },
         timeEnvironment: timeEnvironment,
+        activityDidCommit: { [weak self] previous, current in
+            Task { @MainActor [weak self] in
+                self?.handleCommittedGitActivity(previous: previous, current: current)
+            }
+        },
         projectDiscoveryCommit: { [weak self] completeScan in
             Task { @MainActor [weak self] in
                 self?.reconcileProjectDiscovery(completeScan: completeScan)
             }
         },
-        repositoryChangeMonitorFactory: { [gitScanRootAuthorizationStore] changeHandler in
+        repositoryChangeMonitorFactory: { [weak self, gitScanRootAuthorizationStore] changeHandler in
             GitRepositoryChangeMonitor(
                 authorizedRootsProvider: gitScanRootAuthorizationStore!.accessAuthorizedRootResult,
-                changeHandler: changeHandler
+                changeHandler: { impact in
+                    Task { @MainActor [weak self] in
+                        self?.pendingFocusGitChange = true
+                    }
+                    changeHandler(impact)
+                }
             )
         }
     )
@@ -189,6 +199,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // mutates Git refresh inputs; its lifecycle is deliberately tied to the
     // primary app instance so secondary launches cannot race session writes.
     private var focusSessionBridge: FocusSessionAppBridge?
+    /// Ephemeral only: it connects an existing FSEvent-triggered refresh to the
+    /// next committed activity delta without persisting a repository path.
+    private var pendingFocusGitChange = false
+    private var pendingCommittedGitActivity: (
+        previous: GitTodayActivitySnapshot?,
+        current: GitTodayActivitySnapshot
+    )?
     private lazy var hudVisibilityMonitor = HUDVisibilityMonitor(
         visibilityProvider: { [weak self] in
             self?.isHUDVisible ?? false
@@ -368,6 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             recentProjectStore.saveTodayProject(id: nil, displayName: nil)
         }
+        publishPendingFocusGitActivityIfPossible()
         focusSessionBridge?.sessionEngine.refreshProjectIdentityPresentation()
         DispatchQueue.main.async {
             NotificationCenter.default.post(
@@ -375,6 +393,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 object: nil
             )
         }
+    }
+
+    private func handleCommittedGitActivity(
+        previous: GitTodayActivitySnapshot?,
+        current: GitTodayActivitySnapshot
+    ) {
+        guard pendingFocusGitChange else { return }
+        pendingCommittedGitActivity = (previous, current)
+        publishPendingFocusGitActivityIfPossible()
+    }
+
+    private func publishPendingFocusGitActivityIfPossible() {
+        guard pendingFocusGitChange,
+              let pendingCommittedGitActivity else { return }
+
+        let previousCommitCount = pendingCommittedGitActivity.previous?.commitCount
+            ?? pendingCommittedGitActivity.current.commitCount ?? 0
+        let previousFocusCount = pendingCommittedGitActivity.previous?.focusBlockCount
+            ?? pendingCommittedGitActivity.current.focusBlockCount ?? 0
+        guard (pendingCommittedGitActivity.current.commitCount ?? 0) > previousCommitCount
+                || (pendingCommittedGitActivity.current.focusBlockCount ?? 0) > previousFocusCount else {
+            pendingFocusGitChange = false
+            self.pendingCommittedGitActivity = nil
+            return
+        }
+        guard let fingerprint = projectDiscoveryStore.loadRecentRepositoryFingerprint(),
+              let project = projectRegistry?.resolve(projectKey: fingerprint) else {
+            return
+        }
+        pendingFocusGitChange = false
+        self.pendingCommittedGitActivity = nil
+        focusSessionBridge?.reportGitActivity(
+            project: FocusProjectContext(
+                key: project.id.rawValue,
+                displayName: project.displayName
+            ),
+            at: Date()
+        )
     }
 
     /// The Settings report reads the same committed payload as the Widget.

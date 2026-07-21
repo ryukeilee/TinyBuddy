@@ -102,6 +102,29 @@ public struct FocusHistoryDay: Codable, Equatable, Sendable {
     /// Clamped to 0...1. `nil` means an unknown day or no configured goal.
     public let goalCompletionRate: Double?
     public let isGoalMet: Bool?
+    /// Stable authority references behind the aggregate. `nil` means the day
+    /// is unknown; an empty array is a trusted zero-session day.
+    public let contributingSessionIDs: [UUID]?
+
+    public init(
+        dayIdentifier: String,
+        state: FocusHistoryDayState,
+        focusDuration: TimeInterval?,
+        completedSessionCount: Int?,
+        goalMinutes: Int?,
+        goalCompletionRate: Double?,
+        isGoalMet: Bool?,
+        contributingSessionIDs: [UUID]? = nil
+    ) {
+        self.dayIdentifier = dayIdentifier
+        self.state = state
+        self.focusDuration = focusDuration
+        self.completedSessionCount = completedSessionCount
+        self.goalMinutes = goalMinutes
+        self.goalCompletionRate = goalCompletionRate
+        self.isGoalMet = isGoalMet
+        self.contributingSessionIDs = contributingSessionIDs
+    }
 }
 
     /// Presentation-safe project aggregate. The canonical project key remains
@@ -115,6 +138,23 @@ public struct FocusHistoryProject: Codable, Equatable, Sendable {
     public let focusDuration: TimeInterval
     public let completedSessionCount: Int
     public let focusShare: Double
+    public let contributingSessionIDs: [UUID]?
+
+    public init(
+        displayName: String,
+        isHistoricalArchive: Bool?,
+        focusDuration: TimeInterval,
+        completedSessionCount: Int,
+        focusShare: Double,
+        contributingSessionIDs: [UUID]? = nil
+    ) {
+        self.displayName = displayName
+        self.isHistoricalArchive = isHistoricalArchive
+        self.focusDuration = focusDuration
+        self.completedSessionCount = completedSessionCount
+        self.focusShare = focusShare
+        self.contributingSessionIDs = contributingSessionIDs
+    }
 }
 
 public struct FocusHistoryWeek: Codable, Equatable, Sendable {
@@ -199,6 +239,7 @@ public struct FocusHistoryAggregationCache: Sendable {
         var focusDuration: TimeInterval = 0
         var completedSessionCount: Int = 0
         var projects: [String: ProjectAccumulator] = [:]
+        var sessionIDs = Set<UUID>()
     }
 
     private var contributions: [UUID: Contribution] = [:]
@@ -275,7 +316,12 @@ public struct FocusHistoryAggregationCache: Sendable {
 
     private func contribution(from session: FocusSession) -> Contribution? {
         guard session.status == .ended, let endedAt = session.endedAt else { return nil }
-        let project = projectResolver(session.project)
+        // A manual reassignment is the highest authority. Registry discovery
+        // may continue to reconcile automatic aliases, but it must not silently
+        // redirect a project explicitly chosen by the user.
+        let project = session.decisionAuthority == .manualCorrection
+            ? session.project
+            : projectResolver(session.project)
         return Contribution(
             dayIdentifier: session.dayIdentifier,
             projectKey: project.key,
@@ -298,6 +344,7 @@ public struct FocusHistoryAggregationCache: Sendable {
         var day = days[contribution.dayIdentifier] ?? DayAccumulator()
         day.focusDuration += contribution.duration
         day.completedSessionCount += 1
+        day.sessionIDs.insert(id)
         var project = day.projects[contribution.projectKey] ?? ProjectAccumulator()
         project.focusDuration += contribution.duration
         project.completedSessionCount += 1
@@ -314,6 +361,7 @@ public struct FocusHistoryAggregationCache: Sendable {
               var project = day.projects[contribution.projectKey] else { return }
         day.focusDuration = max(0, day.focusDuration - contribution.duration)
         day.completedSessionCount = max(0, day.completedSessionCount - 1)
+        day.sessionIDs.remove(id)
         project.focusDuration = max(0, project.focusDuration - contribution.duration)
         project.completedSessionCount = max(0, project.completedSessionCount - 1)
         project.displayCandidates.removeValue(forKey: id)
@@ -338,7 +386,8 @@ public struct FocusHistoryAggregationCache: Sendable {
                 completedSessionCount: nil,
                 goalMinutes: nil,
                 goalCompletionRate: nil,
-                isGoalMet: nil
+                isGoalMet: nil,
+                contributingSessionIDs: nil
             )
         }
 
@@ -355,7 +404,10 @@ public struct FocusHistoryAggregationCache: Sendable {
             completedSessionCount: count,
             goalMinutes: goal,
             goalCompletionRate: rate,
-            isGoalMet: rate.map { $0 >= 1 }
+            isGoalMet: rate.map { $0 >= 1 },
+            contributingSessionIDs: accumulator?.sessionIDs.sorted {
+                $0.uuidString < $1.uuidString
+            } ?? []
         )
     }
 
@@ -429,7 +481,10 @@ public struct FocusHistoryAggregationCache: Sendable {
                 isHistoricalArchive: activeKeys.map { !$0.contains(key) },
                 focusDuration: bucket.focusDuration,
                 completedSessionCount: bucket.completedSessionCount,
-                focusShare: totalDuration > 0 ? bucket.focusDuration / totalDuration : 0
+                focusShare: totalDuration > 0 ? bucket.focusDuration / totalDuration : 0,
+                contributingSessionIDs: bucket.displayCandidates.keys.sorted {
+                    $0.uuidString < $1.uuidString
+                }
             )
         }
         .sorted {

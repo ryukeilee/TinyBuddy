@@ -29,7 +29,7 @@ struct FocusSessionReviewView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("专注记录复核")
                 .font(.title2.weight(.semibold))
-            Text("选择已结束记录后可修正项目和时间；所有操作按稳定会话标识保存。")
+            Text("选择记录可查看开始、暂停、恢复、结束和项目归属原因；已结束记录可确认或修正。")
                 .foregroundStyle(.secondary)
 
             if let engine {
@@ -52,19 +52,20 @@ struct FocusSessionReviewView: View {
                             Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) – \(session.endedAt?.formatted(date: .omitted, time: .shortened) ?? "进行中")")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            if session.isManuallyConfirmed {
-                                Text("已确认")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tint)
-                            }
+                            Text(authorityLabel(session))
+                                .font(.caption2)
+                                .foregroundStyle(authorityColor(session))
                         }
                         .tag(session.id)
                     }
                     .frame(minWidth: 300)
                     .onChange(of: selected) { _, _ in loadSelection() }
 
-                    editor
-                        .frame(minWidth: 320, alignment: .topLeading)
+                    ScrollView {
+                        editor
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .frame(minWidth: 320)
                 }
             } else {
                 ContentUnavailableView("专注记录尚未就绪", systemImage: "clock.badge.exclamationmark", description: Text("请等待主应用完成启动后重试。"))
@@ -87,11 +88,17 @@ struct FocusSessionReviewView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(selectedSession == nil ? "请选择一条记录" : "修正记录")
                 .font(.headline)
+            if let session = selectedSession {
+                sourceExplanation(session)
+                Divider()
+            }
             TextField("项目标识", text: $projectKey)
             TextField("项目名称", text: $projectName)
             DatePicker("开始", selection: $start)
             DatePicker("结束", selection: $end)
             HStack {
+                Button("确认记录") { confirm() }
+                    .disabled(selectedSession == nil || selectedSession?.isOpen == true || selectedSession?.isManuallyConfirmed == true)
                 Button("保存修正") { saveEdit() }.disabled(selectedSession == nil)
                 Button("删除") { delete() }.disabled(selectedSession == nil)
             }
@@ -119,6 +126,7 @@ struct FocusSessionReviewView: View {
         guard let id = selectedSession?.id else { return }
         apply(engine?.editSession(id: id, project: FocusProjectContext(key: projectKey, displayName: projectName), startedAt: start, endedAt: end))
     }
+    private func confirm() { guard let id = selectedSession?.id else { return }; apply(engine?.confirmSession(id: id)) }
     private func delete() { guard let id = selectedSession?.id else { return }; apply(engine?.deleteSession(id: id)) }
     private func split() { guard let id = selectedSession?.id else { return }; apply(engine?.splitSession(id: id, at: splitAt)) }
     private func merge() { apply(engine?.mergeSessions(ids: Array(selected))) }
@@ -144,6 +152,96 @@ struct FocusSessionReviewView: View {
         return "\(minutes / 60) 小时 \(minutes % 60) 分"
     }
 
+    @ViewBuilder
+    private func sourceExplanation(_ session: FocusSession) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent("数据来源", value: authorityLabel(session))
+            if let events = session.decisionEvents, !events.isEmpty {
+                ForEach(events.sorted { lhs, rhs in
+                    if lhs.at != rhs.at { return lhs.at < rhs.at }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }) { event in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(event.at.formatted(date: .omitted, time: .shortened))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 52, alignment: .leading)
+                        Text("\(kindLabel(event.kind))：\(reasonLabel(event.reason))")
+                            .font(.caption)
+                        Spacer(minLength: 4)
+                        Text(sourceLabel(event.source))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !events.contains(where: { $0.kind == .started }) {
+                    Label("较早的自动判定来源缺失；现有状态未被用来补写原因。", systemImage: "clock.badge.questionmark")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Label("历史记录：创建时尚未保存判定来源，无法证明具体原因。", systemImage: "clock.badge.questionmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func authorityLabel(_ session: FocusSession) -> String {
+        switch session.decisionAuthority {
+        case .automatic: return "自动识别"
+        case .userConfirmed: return "用户确认"
+        case .manualCorrection: return "手动修正"
+        case nil: return "历史记录"
+        }
+    }
+
+    private func authorityColor(_ session: FocusSession) -> Color {
+        session.decisionAuthority == nil ? .secondary : .primary
+    }
+
+    private func sourceLabel(_ source: FocusSessionDecisionSource) -> String {
+        switch source {
+        case .automatic: return "自动"
+        case .userConfirmed: return "用户确认"
+        case .manualCorrection: return "手动修正"
+        }
+    }
+
+    private func kindLabel(_ kind: FocusSessionDecisionKind) -> String {
+        switch kind {
+        case .started: return "开始"
+        case .paused: return "暂停"
+        case .resumed: return "恢复"
+        case .ended: return "结束"
+        case .projectChanged: return "项目改归属"
+        case .confirmed: return "确认"
+        case .corrected: return "修正"
+        case .split: return "拆分"
+        case .merged: return "合并"
+        case .undo: return "撤销"
+        }
+    }
+
+    private func reasonLabel(_ reason: FocusSessionDecisionReason) -> String {
+        switch reason {
+        case .userActivity: return "检测到用户活动"
+        case .gitActivity: return "检测到 Git 变化"
+        case .idle: return "达到空闲阈值"
+        case .lockScreen: return "屏幕锁定"
+        case .systemSleep: return "系统休眠"
+        case .projectSwitch: return "切换到其他项目"
+        case .dayBoundary: return "本地日期变更，自动结束"
+        case .appTermination: return "应用退出，自动结束"
+        case .crashRecovery: return "异常退出后安全收尾"
+        case .manualConfirmation: return "用户确认原记录"
+        case .manualCorrection: return "用户手动修改"
+        case .manualSplit: return "用户手动拆分"
+        case .manualMerge: return "用户手动合并"
+        case .undo: return "用户撤销上次编辑"
+        }
+    }
+
     private func errorMessage(_ error: FocusSessionEditError) -> String {
         switch error {
         case .sessionNotFound: return "记录已不存在，请刷新后重试。"
@@ -157,6 +255,7 @@ struct FocusSessionReviewView: View {
         case .splitOutsideSession: return "拆分时间必须位于该会话内。"
         case .persistenceFailed: return "未能写入磁盘，原记录与统计保持不变。"
         case .nothingToUndo: return "没有可撤销的编辑。"
+        case .alreadyConfirmed: return "这条记录已经由用户确认或修正。"
         }
     }
 }

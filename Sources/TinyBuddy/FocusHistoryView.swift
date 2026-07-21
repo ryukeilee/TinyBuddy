@@ -103,6 +103,15 @@ struct FocusHistoryView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(duration(day.focusDuration)) · \(count(day.completedSessionCount)) 个会话")
                     goalText(rate: day.goalCompletionRate, goalMinutes: day.goalMinutes)
+                    if let ids = day.contributingSessionIDs {
+                        Text("依据 \(ids.count) 条权威会话记录")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("旧版汇总未携带会话引用")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             Spacer()
@@ -163,7 +172,7 @@ struct FocusHistoryView: View {
                                 .foregroundStyle(.secondary)
                         }
                         ProgressView(value: project.focusShare)
-                        Text("\(duration(project.focusDuration)) · \(project.completedSessionCount) 个会话")
+                        Text(projectSummary(project))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -209,5 +218,11 @@ struct FocusHistoryView: View {
 
     private func percent(_ value: Double) -> String {
         value.formatted(.percent.precision(.fractionLength(0)))
+    }
+
+    private func projectSummary(_ project: FocusHistoryProject) -> String {
+        let base = "\(duration(project.focusDuration)) · \(project.completedSessionCount) 个会话"
+        guard let count = project.contributingSessionIDs?.count else { return base }
+        return "\(base) · 依据 \(count) 条权威记录"
     }
 }

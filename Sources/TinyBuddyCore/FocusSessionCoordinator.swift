@@ -60,7 +60,11 @@ public final class FocusSessionCoordinator {
 
     /// Call on any user input event (keyboard or mouse).
     public func reportUserInput(at date: Date? = nil) {
-        engine.userActivity(in: focusProject(), at: date ?? clock.now)
+        engine.userActivity(
+            in: focusProject(),
+            at: date ?? clock.now,
+            reason: .userActivity
+        )
     }
 
     /// Call on non‑automated git activity.  `automated: true` is silently ignored,
@@ -78,7 +82,7 @@ public final class FocusSessionCoordinator {
             return
         }
         recentGit = (project.key, project.displayName, when)
-        engine.userActivity(in: focusProject(), at: when)
+        engine.userActivity(in: focusProject(), at: when, reason: .gitActivity)
     }
 
     /// The user became idle for `idleThreshold`.

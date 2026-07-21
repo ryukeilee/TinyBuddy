@@ -19,6 +19,72 @@ public enum FocusSessionStatus: String, Codable, Equatable, Sendable {
     case ended
 }
 
+/// Stable, privacy-safe authority classes for a recorded decision. The enum
+/// deliberately carries no captured input, path, repository URL, or commit
+/// text. Later cases have higher authority when a session is reviewed.
+public enum FocusSessionDecisionSource: String, Codable, Equatable, Sendable {
+    case automatic
+    case userConfirmed
+    case manualCorrection
+}
+
+/// The lifecycle fact that changed. Project values are intentionally omitted:
+/// the session's current presentation-safe project label is the only project
+/// detail retained by this trail.
+public enum FocusSessionDecisionKind: String, Codable, Equatable, Sendable {
+    case started
+    case paused
+    case resumed
+    case ended
+    case projectChanged
+    case confirmed
+    case corrected
+    case split
+    case merged
+    case undo
+}
+
+/// Minimal reason vocabulary used by the history UI. These values describe
+/// why a transition happened without retaining the underlying sensitive data.
+public enum FocusSessionDecisionReason: String, Codable, Equatable, Sendable {
+    case userActivity
+    case gitActivity
+    case idle
+    case lockScreen
+    case systemSleep
+    case projectSwitch
+    case dayBoundary
+    case appTermination
+    case crashRecovery
+    case manualConfirmation
+    case manualCorrection
+    case manualSplit
+    case manualMerge
+    case undo
+}
+
+public struct FocusSessionDecisionEvent: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let at: Date
+    public let kind: FocusSessionDecisionKind
+    public let reason: FocusSessionDecisionReason
+    public let source: FocusSessionDecisionSource
+
+    public init(
+        id: UUID = UUID(),
+        at: Date,
+        kind: FocusSessionDecisionKind,
+        reason: FocusSessionDecisionReason,
+        source: FocusSessionDecisionSource
+    ) {
+        self.id = id
+        self.at = at
+        self.kind = kind
+        self.reason = reason
+        self.source = source
+    }
+}
+
 /// A single contiguous focus effort attributed to one project within one local day.
 /// Time that must not count (idle, lock/sleep, brief interruptions) is tracked separately
 /// and excluded from `activeDuration`, so durations are never duplicated, negative, or
@@ -43,6 +109,9 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
     /// Monotonic revision of the last user-confirmed edit. Optional preserves
     /// compatibility with pre-review session journals.
     public var manualRevision: Int64?
+    /// `nil` means the row predates source tracking. It must remain explicitly
+    /// historical rather than being reconstructed from present-day state.
+    public var decisionEvents: [FocusSessionDecisionEvent]?
 
     public init(
         id: UUID = UUID(),
@@ -56,7 +125,8 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         pausedTotal: TimeInterval = 0,
         currentPauseStartedAt: Date? = nil,
         isManuallyConfirmed: Bool = false,
-        manualRevision: Int64? = nil
+        manualRevision: Int64? = nil,
+        decisionEvents: [FocusSessionDecisionEvent]? = nil
     ) {
         self.id = id
         self.project = project
@@ -70,6 +140,7 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         self.currentPauseStartedAt = currentPauseStartedAt
         self.isManuallyConfirmed = isManuallyConfirmed
         self.manualRevision = manualRevision
+        self.decisionEvents = decisionEvents
     }
 
     /// Time during which this session is NOT counting toward focus:
@@ -96,5 +167,19 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
 
     public var isOpen: Bool {
         status != .ended && endedAt == nil
+    }
+
+    /// Highest durable authority represented by the source trail. Legacy rows
+    /// return `nil`, which presentation renders as an unexplained historical
+    /// record rather than inventing a cause.
+    public var decisionAuthority: FocusSessionDecisionSource? {
+        guard let decisionEvents else { return nil }
+        if decisionEvents.contains(where: { $0.source == .manualCorrection }) {
+            return .manualCorrection
+        }
+        if decisionEvents.contains(where: { $0.source == .userConfirmed }) {
+            return .userConfirmed
+        }
+        return decisionEvents.isEmpty ? nil : .automatic
     }
 }

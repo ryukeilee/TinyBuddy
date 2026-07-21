@@ -97,6 +97,18 @@ final class FocusSessionAppBridge {
         coordinator.reportTerminate()
     }
 
+    /// Called only after the Git refresh pipeline has committed a changed,
+    /// non-automated activity snapshot. No repository path or commit content is
+    /// retained by the source trail.
+    func reportGitActivity(project: FocusProjectContext, at date: Date) {
+        coordinator.reportGitActivity(
+            repoKey: project.key,
+            displayName: project.displayName,
+            automated: false,
+            at: date
+        )
+    }
+
     // MARK: - Observers
 
     private var observers: [NSObjectProtocol] = []

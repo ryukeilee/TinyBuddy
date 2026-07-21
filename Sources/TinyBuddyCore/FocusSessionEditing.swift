@@ -36,6 +36,7 @@ public enum FocusSessionEditError: Equatable, Sendable {
     case splitOutsideSession
     case persistenceFailed
     case nothingToUndo
+    case alreadyConfirmed
 }
 
 public enum FocusSessionEditResult: Equatable, Sendable {

@@ -1660,6 +1660,7 @@ public final class TinyBuddyCombinedSnapshotStore {
                 && day.goalMinutes == nil
                 && day.goalCompletionRate == nil
                 && day.isGoalMet == nil
+                && day.contributingSessionIDs == nil
         case .noSessions:
             guard day.focusDuration == 0, day.completedSessionCount == 0 else {
                 return false
@@ -1670,6 +1671,13 @@ public final class TinyBuddyCombinedSnapshotStore {
                   duration >= 0,
                   let count = day.completedSessionCount,
                   count > 0 else {
+                return false
+            }
+        }
+
+        if let ids = day.contributingSessionIDs {
+            guard Set(ids).count == ids.count,
+                  ids.count == (day.completedSessionCount ?? -1) else {
                 return false
             }
         }
@@ -1742,6 +1750,10 @@ public final class TinyBuddyCombinedSnapshotStore {
                         && project.completedSessionCount >= 0
                         && project.focusShare.isFinite
                         && (0 ... 1).contains(project.focusShare)
+                        && (project.contributingSessionIDs.map { ids in
+                            Set(ids).count == ids.count
+                                && ids.count == project.completedSessionCount
+                        } ?? true)
                 }
             }
             return true
