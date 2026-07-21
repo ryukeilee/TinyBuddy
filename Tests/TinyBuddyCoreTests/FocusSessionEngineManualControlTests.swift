@@ -538,4 +538,33 @@ final class FocusSessionEngineManualControlTests: XCTestCase {
         XCTAssertEqual(autoSession.startedAt, clock.now)
         XCTAssertEqual(autoSession.mode, .automatic)
     }
+
+    // MARK: - Resume / end edge cases
+
+    func test_resume_manual_focus_when_idle_is_noop() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+
+        let result = engine.resumeManualFocus(at: clock.now)
+        XCTAssertEqual(result, .noChange)
+    }
+
+    func test_end_manual_focus_twice_is_idempotent() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+
+        _ = engine.startManualFocus(project: projectA, at: clock.now)
+        clock.advance(by: 10)
+
+        let firstEnd = engine.endManualFocus(at: clock.now)
+        XCTAssertEqual(firstEnd, .saved)
+
+        let secondEnd = engine.endManualFocus(at: clock.now)
+        XCTAssertEqual(secondEnd, .noChange)
+
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions[0].status, .ended)
+    }
 }
