@@ -485,4 +485,57 @@ final class FocusSessionEngineManualControlTests: XCTestCase {
         XCTAssertEqual(open.count, 1)
         XCTAssertEqual(open[0].mode, .manual)
     }
+
+    // MARK: - End manual focus edge cases
+
+    func test_end_manual_focus_when_idle_is_noop() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+
+        let result = engine.endManualFocus(at: clock.now)
+        XCTAssertEqual(result, .noChange)
+    }
+
+    func test_crash_recovery_preserves_manual_mode_in_ended_session() {
+        let store = MemoryStore()
+        let priorSession = FocusSession(
+            id: UUID(),
+            project: projectA,
+            dayIdentifier: "2001-01-24",
+            startedAt: Date(timeIntervalSinceReferenceDate: 900),
+            endedAt: Date(timeIntervalSinceReferenceDate: 950),
+            status: .ended,
+            lastUserActivityAt: Date(timeIntervalSinceReferenceDate: 950),
+            lastStateChangeAt: Date(timeIntervalSinceReferenceDate: 950),
+            mode: .manual
+        )
+        store.stored = [priorSession]
+
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let engine = makeEngine(clock, store)
+
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions[0].mode, .manual)
+        XCTAssertEqual(engine.allSessions[0].status, .ended)
+    }
+
+    func test_after_manual_end_auto_detection_starts_fresh_without_backfill() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+
+        _ = engine.startManualFocus(project: projectA, at: clock.now)
+        clock.advance(by: 10)
+        _ = engine.endManualFocus(at: clock.now)
+
+        clock.advance(by: 20)
+        _ = engine.userActivity(in: projectB, at: clock.now, reason: .userActivity)
+
+        XCTAssertEqual(engine.allSessions.count, 2)
+
+        let autoSession = engine.allSessions[1]
+        XCTAssertEqual(autoSession.startedAt, clock.now)
+        XCTAssertEqual(autoSession.mode, .automatic)
+    }
 }
