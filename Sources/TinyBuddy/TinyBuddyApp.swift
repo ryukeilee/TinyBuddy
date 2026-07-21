@@ -348,6 +348,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         focusBridge?.start()
+        // Wire the session engine to the HUD for manual focus control.
+        petViewModel.setFocusSessionEngine(focusBridge?.sessionEngine)
         replayPendingFocusSessionPublicationIfNeeded()
         refreshFocusHistoryForPresentation()
         powerStateMonitor.start()

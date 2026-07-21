@@ -19,6 +19,44 @@ public enum FocusSessionStatus: String, Codable, Equatable, Sendable {
     case ended
 }
 
+/// How a focus session was initiated. Manual sessions take priority over
+/// automatic detection; during a manual session the engine must not create
+/// parallel records, switch projects, or end sessions from automatic triggers.
+public enum FocusMode: String, Codable, Equatable, Sendable {
+    case automatic
+    case manual
+}
+
+/// The live state of manual focus control, published to all UI surfaces.
+public enum ManualFocusControlState: Equatable, Sendable {
+    /// No manual focus session; auto-detection can freely start sessions.
+    case idle
+    /// A manual session is active and counting time.
+    case focusing(project: FocusProjectContext, startedAt: Date, activeDuration: TimeInterval)
+    /// A manual session is paused; time is not accumulating.
+    case paused(project: FocusProjectContext, startedAt: Date, pausedAt: Date, activeDuration: TimeInterval)
+}
+
+extension ManualFocusControlState {
+    public var project: FocusProjectContext? {
+        switch self {
+        case .idle: return nil
+        case .focusing(let p, _, _): return p
+        case .paused(let p, _, _, _): return p
+        }
+    }
+
+    public var isManualSessionActive: Bool {
+        if case .focusing = self { return true }
+        return false
+    }
+
+    public var isManualSessionPaused: Bool {
+        if case .paused = self { return true }
+        return false
+    }
+}
+
 /// Stable, privacy-safe authority classes for a recorded decision. The enum
 /// deliberately carries no captured input, path, repository URL, or commit
 /// text. Later cases have higher authority when a session is reviewed.
@@ -112,6 +150,34 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
     /// `nil` means the row predates source tracking. It must remain explicitly
     /// historical rather than being reconstructed from present-day state.
     public var decisionEvents: [FocusSessionDecisionEvent]?
+    /// How this session was initiated. Manual sessions cannot be mutated by
+    /// automatic detection and must use the explicit manual-control API.
+    /// Defaults to `.automatic` for legacy records.
+    public var mode: FocusMode
+
+    private enum CodingKeys: String, CodingKey {
+        case id, project, dayIdentifier, startedAt, endedAt, status
+        case lastUserActivityAt, lastStateChangeAt, pausedTotal, currentPauseStartedAt
+        case isManuallyConfirmed, manualRevision, decisionEvents, mode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        project = try container.decode(FocusProjectContext.self, forKey: .project)
+        dayIdentifier = try container.decode(String.self, forKey: .dayIdentifier)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        endedAt = try container.decodeIfPresent(Date.self, forKey: .endedAt)
+        status = try container.decode(FocusSessionStatus.self, forKey: .status)
+        lastUserActivityAt = try container.decode(Date.self, forKey: .lastUserActivityAt)
+        lastStateChangeAt = try container.decode(Date.self, forKey: .lastStateChangeAt)
+        pausedTotal = try container.decode(TimeInterval.self, forKey: .pausedTotal)
+        currentPauseStartedAt = try container.decodeIfPresent(Date.self, forKey: .currentPauseStartedAt)
+        isManuallyConfirmed = try container.decode(Bool.self, forKey: .isManuallyConfirmed)
+        manualRevision = try container.decodeIfPresent(Int64.self, forKey: .manualRevision)
+        decisionEvents = try container.decodeIfPresent([FocusSessionDecisionEvent].self, forKey: .decisionEvents)
+        mode = try container.decodeIfPresent(FocusMode.self, forKey: .mode) ?? .automatic
+    }
 
     public init(
         id: UUID = UUID(),
@@ -126,7 +192,8 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         currentPauseStartedAt: Date? = nil,
         isManuallyConfirmed: Bool = false,
         manualRevision: Int64? = nil,
-        decisionEvents: [FocusSessionDecisionEvent]? = nil
+        decisionEvents: [FocusSessionDecisionEvent]? = nil,
+        mode: FocusMode = .automatic
     ) {
         self.id = id
         self.project = project
@@ -141,6 +208,7 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         self.isManuallyConfirmed = isManuallyConfirmed
         self.manualRevision = manualRevision
         self.decisionEvents = decisionEvents
+        self.mode = mode
     }
 
     /// Time during which this session is NOT counting toward focus:

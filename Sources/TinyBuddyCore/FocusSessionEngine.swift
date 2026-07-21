@@ -62,6 +62,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
         let candidate: FocusProjectContext
     }
 
+    /// Deduplicates commands by token. The same token can only produce one state change;
+    /// repeated calls with the same token return `.noChange`.
+    private var lastManualCommandToken: UUID?
+    private var lastManualCommandOutcome: FocusSessionUpdateOutcome = .noChange
+
     // MARK: Init
 
     /// - Parameters:
@@ -127,6 +132,8 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// User explicitly interacted with a project (keyboard / mouse / git activity).
     /// - `project == nil` means generic user input not attributable to any project.
+    /// - During a manual session, automatic activity cannot switch projects or end
+    ///   the session. Only un-pause (resume) of the same project is allowed.
     @discardableResult
     public func userActivity(
         in project: FocusProjectContext?,
@@ -135,6 +142,17 @@ public final class FocusSessionEngine: @unchecked Sendable {
     ) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
+            // If a manual session is active, auto activity must not switch projects
+            // or create parallel records. Only resume-if-paused is permitted.
+            if let manualIdx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) {
+                if sessions[manualIdx].status == .paused {
+                    resumeSession(at: manualIdx, at: when, reason: reason, into: &sessions)
+                }
+                sessions[manualIdx].lastUserActivityAt = when
+                sessions[manualIdx].lastStateChangeAt = when
+                return
+            }
+
             guard let p = project else {
                 handleGenericActivity(sessions: &sessions, when: when, reason: reason)
                 return
@@ -160,10 +178,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// The foreground app changed.  This only sets up a pending switch; a real
     /// session only begins when user activity is confirmed in the new project.
+    /// During a manual session, foreground changes are ignored.
     @discardableResult
     public func foregroundProjectChanged(to project: FocusProjectContext?, at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
+            // Block auto project switching during manual sessions.
+            guard !sessions.contains(where: { $0.isOpen && $0.mode == .manual }) else { return }
             guard let p = project else { return }
             guard let idx = sessions.firstIndex(where: \.isOpen) else { return }
             let cur = sessions[idx]
@@ -173,19 +194,37 @@ public final class FocusSessionEngine: @unchecked Sendable {
     }
 
     /// User idle detected (no input for `idleThreshold`).
+    /// During a manual session, idle does not auto-pause — the user controls pause explicitly.
     @discardableResult
     public func idleDetected(at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
             guard let idx = sessions.firstIndex(where: \.isOpen),
                   sessions[idx].currentPauseStartedAt == nil else { return }
+            // Manual sessions are not auto-paused by idle.
+            guard sessions[idx].mode != .manual else { return }
             pauseSession(at: idx, at: when, reason: .idle, into: &sessions)
         }
     }
 
     @discardableResult
     public func lockScreen(at date: Date) -> FocusSessionUpdateOutcome {
-        finalizeOpen(at: date, reason: .lockScreen)
+        let when = clampToNow(date)
+        return apply { sessions in
+            guard let idx = sessions.firstIndex(where: \.isOpen) else {
+                pendingSwitch = nil
+                return
+            }
+            if sessions[idx].mode == .manual {
+                // Manual sessions: pause on lock, user resumes later.
+                if sessions[idx].currentPauseStartedAt == nil {
+                    pauseSession(at: idx, at: when, reason: .lockScreen, into: &sessions)
+                }
+            } else {
+                endSession(at: idx, endedAt: when, reason: .lockScreen, into: &sessions)
+            }
+            pendingSwitch = nil
+        }
     }
 
     @discardableResult
@@ -242,6 +281,135 @@ public final class FocusSessionEngine: @unchecked Sendable {
     @discardableResult
     public func crash(at date: Date) -> FocusSessionUpdateOutcome {
         finalizeOpen(at: date, reason: .crashRecovery)
+    }
+
+    // MARK: - Manual Focus Control (public API)
+
+    /// The current manual-control state, derived from sessions protected by the lock.
+    public var manualControlState: ManualFocusControlState {
+        lock.lock(); defer { lock.unlock() }
+        guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) else {
+            return .idle
+        }
+        let session = sessions[idx]
+        let now = clock.now
+        switch session.status {
+        case .active:
+            return .focusing(
+                project: session.project,
+                startedAt: session.startedAt,
+                activeDuration: session.activeDuration(now: now)
+            )
+        case .paused:
+            return .paused(
+                project: session.project,
+                startedAt: session.startedAt,
+                pausedAt: session.currentPauseStartedAt ?? session.lastStateChangeAt,
+                activeDuration: session.activeDuration(now: now)
+            )
+        case .ended:
+            return .idle
+        }
+    }
+
+    /// Start a manual focus session for `project`. If an automatic session is already
+    /// active, it will be ended at the manual start time. If a manual session is
+    /// already active for the same project, this is an idempotent no-op. If a manual
+    /// session is active for a different project, the old one ends and a new one starts.
+    /// `commandToken` enables idempotent deduplication: repeated calls with the same
+    /// token produce only one state change.
+    @discardableResult
+    public func startManualFocus(
+        project: FocusProjectContext,
+        at date: Date,
+        commandToken: UUID? = nil
+    ) -> FocusSessionUpdateOutcome {
+        guard !project.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !project.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .rejectedInvalid
+        }
+        let when = clampToNow(date)
+        return applyWithToken(commandToken) { sessions in
+            // If a manual session already exists for the same project, this is a no-op resume.
+            if let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) {
+                if sessions[idx].project == project {
+                    // Same project: resume if paused, otherwise no-op.
+                    if sessions[idx].status == .paused {
+                        resumeSession(at: idx, at: when, reason: .userActivity, into: &sessions)
+                    }
+                    return
+                }
+                // Different project manual session: end it first.
+                endSession(at: idx, endedAt: when, reason: .projectSwitch, into: &sessions)
+            }
+            // If an automatic session is active, end it so manual takes priority.
+            if let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .automatic }) {
+                endSession(at: idx, endedAt: when, reason: .projectSwitch, into: &sessions)
+            }
+            // Clear any pending auto switch — manual is now in control.
+            pendingSwitch = nil
+            // Start the new manual session.
+            var session = FocusSession(
+                project: project,
+                dayIdentifier: currentDay,
+                startedAt: when,
+                status: .active,
+                lastUserActivityAt: when,
+                lastStateChangeAt: when,
+                decisionEvents: [FocusSessionDecisionEvent(
+                    at: when,
+                    kind: .started,
+                    reason: .userActivity,
+                    source: .userConfirmed
+                )],
+                mode: .manual
+            )
+            sessions.append(session)
+        }
+    }
+
+    /// Pause the current manual focus session. No-op if no manual session is active.
+    @discardableResult
+    public func pauseManualFocus(
+        at date: Date,
+        commandToken: UUID? = nil
+    ) -> FocusSessionUpdateOutcome {
+        let when = clampToNow(date)
+        return applyWithToken(commandToken) { sessions in
+            guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }),
+                  sessions[idx].status == .active else { return }
+            pauseSession(at: idx, at: when, reason: .userActivity, into: &sessions)
+        }
+    }
+
+    /// Resume the current paused manual focus session. No-op if no manual session is paused.
+    @discardableResult
+    public func resumeManualFocus(
+        at date: Date,
+        commandToken: UUID? = nil
+    ) -> FocusSessionUpdateOutcome {
+        let when = clampToNow(date)
+        return applyWithToken(commandToken) { sessions in
+            guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }),
+                  sessions[idx].status == .paused else { return }
+            resumeSession(at: idx, at: when, reason: .userActivity, into: &sessions)
+        }
+    }
+
+    /// End the current manual focus session. No-op if no manual session is active.
+    /// After ending, automatic detection starts fresh from the next activity boundary.
+    @discardableResult
+    public func endManualFocus(
+        at date: Date,
+        commandToken: UUID? = nil
+    ) -> FocusSessionUpdateOutcome {
+        let when = clampToNow(date)
+        return applyWithToken(commandToken) { sessions in
+            guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) else { return }
+            endSession(at: idx, endedAt: when, reason: .userActivity, into: &sessions)
+            // Clear all pending automatic state so auto-detection starts clean.
+            pendingSwitch = nil
+        }
     }
 
     // MARK: - Aggregates (read‑only, thread‑safe)
@@ -581,6 +749,26 @@ private extension FocusSessionEngine {
         return .saved
     }
 
+    /// Token-based deduplication wrapper. If a non-nil token matches the last
+    /// executed command, returns `.noChange` without mutating state.
+    @discardableResult
+    func applyWithToken(_ token: UUID?, _ mutation: (inout [FocusSession]) -> Void) -> FocusSessionUpdateOutcome {
+        lock.lock()
+        if let token, token == lastManualCommandToken {
+            lock.unlock()
+            return .noChange
+        }
+        lock.unlock()
+        let outcome = apply(mutation)
+        lock.lock()
+        if let token {
+            lastManualCommandToken = token
+            lastManualCommandOutcome = outcome
+        }
+        lock.unlock()
+        return outcome
+    }
+
     func validate(_ list: [FocusSession]) -> Bool {
         // Unique identifiers.
         let ids = list.map(\.id)
@@ -838,7 +1026,8 @@ private extension FocusSessionEngine {
         in project: FocusProjectContext,
         at when: Date,
         reason: FocusSessionDecisionReason,
-        into sessions: inout [FocusSession]
+        into sessions: inout [FocusSession],
+        mode: FocusMode = .automatic
     ) {
         let session = FocusSession(
             project: project,
@@ -851,8 +1040,9 @@ private extension FocusSessionEngine {
                 at: when,
                 kind: .started,
                 reason: reason,
-                source: .automatic
-            )]
+                source: mode == .manual ? .userConfirmed : .automatic
+            )],
+            mode: mode
         )
         sessions.append(session)
     }

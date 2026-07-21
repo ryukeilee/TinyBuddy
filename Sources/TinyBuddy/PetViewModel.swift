@@ -95,6 +95,8 @@ final class PetViewModel: ObservableObject {
     /// The same revision-bound session history that the Widget and Settings
     /// report consume. HUD rendering never re-derives it from raw sessions.
     @Published private(set) var focusHistoryPublication: FocusHistoryPublication?
+    /// Live state of the manual focus control system, published for HUD, menu bar, and Widget.
+    @Published private(set) var manualControlState: ManualFocusControlState = .idle
 
     var hudPresentation: TinyBuddyWidgetPresentation {
         displayPresentation
@@ -136,6 +138,10 @@ final class PetViewModel: ObservableObject {
     private var latestLifecycleNotificationSequence = 0
     private var lastRecordedHUDRevision: Int64?
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
+    /// Focus session engine for manual control. Set by AppDelegate after bridge creation.
+    private nonisolated(unsafe) var focusSessionEngine: FocusSessionEngine?
+    /// Timer for periodically refreshing the live manual-control duration display.
+    private nonisolated(unsafe) var manualControlTimer: Timer?
 
     init(
         onboardingStore: TinyBuddyOnboardingStore = TinyBuddyOnboardingStore(),
@@ -391,7 +397,84 @@ final class PetViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Manual Focus Control
+
+    /// Called by AppDelegate to set the engine reference after bridge creation.
+    func setFocusSessionEngine(_ engine: FocusSessionEngine?) {
+        focusSessionEngine = engine
+        if engine != nil {
+            startManualControlRefresh()
+        } else {
+            stopManualControlRefresh()
+        }
+        refreshManualControlState()
+    }
+
+    /// Start a manual focus session for the given project.
+    func startManualFocus(project: FocusProjectContext) {
+        guard let engine = focusSessionEngine else { return }
+        let token = UUID()
+        _ = engine.startManualFocus(project: project, at: Date(), commandToken: token)
+        refreshManualControlState()
+        reloadWidgetIfPossible()
+    }
+
+    /// Pause the current manual focus session.
+    func pauseManualFocus() {
+        guard let engine = focusSessionEngine else { return }
+        let token = UUID()
+        _ = engine.pauseManualFocus(at: Date(), commandToken: token)
+        refreshManualControlState()
+    }
+
+    /// Resume the current paused manual focus session.
+    func resumeManualFocus() {
+        guard let engine = focusSessionEngine else { return }
+        let token = UUID()
+        _ = engine.resumeManualFocus(at: Date(), commandToken: token)
+        refreshManualControlState()
+        reloadWidgetIfPossible()
+    }
+
+    /// End the current manual focus session.
+    func endManualFocus() {
+        guard let engine = focusSessionEngine else { return }
+        let token = UUID()
+        _ = engine.endManualFocus(at: Date(), commandToken: token)
+        refreshManualControlState()
+        reloadWidgetIfPossible()
+    }
+
+    /// Refresh the published manual control state from the engine.
+    func refreshManualControlState() {
+        guard let engine = focusSessionEngine else {
+            if manualControlState != .idle {
+                manualControlState = .idle
+            }
+            return
+        }
+        let newState = engine.manualControlState
+        if manualControlState != newState {
+            manualControlState = newState
+        }
+    }
+
+    private func startManualControlRefresh() {
+        guard manualControlTimer == nil else { return }
+        manualControlTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshManualControlState()
+            }
+        }
+    }
+
+    private func stopManualControlRefresh() {
+        manualControlTimer?.invalidate()
+        manualControlTimer = nil
+    }
+
     deinit {
+        manualControlTimer?.invalidate()
         for observer in observers {
             notificationCenter.removeObserver(observer)
             NotificationCenter.default.removeObserver(observer)

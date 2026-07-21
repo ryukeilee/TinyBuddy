@@ -134,6 +134,9 @@ struct PetView: View {
                     .focusSection()
                 statusButtons
                     .focusSection()
+                manualFocusControlPanel
+                    .focusSection()
+                    .focusSection()
             }
             .padding(.horizontal, 14)
             .padding(.top, 10)
@@ -375,6 +378,160 @@ struct PetView: View {
     }
 
     @ViewBuilder
+    // MARK: - Manual Focus Control Panel
+
+    private var manualFocusControlPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("FOCUS CONTROL")
+                .font(.caption2.weight(.semibold).monospaced())
+                .foregroundStyle(HUDTheme.brandTextColor(
+                    for: colorScheme,
+                    increasedContrast: increasedContrast
+                ))
+
+            switch viewModel.manualControlState {
+            case .idle:
+                // No manual session; show start button with project hint.
+                VStack(spacing: 6) {
+                    HStack {
+                        Image(systemName: "play.circle")
+                            .foregroundStyle(statusAccent)
+                        Text("手动专注")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(primaryText)
+                        Spacer()
+                        Button("开始") {
+                            let project = defaultManualProject
+                            viewModel.startManualFocus(project: project)
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(statusAccent)
+                        .accessibilityLabel("开始手动专注")
+                    }
+
+                    if let recentProjectName = presentation.recentProjectName {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder")
+                                .font(.caption2)
+                                .foregroundStyle(secondaryText)
+                            Text("将专注记录到：\(recentProjectName)")
+                                .font(.caption2)
+                                .foregroundStyle(secondaryText)
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                    }
+                }
+
+            case .focusing(let project, _, let duration):
+                VStack(spacing: 6) {
+                    HStack {
+                        Image(systemName: "scope")
+                            .foregroundStyle(statusAccent)
+                        Text("手动专注中")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(primaryText)
+                        Spacer()
+                    }
+                    HStack {
+                        Text(project.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(secondaryText)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(formatDuration(duration))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(statusAccent)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            viewModel.pauseManualFocus()
+                        } label: {
+                            Label("暂停", systemImage: "pause.circle")
+                                .font(.caption.weight(.bold))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(statusAccent)
+
+                        Button {
+                            viewModel.endManualFocus()
+                        } label: {
+                            Label("结束", systemImage: "stop.circle")
+                                .font(.caption.weight(.bold))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.red)
+                        Spacer()
+                    }
+                }
+
+            case .paused(let project, _, _, let duration):
+                VStack(spacing: 6) {
+                    HStack {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundStyle(.orange)
+                        Text("手动专注已暂停")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(primaryText)
+                        Spacer()
+                    }
+                    HStack {
+                        Text(project.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(secondaryText)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(formatDuration(duration))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.orange)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            viewModel.resumeManualFocus()
+                        } label: {
+                            Label("继续", systemImage: "play.circle")
+                                .font(.caption.weight(.bold))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(statusAccent)
+
+                        Button {
+                            viewModel.endManualFocus()
+                        } label: {
+                            Label("结束", systemImage: "stop.circle")
+                                .font(.caption.weight(.bold))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.red)
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(panelFill)
+        .overlay(panelBorder)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(semanticAnimation, value: viewModel.manualControlState.isManualSessionActive)
+    }
+
+    private var defaultManualProject: FocusProjectContext {
+        if let name = presentation.recentProjectName {
+            return FocusProjectContext(key: "manual.\(name)", displayName: name)
+        }
+        return FocusProjectContext(key: "manual.untitled", displayName: "未命名项目")
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let minutes = Int(duration) / 60
+        let seconds = Int(duration) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    // MARK: - Status Buttons
+
     private var statusButtons: some View {
         let buttons = ForEach(PetStatus.allCases) { status in
             Button {
@@ -406,16 +563,18 @@ struct PetView: View {
             .focused($focusedField, equals: .statusButton(status))
         }
 
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(spacing: 8) {
-                buttons
+        return Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: 8) {
+                    buttons
+                }
+                .accessibilityLabel("状态选择")
+            } else {
+                HStack(spacing: 8) {
+                    buttons
+                }
+                .accessibilityLabel("状态选择")
             }
-            .accessibilityLabel("状态选择")
-        } else {
-            HStack(spacing: 8) {
-                buttons
-            }
-            .accessibilityLabel("状态选择")
         }
     }
 

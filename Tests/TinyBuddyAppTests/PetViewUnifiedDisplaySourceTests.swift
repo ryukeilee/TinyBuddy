@@ -46,7 +46,7 @@ final class PetViewUnifiedDisplaySourceTests: XCTestCase {
     func testHUDBrandLabelsUseSharedSemanticTextColor() throws {
         let source = try petViewSource()
 
-        XCTAssertEqual(source.components(separatedBy: "HUDTheme.brandTextColor(").count - 1, 2)
+        XCTAssertEqual(source.components(separatedBy: "HUDTheme.brandTextColor(").count - 1, 3)
         XCTAssertTrue(source.contains(".fill(HUDTheme.hudGold.opacity"))
     }
 
