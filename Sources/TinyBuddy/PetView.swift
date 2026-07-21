@@ -14,6 +14,7 @@ struct PetView: View {
     @FocusState private var focusedField: PetViewFocusField?
     @StateObject private var viewModel: PetViewModel
     @State private var lowPowerModeEnabled: Bool
+    @State private var showProjectPicker = false
 
     private let fixedWidth: CGFloat = 284
     private let hudHeight: CGFloat = 520
@@ -391,7 +392,7 @@ struct PetView: View {
 
             switch viewModel.manualControlState {
             case .idle:
-                // No manual session; show start button with project hint.
+                // No manual session; show project picker button.
                 VStack(spacing: 6) {
                     HStack {
                         Image(systemName: "play.circle")
@@ -400,14 +401,13 @@ struct PetView: View {
                             .font(.caption.weight(.bold))
                             .foregroundStyle(primaryText)
                         Spacer()
-                        Button("开始") {
-                            let project = defaultManualProject
-                            viewModel.startManualFocus(project: project)
+                        Button("选择项目") {
+                            showProjectPicker = true
                         }
                         .buttonStyle(.borderless)
                         .font(.caption.weight(.bold))
                         .foregroundStyle(statusAccent)
-                        .accessibilityLabel("开始手动专注")
+                        .accessibilityLabel("选择项目开始手动专注")
                     }
 
                     if let recentProjectName = presentation.recentProjectName {
@@ -415,13 +415,25 @@ struct PetView: View {
                             Image(systemName: "folder")
                                 .font(.caption2)
                                 .foregroundStyle(secondaryText)
-                            Text("将专注记录到：\(recentProjectName)")
+                            Text("最近：\(recentProjectName)")
                                 .font(.caption2)
                                 .foregroundStyle(secondaryText)
                                 .lineLimit(1)
                             Spacer()
                         }
                     }
+                }
+                .popover(isPresented: $showProjectPicker) {
+                    ManualFocusProjectPicker(
+                        recentProjectName: presentation.recentProjectName,
+                        registeredProjects: [],
+                        onSubmit: { project in
+                            viewModel.startManualFocus(project: project)
+                            showProjectPicker = false
+                        }
+                    )
+                    .frame(width: 260)
+                    .padding()
                 }
 
             case .focusing(let project, _, let duration):

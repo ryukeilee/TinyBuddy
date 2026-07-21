@@ -202,6 +202,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Ephemeral only: it connects an existing FSEvent-triggered refresh to the
     /// next committed activity delta without persisting a repository path.
     private var pendingFocusGitChange = false
+    private lazy var manualFocusMenuBarController = ManualFocusMenuBarController(
+        recentProjectNameProvider: { [weak self] in
+            self?.petViewModel.displayPresentation.recentProjectName
+        },
+        registeredProjectsProvider: { [weak self] in
+            self?.projectRegistry?.currentSnapshot.projects
+                .filter { $0.state == .active }
+                .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+                ?? []
+        }
+    )
     private var pendingCommittedGitActivity: (
         previous: GitTodayActivitySnapshot?,
         current: GitTodayActivitySnapshot
@@ -350,6 +361,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focusBridge?.start()
         // Wire the session engine to the HUD for manual focus control.
         petViewModel.setFocusSessionEngine(focusBridge?.sessionEngine)
+        // Wire the menu bar controller to the same engine.
+        manualFocusMenuBarController.setEngine(focusBridge?.sessionEngine)
         replayPendingFocusSessionPublicationIfNeeded()
         refreshFocusHistoryForPresentation()
         powerStateMonitor.start()
@@ -606,6 +619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         gitActivityRefreshCoordinator.stop()
         focusSessionBridge?.handleTerminate()
         focusSessionBridge?.stop()
+        manualFocusMenuBarController.stop()
         HUDWindowPositionController.shared.stop()
     }
 
@@ -716,6 +730,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
         focusSessionBridge?.stop()
+        manualFocusMenuBarController.stop()
         HUDWindowPositionController.shared.stop()
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()
