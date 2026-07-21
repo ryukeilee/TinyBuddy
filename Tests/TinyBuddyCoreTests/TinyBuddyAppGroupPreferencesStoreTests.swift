@@ -140,6 +140,55 @@ final class TinyBuddyAppGroupPreferencesStoreTests: XCTestCase {
         XCTAssertNil(update.snapshot)
     }
 
+    func testFocusSessionSliceRejectsDelayedOlderRevisionAndKeepsCommittedDurations() throws {
+        let preferences = PreferencesValues()
+        let store = TinyBuddyCombinedSnapshotStore(
+            preferencesStore: makePreferencesStore(values: preferences),
+            sharedPreferencesProvider: { nil }
+        )
+        let fallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: "2026-07-20", focusCount: 99, completionCount: 0)
+        )
+        let newest = FocusSessionDerivedSnapshot(
+            revision: 9,
+            dayIdentifier: "2026-07-20",
+            focusDuration: 4_200,
+            projectDurations: ["Project A": 4_200],
+            completedSessionCount: 2
+        )
+        let older = FocusSessionDerivedSnapshot(
+            revision: 8,
+            dayIdentifier: "2026-07-20",
+            focusDuration: 1_200,
+            projectDurations: ["Project B": 1_200],
+            completedSessionCount: 1
+        )
+
+        let first = store.updateFocusSessionSlice(newest, fallbackSnapshot: fallback)
+        XCTAssertEqual(first.outcome, .saved)
+        let delayed = store.updateFocusSessionSlice(older, fallbackSnapshot: fallback)
+        XCTAssertEqual(delayed.outcome, .alreadyCurrent)
+        XCTAssertFalse(delayed.didPersist)
+        XCTAssertEqual(delayed.snapshot?.focusSessionSnapshot, newest)
+        XCTAssertEqual(delayed.snapshot?.snapshot.stats.focusCount, newest.completedSessionCount)
+        XCTAssertEqual(store.loadReadOnly()?.focusSessionSnapshot, newest)
+        XCTAssertEqual(store.loadReadOnly()?.snapshot.stats.focusCount, newest.completedSessionCount)
+
+        let activityRefresh = store.updateActivitySlice(
+            GitTodayActivitySnapshot(focusBlockCount: 4, commitCount: 1, recentProjectName: "Project A"),
+            activityRevision: 10,
+            fallbackSnapshot: TinyBuddySnapshot(
+                status: .focusing,
+                stats: DailyStats(dayIdentifier: "2026-07-20", focusCount: 0, completionCount: 7)
+            )
+        )
+        XCTAssertEqual(activityRefresh.outcome, .saved)
+        XCTAssertEqual(activityRefresh.snapshot?.focusSessionSnapshot, newest)
+        XCTAssertEqual(activityRefresh.snapshot?.snapshot.stats.focusCount, newest.completedSessionCount)
+        XCTAssertEqual(activityRefresh.snapshot?.snapshot.stats.completionCount, 0)
+    }
+
     private func makePreferencesStore(
         values: PreferencesValues
     ) -> TinyBuddyAppGroupPreferencesStore {

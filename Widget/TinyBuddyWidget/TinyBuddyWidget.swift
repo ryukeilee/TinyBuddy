@@ -8,6 +8,17 @@ private typealias HUDTheme = TinyBuddyHUDTheme
 struct TinyBuddyEntry: TimelineEntry {
     let date: Date
     let presentation: TinyBuddyDisplayPresentation
+    let focusSessionSnapshot: FocusSessionDerivedSnapshot?
+
+    init(
+        date: Date,
+        presentation: TinyBuddyDisplayPresentation,
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil
+    ) {
+        self.date = date
+        self.presentation = presentation
+        self.focusSessionSnapshot = focusSessionSnapshot
+    }
 }
 
 struct TinyBuddyProvider: TimelineProvider {
@@ -125,7 +136,8 @@ struct TinyBuddyProvider: TimelineProvider {
                     observation: combinedRead.observation,
                     hasSnapshot: true
                 ),
-                timeContext: timeContext
+                timeContext: timeContext,
+                focusSessionSnapshot: combinedSnapshot.focusSessionSnapshot
             )
         }
 
@@ -181,7 +193,8 @@ struct TinyBuddyProvider: TimelineProvider {
         activitySnapshot: GitTodayActivitySnapshot,
         refreshStatus: GitActivityRefreshStatus?,
         dataAvailability: TinyBuddyDisplayDataAvailability,
-        timeContext: TinyBuddyTimeContext
+        timeContext: TinyBuddyTimeContext,
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil
     ) -> TinyBuddyEntry {
         TinyBuddyEntry(
             date: date,
@@ -195,7 +208,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 ) ?? true,
                 locale: Locale(identifier: timeContext.signature.localeIdentifier),
                 timeZone: timeContext.timeZone
-            )
+            ),
+            focusSessionSnapshot: focusSessionSnapshot
         )
     }
 
@@ -255,6 +269,12 @@ struct TinyBuddyWidgetView: View {
 
     private var presentation: TinyBuddyDisplayPresentation {
         entry.presentation
+    }
+
+    private var focusSessionSummary: String? {
+        guard let focus = entry.focusSessionSnapshot, focus.focusDuration > 0 else { return nil }
+        let minutes = Int(focus.focusDuration / 60)
+        return "已专注 \(minutes / 60) 小时 \(minutes % 60) 分 · \(focus.completedSessionCount) 段"
     }
 
     private var displayEnvironment: TinyBuddyDisplayEnvironment {
@@ -459,6 +479,12 @@ struct TinyBuddyWidgetView: View {
                     .foregroundStyle(secondaryText)
                     .lineLimit(layout.messageLineLimit)
                     .layoutPriority(1)
+            }
+            if let focusSessionSummary {
+                Text(focusSessionSummary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

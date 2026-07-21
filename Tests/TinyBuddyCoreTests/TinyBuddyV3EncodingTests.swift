@@ -74,6 +74,28 @@ final class TinyBuddyV3EncodingTests: XCTestCase {
         XCTAssertEqual(decoded, snapshot)
     }
 
+    func testFocusSessionSliceRoundTripKeepsProjectDurations() throws {
+        let focus = FocusSessionDerivedSnapshot(
+            revision: 7,
+            dayIdentifier: "2026-07-20",
+            focusDuration: 5_400,
+            projectDurations: ["project-a": 3_600, "project-b": 1_800],
+            completedSessionCount: 3
+        )
+        let base = makeFullSnapshot()
+        let snapshot = TinyBuddyCombinedSnapshot(
+            revision: base.revision,
+            dayIdentifier: base.dayIdentifier,
+            snapshot: base.snapshot,
+            activitySnapshot: base.activitySnapshot,
+            activityRevision: base.activityRevision,
+            focusSessionSnapshot: focus
+        )
+        let encoded = try XCTUnwrap(TinyBuddyCombinedSnapshotStore.encodeV3(snapshot))
+        let decoded = try XCTUnwrap(TinyBuddyCombinedSnapshotStore.decodeV3(encoded))
+        XCTAssertEqual(decoded.focusSessionSnapshot, focus)
+    }
+
     func testMinimalSnapshotRoundTrip() throws {
         let snapshot = makeMinimalSnapshot()
         let encoded = try XCTUnwrap(TinyBuddyCombinedSnapshotStore.encodeV3(snapshot))

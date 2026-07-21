@@ -6,19 +6,23 @@ public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
     public let snapshot: TinyBuddySnapshot
     public let activitySnapshot: GitTodayActivitySnapshot
     public let activityRevision: Int64?
+    /// Optional session-review slice. Older committed payloads decode without it.
+    public let focusSessionSnapshot: FocusSessionDerivedSnapshot?
 
     public init(
         revision: Int64,
         dayIdentifier: String,
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot,
-        activityRevision: Int64? = nil
+        activityRevision: Int64? = nil,
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil
     ) {
         self.revision = revision
         self.dayIdentifier = dayIdentifier
         self.snapshot = snapshot
         self.activitySnapshot = activitySnapshot
         self.activityRevision = activityRevision
+        self.focusSessionSnapshot = focusSessionSnapshot
     }
 }
 
@@ -576,6 +580,60 @@ public final class TinyBuddyCombinedSnapshotStore {
         )
     }
 
+    /// Publishes user-confirmed focus-session aggregates in the same committed
+    /// snapshot read by the app, HUD, and Widget. A delayed older edit cannot
+    /// replace a newer session revision.
+    @discardableResult
+    public func updateFocusSessionSlice(
+        _ focusSessionSnapshot: FocusSessionDerivedSnapshot,
+        fallbackSnapshot: TinyBuddySnapshot
+    ) -> UpdateResult {
+        Self.writerLock.lock()
+        defer { Self.writerLock.unlock() }
+        guard !isInWriteCooldown else { return cooldownResult() }
+        let state = readStateLocked(repair: true)
+        let current = state.snapshot
+        guard state.diagnosticReason != .versionIncompatible else {
+            return UpdateResult(snapshot: nil, outcome: .versionIncompatible, didPersist: false)
+        }
+        guard focusSessionSnapshot.dayIdentifier == fallbackSnapshot.stats.dayIdentifier else {
+            return UpdateResult(snapshot: current, outcome: .alreadyCurrent, didPersist: false)
+        }
+        let currentPayload = current?.dayIdentifier == focusSessionSnapshot.dayIdentifier ? current : nil
+        if let existing = currentPayload?.focusSessionSnapshot,
+           existing.revision > focusSessionSnapshot.revision {
+            return UpdateResult(snapshot: currentPayload, outcome: .alreadyCurrent, didPersist: false)
+        }
+        // The legacy DailyStats mirror is updated by the app after this write,
+        // but App/HUD/Widget must already agree through this authoritative
+        // combined snapshot.  Do not retain its old focusCount here.
+        let baseSnapshot = currentPayload?.snapshot ?? fallbackSnapshot
+        let synchronizedSnapshot = TinyBuddySnapshot(
+            status: baseSnapshot.status,
+            stats: DailyStats(
+                dayIdentifier: focusSessionSnapshot.dayIdentifier,
+                focusCount: focusSessionSnapshot.completedSessionCount,
+                completionCount: baseSnapshot.stats.completionCount
+            )
+        )
+        let copied = TinyBuddyCombinedSnapshot(
+            revision: currentPayload?.revision ?? 0,
+            dayIdentifier: focusSessionSnapshot.dayIdentifier,
+            snapshot: synchronizedSnapshot,
+            activitySnapshot: currentPayload?.activitySnapshot ?? GitTodayActivitySnapshot(focusBlockCount: nil, commitCount: nil),
+            activityRevision: currentPayload?.activityRevision,
+            focusSessionSnapshot: focusSessionSnapshot
+        )
+        return saveLocked(
+            snapshot: copied.snapshot,
+            activitySnapshot: copied.activitySnapshot,
+            activityRevision: copied.activityRevision,
+            focusSessionSnapshot: focusSessionSnapshot,
+            highestRevision: state.revisionFloor,
+            current: current
+        )
+    }
+
     // V1 payload codec. It remains public for compatibility and migration tests.
     public static func encode(_ snapshot: TinyBuddyCombinedSnapshot) -> String {
         let projectName = snapshot.activitySnapshot.recentProjectName ?? ""
@@ -742,6 +800,13 @@ public final class TinyBuddyCombinedSnapshotStore {
         if let ar = snapshot.activityRevision {
             dict["ar"] = ar
         }
+        if let focus = snapshot.focusSessionSnapshot,
+           focus.dayIdentifier == snapshot.dayIdentifier {
+            dict["fsr"] = focus.revision
+            dict["fsd"] = max(0, focus.focusDuration)
+            dict["fsc"] = max(0, focus.completedSessionCount)
+            dict["fsp"] = focus.projectDurations.mapValues { max(0, $0) }
+        }
         return try? PropertyListSerialization.data(
             fromPropertyList: dict,
             format: .binary,
@@ -773,6 +838,22 @@ public final class TinyBuddyCombinedSnapshotStore {
         let activityCommitCount = dict["ac"] as? Int
         let recentProjectName = dict["rp"] as? String
         let activityRevision = dict["ar"] as? Int64
+        let focusSessionSnapshot: FocusSessionDerivedSnapshot?
+        if let revision = dict["fsr"] as? Int64,
+           let duration = dict["fsd"] as? Double,
+           let count = dict["fsc"] as? Int,
+           let projects = dict["fsp"] as? [String: Double],
+           revision >= 0, duration >= 0, count >= 0,
+           projects.values.allSatisfy({ $0 >= 0 }) {
+            focusSessionSnapshot = FocusSessionDerivedSnapshot(
+                revision: revision, dayIdentifier: dayIdentifier, focusDuration: duration,
+                projectDurations: projects, completedSessionCount: count
+            )
+        } else if ["fsr", "fsd", "fsc", "fsp"].contains(where: { dict[$0] != nil }) {
+            return nil
+        } else {
+            focusSessionSnapshot = nil
+        }
 
         let normalizedProjectName = recentProjectName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -792,7 +873,8 @@ public final class TinyBuddyCombinedSnapshotStore {
                 commitCount: activityCommitCount,
                 recentProjectName: normalizedProjectName?.isEmpty == false ? normalizedProjectName : nil
             ),
-            activityRevision: activityRevision
+            activityRevision: activityRevision,
+            focusSessionSnapshot: focusSessionSnapshot
         )
     }
 
@@ -1394,7 +1476,11 @@ public final class TinyBuddyCombinedSnapshotStore {
                 commitCount: snapshot.activitySnapshot.commitCount.map { max(0, $0) },
                 recentProjectName: projectName?.isEmpty == false ? projectName : nil
             ),
-            activityRevision: snapshot.activityRevision
+            activityRevision: snapshot.activityRevision,
+            focusSessionSnapshot: normalizedFocusSessionSnapshot(
+                snapshot.focusSessionSnapshot,
+                dayIdentifier: snapshot.dayIdentifier
+            )
         )
     }
 
@@ -1406,6 +1492,25 @@ public final class TinyBuddyCombinedSnapshotStore {
         }
         let value = String(hash, radix: 16)
         return String(repeating: "0", count: 16 - value.count) + value
+    }
+
+    private static func normalizedFocusSessionSnapshot(
+        _ snapshot: FocusSessionDerivedSnapshot?,
+        dayIdentifier: String
+    ) -> FocusSessionDerivedSnapshot? {
+        guard let snapshot, snapshot.dayIdentifier == dayIdentifier,
+              snapshot.revision >= 0, snapshot.focusDuration >= 0,
+              snapshot.completedSessionCount >= 0,
+              snapshot.projectDurations.values.allSatisfy({ $0 >= 0 }) else {
+            return nil
+        }
+        return FocusSessionDerivedSnapshot(
+            revision: snapshot.revision,
+            dayIdentifier: snapshot.dayIdentifier,
+            focusDuration: snapshot.focusDuration,
+            projectDurations: snapshot.projectDurations.mapValues { max(0, $0) },
+            completedSessionCount: snapshot.completedSessionCount
+        )
     }
 
     private func shouldAcceptIncomingActivity(
@@ -1438,6 +1543,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot?,
         activityRevision: Int64?,
+        focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
         highestRevision: Int64,
         current: TinyBuddyCombinedSnapshot?
     ) -> UpdateResult {
@@ -1455,16 +1561,39 @@ public final class TinyBuddyCombinedSnapshotStore {
                 didPersist: false
             )
         }
+        let retainedFocusSessionSnapshot = focusSessionSnapshot
+            ?? (current?.dayIdentifier == snapshot.stats.dayIdentifier
+                ? current?.focusSessionSnapshot
+                : nil)
+        // Every later activity/status write retains the confirmed focus slice.
+        // Keep the legacy count mirror synchronized as well, otherwise a Git
+        // refresh between the combined write and its legacy-mirror update can
+        // make HUD regress while Widget still renders the newer focus slice.
+        let synchronizedSnapshot: TinyBuddySnapshot
+        if let retainedFocusSessionSnapshot,
+           retainedFocusSessionSnapshot.dayIdentifier == snapshot.stats.dayIdentifier {
+            synchronizedSnapshot = TinyBuddySnapshot(
+                status: snapshot.status,
+                stats: DailyStats(
+                    dayIdentifier: snapshot.stats.dayIdentifier,
+                    focusCount: retainedFocusSessionSnapshot.completedSessionCount,
+                    completionCount: snapshot.stats.completionCount
+                )
+            )
+        } else {
+            synchronizedSnapshot = snapshot
+        }
         let combinedSnapshot = Self.normalized(TinyBuddyCombinedSnapshot(
             revision: highestRevision + 1,
-            dayIdentifier: snapshot.stats.dayIdentifier,
-            snapshot: snapshot,
+            dayIdentifier: synchronizedSnapshot.stats.dayIdentifier,
+            snapshot: synchronizedSnapshot,
             activitySnapshot: activitySnapshot ?? GitTodayActivitySnapshot(
                 focusBlockCount: nil,
                 commitCount: nil,
                 recentProjectName: nil
             ),
-            activityRevision: activityRevision
+            activityRevision: activityRevision,
+            focusSessionSnapshot: retainedFocusSessionSnapshot
         ))
 
         guard let directSource = sourceValues().first,

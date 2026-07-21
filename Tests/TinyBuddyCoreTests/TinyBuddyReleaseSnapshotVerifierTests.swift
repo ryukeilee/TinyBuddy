@@ -140,6 +140,34 @@ final class TinyBuddyReleaseSnapshotVerifierTests: XCTestCase {
         )
     }
 
+    func testAcceptsLegacyMirrorWhenCommittedV3AddsFocusSessionSlice() {
+        let base = makeSnapshot(revision: 42, dayIdentifier: "2026-07-17")
+        let snapshot = TinyBuddyCombinedSnapshot(
+            revision: base.revision,
+            dayIdentifier: base.dayIdentifier,
+            snapshot: base.snapshot,
+            activitySnapshot: base.activitySnapshot,
+            activityRevision: base.activityRevision,
+            focusSessionSnapshot: FocusSessionDerivedSnapshot(
+                revision: 3,
+                dayIdentifier: base.dayIdentifier,
+                focusDuration: 1_800,
+                projectDurations: ["Project A": 1_800],
+                completedSessionCount: 1
+            )
+        )
+        var plist = validPlist(for: snapshot)
+        plist[TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA] =
+            TinyBuddyCombinedSnapshotStore.encodeV3(snapshot)
+        plist[TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB] =
+            TinyBuddyCombinedSnapshotStore.encodeV3(snapshot)
+
+        guard case .valid = TinyBuddyReleaseSnapshotVerifier.verify(
+            plist: plist,
+            expectedDayIdentifier: "2026-07-17"
+        ) else { return XCTFail("Expected valid V3 snapshot with legacy mirror") }
+    }
+
     private func validPlist(for snapshot: TinyBuddyCombinedSnapshot) -> [String: Any] {
         [
             TinyBuddyCombinedSnapshotStore.Key.schemaVersion:

@@ -102,7 +102,7 @@ public enum TinyBuddyReleaseSnapshotVerifier {
         if let legacyValue = plist[TinyBuddyCombinedSnapshotStore.Key.snapshot] {
             guard let legacyValue = legacyValue as? String,
                   let legacySnapshot = TinyBuddyCombinedSnapshotStore.decode(legacyValue),
-                  legacySnapshot == committedSnapshot else {
+                  legacySnapshot == legacyComparableSnapshot(committedSnapshot) else {
                 return .invalid(.legacyMirrorMismatch)
             }
         }
@@ -118,5 +118,21 @@ public enum TinyBuddyReleaseSnapshotVerifier {
             activityCommitCount: committedSnapshot.activitySnapshot.commitCount,
             activityRevision: committedSnapshot.activityRevision
         ))
+    }
+
+    /// V1 mirrors predate the focus-session presentation slice. They still
+    /// prove the legacy fields are coherent, while V3 slots remain the sole
+    /// authoritative carrier for session durations.
+    private static func legacyComparableSnapshot(
+        _ snapshot: TinyBuddyCombinedSnapshot
+    ) -> TinyBuddyCombinedSnapshot {
+        TinyBuddyCombinedSnapshot(
+            revision: snapshot.revision,
+            dayIdentifier: snapshot.dayIdentifier,
+            snapshot: snapshot.snapshot,
+            activitySnapshot: snapshot.activitySnapshot,
+            activityRevision: snapshot.activityRevision,
+            focusSessionSnapshot: nil
+        )
     }
 }

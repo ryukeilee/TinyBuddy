@@ -108,6 +108,17 @@ public final class DailyStatsStore {
         return save(stats)
     }
 
+    /// Replaces the derived focus-session count only for the current local
+    /// day. This is used after a user correction; it never manufactures a
+    /// previous/future day's state.
+    @discardableResult
+    public func replaceFocusCount(_ count: Int, forDayIdentifier dayIdentifier: String) -> DailyStats {
+        var stats = loadToday()
+        guard stats.dayIdentifier == dayIdentifier else { return stats }
+        stats.focusCount = max(0, count)
+        return save(stats)
+    }
+
     @discardableResult
     public func recordCompletion() -> DailyStats {
         var stats = loadToday()

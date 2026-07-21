@@ -581,6 +581,15 @@ final class PetViewModel: ObservableObject {
         updateHiddenSnapshotDiagnosticSummary()
     }
 
+    /// A focus-session journal transaction already reached disk. Re-read the
+    /// same committed combined snapshot path used by HUD and Widget, rather
+    /// than applying an optimistic in-memory presentation.
+    func focusSessionStatsDidChange() {
+        if reloadHUDState() {
+            reloadWidgetIfPossible()
+        }
+    }
+
     @discardableResult
     private func applyHUDState(
         snapshot: TinyBuddySnapshot,

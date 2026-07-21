@@ -68,7 +68,18 @@ struct TinyBuddyApp: App {
             if let recoveryError = appDelegate.startupRecoveryError {
                 TinyBuddyResetRecoveryBlockedView(error: recoveryError)
             } else {
-                GitScanRootSettingsView()
+                TabView {
+                    GitScanRootSettingsView()
+                        .tabItem { Label("Git 项目", systemImage: "folder") }
+                    FocusSessionReviewView(engineProvider: { appDelegate.focusSessionEngine })
+                        .tabItem { Label("专注记录", systemImage: "clock.arrow.circlepath") }
+                    FocusGoalSettingsView(
+                        engineProvider: { appDelegate.focusSessionEngine },
+                        coordinator: appDelegate.focusGoalCoordinator
+                    )
+                        .tabItem { Label("专注目标", systemImage: "target") }
+                }
+                .frame(minWidth: 720, minHeight: 480)
             }
         }
     }
@@ -121,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeEnvironment: timeEnvironment
     )
     private lazy var combinedSnapshotStore = dailyStatsStore.makeCombinedSnapshotStore()
+    private lazy var focusSessionPublicationJournal = FocusSessionSnapshotPublicationJournal()
     lazy var petViewModel = PetViewModel(
         onboardingStore: onboardingStore,
         store: dailyStatsStore,
@@ -150,6 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var powerStateMonitor = TinyBuddyPowerStateMonitor { [weak self] state in
         self?.gitActivityRefreshCoordinator.handlePowerStateChanged(state)
     }
+    // Focus sessions have an independent, App Group-backed journal. It never
+    // mutates Git refresh inputs; its lifecycle is deliberately tied to the
+    // primary app instance so secondary launches cannot race session writes.
+    private var focusSessionBridge: FocusSessionAppBridge?
     private lazy var hudVisibilityMonitor = HUDVisibilityMonitor(
         visibilityProvider: { [weak self] in
             self?.isHUDVisible ?? false
@@ -198,6 +214,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var startupRecoveryError: TinyBuddyResetError? {
         resetRecoveryError
     }
+
+    var focusSessionEngine: FocusSessionEngine? {
+        focusSessionBridge?.sessionEngine
+    }
+
+    lazy var focusGoalCoordinator = FocusGoalCoordinator()
 
     override init() {
         let resetService = TinyBuddyResetService()
@@ -266,6 +288,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isInterfaceVisible: isHUDVisible,
             powerState: TinyBuddyPowerState.current()
         )
+        let focusBridge = FocusSessionAppBridge.createStandard()
+        focusSessionBridge = focusBridge
+        focusBridge?.sessionEngine.committedSnapshotHandler = { [weak self] derived in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.focusSessionPublicationJournal.stage(derived) else {
+                    self.notificationCenter.post(
+                        name: .focusSessionSnapshotSynchronizationDidFinish,
+                        object: nil,
+                        userInfo: ["succeeded": false]
+                    )
+                    return
+                }
+                let current = self.dailyStatsStore.loadSnapshot()
+                guard current.stats.dayIdentifier == derived.dayIdentifier else {
+                    _ = self.focusSessionPublicationJournal.clear(expected: derived)
+                    return
+                }
+                let derivedPresentation = TinyBuddySnapshot(
+                    status: current.status,
+                    stats: DailyStats(
+                        dayIdentifier: derived.dayIdentifier,
+                        focusCount: derived.completedSessionCount,
+                        completionCount: current.stats.completionCount
+                    )
+                )
+                let update = self.combinedSnapshotStore.updateFocusSessionSlice(
+                    derived,
+                    fallbackSnapshot: derivedPresentation
+                )
+                guard update.didPersist || update.outcome == .alreadyCurrent else {
+                    self.notificationCenter.post(
+                        name: .focusSessionSnapshotSynchronizationDidFinish,
+                        object: nil,
+                        userInfo: ["succeeded": false]
+                    )
+                    return
+                }
+                // A delayed callback may be accepted as an idempotent read of
+                // a newer committed slice. Never mirror that older count into
+                // DailyStats, or HUD could briefly disagree with Widget.
+                guard update.snapshot?.focusSessionSnapshot?.revision == derived.revision else {
+                    if update.snapshot?.focusSessionSnapshot?.revision ?? -1 > derived.revision {
+                        _ = self.focusSessionPublicationJournal.clear(expected: derived)
+                    }
+                    return
+                }
+                _ = self.dailyStatsStore.replaceFocusCount(
+                    derived.completedSessionCount,
+                    forDayIdentifier: derived.dayIdentifier
+                )
+                self.petViewModel.focusSessionStatsDidChange()
+                // Evaluate focus goal reminders after session state changes.
+                if let engine = self.focusSessionBridge?.sessionEngine {
+                    let snapshot = engine.derivedSnapshot()
+                    self.focusGoalCoordinator.evaluateReminders(
+                        sessions: engine.allSessions,
+                        now: Date(),
+                        dayIdentifier: snapshot.dayIdentifier
+                    )
+                }
+                guard self.focusSessionPublicationJournal.clear(expected: derived) else {
+                    self.notificationCenter.post(
+                        name: .focusSessionSnapshotSynchronizationDidFinish,
+                        object: nil,
+                        userInfo: ["succeeded": false]
+                    )
+                    return
+                }
+                self.notificationCenter.post(
+                    name: .focusSessionSnapshotSynchronizationDidFinish,
+                    object: nil,
+                    userInfo: ["succeeded": true]
+                )
+            }
+        }
+        focusBridge?.start()
+        // If the process ended after a confirmed session journal write but
+        // before its shared-snapshot publication, replay the durable journal
+        // once on primary-instance startup. Automatic-only sessions retain the
+        // established Git presentation path and are intentionally excluded.
+        if let engine = focusBridge?.sessionEngine,
+           (focusSessionPublicationJournal.pending != nil
+                || engine.allSessions.contains(where: \.isManuallyConfirmed)) {
+            engine.committedSnapshotHandler?(engine.derivedSnapshot())
+        }
         powerStateMonitor.start()
         hudVisibilityMonitor.start()
     }
@@ -302,6 +410,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
+        focusSessionBridge?.handleTerminate()
+        focusSessionBridge?.stop()
         HUDWindowPositionController.shared.stop()
     }
 
@@ -408,6 +518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
+        focusSessionBridge?.stop()
         HUDWindowPositionController.shared.stop()
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()

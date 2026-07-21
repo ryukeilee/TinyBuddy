@@ -157,6 +157,8 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
     public let showsActivityMetrics: Bool
     public let isRefreshing: Bool
     public let displayState: DisplayState
+    /// Optional focus goal progress. When present, all surfaces show it identically.
+    public let goalProgress: FocusGoalProgress?
 
     /// Drives only semantic cross-fades. Refresh timestamps and repeated
     /// publications deliberately do not change this identity.
@@ -237,6 +239,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             && state != .noRepositories
         self.isRefreshing = isRefreshing
         self.displayState = displayState
+        self.goalProgress = nil
     }
 
     /// Compatibility initializer. New App, HUD and Widget code should use the
