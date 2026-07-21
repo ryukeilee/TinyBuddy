@@ -28,6 +28,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private let historyGoalMinutesProvider: () -> Int
     private let historyActiveProjectKeysProvider: ([FocusSession]) -> Set<String>?
     private let projectContextResolver: @Sendable (FocusProjectContext) -> FocusProjectContext
+    private let ruleVersionProvider: () -> FocusSessionRuleVersion?
 
     // MARK: State (protected by lock)
     private var lock: NSLock = .init()
@@ -43,6 +44,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// revision, it advances for every durable authority-record mutation.
     private var archiveRevision: Int64 = 0
     private var archiveHistoryCompleteness: FocusSessionArchiveCompleteness = .complete
+    /// Evidence records keyed by session ID. Persisted atomically with the
+    /// session archive. Generated deterministically by the evidence engine.
+    private var evidenceBySessionID: [UUID: FocusSessionEvidence] = [:]
+    /// Monotonic revision of the evidence archive.
+    private var evidenceArchiveRevision: Int64 = 0
     /// The only in-process history cache. It is updated by session deltas only
     /// after the matching archive write succeeds.
     private var historyCache = FocusHistoryAggregationCache()
@@ -89,7 +95,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
         historyActiveProjectKeys: @escaping ([FocusSession]) -> Set<String>? = { _ in
             nil
         },
-        projectContextResolver: @escaping @Sendable (FocusProjectContext) -> FocusProjectContext = { $0 }
+        projectContextResolver: @escaping @Sendable (FocusProjectContext) -> FocusProjectContext = { $0 },
+        ruleVersionProvider: @escaping () -> FocusSessionRuleVersion? = {
+            FocusSessionRuleVersion.current
+        }
     ) {
         let loaded = Self.loadInitialArchive(from: persisting)
         self.clock = clock
@@ -100,12 +109,30 @@ public final class FocusSessionEngine: @unchecked Sendable {
         self.historyGoalMinutesProvider = historyGoalMinutes
         self.historyActiveProjectKeysProvider = historyActiveProjectKeys
         self.projectContextResolver = projectContextResolver
+        self.ruleVersionProvider = ruleVersionProvider
         let now = clock.now
         self.currentDay = dayProvider(now)
         self.sessions = loaded.sessions
         self.archiveRevision = loaded.revision
         self.archiveHistoryCompleteness = loaded.historyCompleteness
         self.historySource = loaded.source
+        // Regenerate evidence if not present in the archive (backward compat
+        // with v1 archives or stores like MemoryStore that don't archive evidence).
+        var evidence = loaded.evidence
+        if evidence.isEmpty {
+            for session in loaded.sessions where session.decisionEvents?.isEmpty == false {
+                let input = FocusSessionEvidenceInput(
+                    session: session,
+                    attributedViaForegroundApp: true,
+                    attributedViaGitActivity: false
+                )
+                if let ev = FocusSessionEvidenceEngine.generateEvidence(for: input) {
+                    evidence[ev.sessionID] = ev
+                }
+            }
+        }
+        self.evidenceBySessionID = evidence
+        self.evidenceArchiveRevision = loaded.revision
         self.historyCache = FocusHistoryAggregationCache(
             sessions: loaded.sessions,
             projectResolver: projectContextResolver
@@ -349,7 +376,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
             // Clear any pending auto switch — manual is now in control.
             pendingSwitch = nil
             // Start the new manual session.
-            var session = FocusSession(
+            let session = FocusSession(
                 project: project,
                 dayIdentifier: currentDay,
                 startedAt: when,
@@ -362,7 +389,8 @@ public final class FocusSessionEngine: @unchecked Sendable {
                     reason: .userActivity,
                     source: .userConfirmed
                 )],
-                mode: .manual
+                mode: .manual,
+                ruleVersion: ruleVersionProvider()
             )
             sessions.append(session)
         }
@@ -469,6 +497,18 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public var currentProject: FocusProjectContext? {
         lock.lock(); defer { lock.unlock() }
         return sessions.first(where: \.isOpen)?.project
+    }
+
+    /// Returns the evidence record for a specific session, if available.
+    public func evidence(for sessionID: UUID) -> FocusSessionEvidence? {
+        lock.lock(); defer { lock.unlock() }
+        return evidenceBySessionID[sessionID]
+    }
+
+    /// Returns all evidence records currently held by the engine.
+    public var allEvidence: [UUID: FocusSessionEvidence] {
+        lock.lock(); defer { lock.unlock() }
+        return evidenceBySessionID
     }
 
     public func derivedSnapshot(now: Date? = nil) -> FocusSessionDerivedSnapshot {
@@ -681,13 +721,16 @@ public final class FocusSessionEngine: @unchecked Sendable {
             )
         }
         markConfirmedSessions(in: &restored, revision: nextRevision)
-        guard saveSessions(restored, revision: nextArchiveRevision) else {
+        let evidence = generateEvidenceForSessions(restored)
+        guard saveSessions(restored, revision: nextArchiveRevision, evidence: evidence) else {
             lock.unlock()
             return .rejected(.persistenceFailed)
         }
         let update = historyCache.apply(historyChanges(from: sessions, to: restored))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = restored
+        evidenceBySessionID = evidence
+        evidenceArchiveRevision += 1
         lastEditUndo = nil
         committedRevision += 1
         confirmedRevision = nextRevision
@@ -729,7 +772,9 @@ private extension FocusSessionEngine {
             return .persistenceFailed
         }
         let nextArchiveRevision = archiveRevision + 1
-        guard saveSessions(working, revision: nextArchiveRevision) else {
+        let nextEvidenceRevision = evidenceArchiveRevision + 1
+        let evidence = generateEvidenceForSessions(working)
+        guard saveSessions(working, revision: nextArchiveRevision, evidence: evidence) else {
             // Retain the prior session archive and history cache together.
             lock.unlock()
             return .persistenceFailed
@@ -737,6 +782,8 @@ private extension FocusSessionEngine {
         let update = historyCache.apply(historyChanges(from: previous, to: working))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
+        evidenceBySessionID = evidence
+        evidenceArchiveRevision = nextEvidenceRevision
         archiveRevision = nextArchiveRevision
         committedRevision += 1
         let history = update.affectedDayIdentifiers.isEmpty
@@ -817,13 +864,16 @@ private extension FocusSessionEngine {
         markConfirmedSessions(in: &working, revision: nextRevision)
         guard validate(working) else { lock.unlock(); return .rejected(.overlappingSession) }
         guard working != previous else { lock.unlock(); return .rejected(.invalidTimeRange) }
-        guard saveSessions(working, revision: nextArchiveRevision) else {
+        let evidence = generateEvidenceForSessions(working)
+        guard saveSessions(working, revision: nextArchiveRevision, evidence: evidence) else {
             lock.unlock()
             return .rejected(.persistenceFailed)
         }
         let update = historyCache.apply(historyChanges(from: previous, to: working))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
+        evidenceBySessionID = evidence
+        evidenceArchiveRevision += 1
         lastEditUndo = previous
         pendingSwitch = nil
         committedRevision += 1
@@ -878,7 +928,8 @@ private extension FocusSessionEngine {
         sessions: [FocusSession],
         revision: Int64,
         source: FocusHistorySource,
-        historyCompleteness: FocusSessionArchiveCompleteness
+        historyCompleteness: FocusSessionArchiveCompleteness,
+        evidence: [UUID: FocusSessionEvidence]
     ) {
         guard let archiveStore = persisting as? any FocusSessionArchivePersisting else {
             let sessions = persisting.load() ?? []
@@ -887,26 +938,30 @@ private extension FocusSessionEngine {
                     sessions: [],
                     revision: 0,
                     source: FocusHistorySource(health: .unavailable),
-                    historyCompleteness: .partialRecovery
+                    historyCompleteness: .partialRecovery,
+                    evidence: [:]
                 )
             }
             return (
                 sessions: sessions,
                 revision: 0,
                 source: FocusHistorySource(health: .available),
-                historyCompleteness: .complete
+                historyCompleteness: .complete,
+                evidence: [:]
             )
         }
 
         let result = archiveStore.loadArchive()
         if let archive = result.archive, archive.isSemanticallyValid {
+            let evidence = archive.evidenceArchive?.evidenceBySessionID ?? [:]
             return (
                 sessions: archive.sessions,
                 revision: archive.revision,
                 source: FocusHistorySource(
                     health: archive.historyCompleteness == .complete ? .available : .partial
                 ),
-                historyCompleteness: archive.historyCompleteness
+                historyCompleteness: archive.historyCompleteness,
+                evidence: evidence
             )
         }
         switch result.health {
@@ -915,32 +970,62 @@ private extension FocusSessionEngine {
                 sessions: [],
                 revision: 0,
                 source: FocusHistorySource(health: .unavailable),
-                historyCompleteness: .partialRecovery
+                historyCompleteness: .partialRecovery,
+                evidence: [:]
             )
         case .missing, .available, .recoveredFromBackup:
             return (
                 sessions: [],
                 revision: 0,
                 source: FocusHistorySource(health: .available),
-                historyCompleteness: .complete
+                historyCompleteness: .complete,
+                evidence: [:]
             )
         }
     }
 
-    func saveSessions(_ sessions: [FocusSession], revision: Int64) -> Bool {
+    func saveSessions(_ sessions: [FocusSession], revision: Int64, evidence: [UUID: FocusSessionEvidence]) -> Bool {
         guard revision >= 0 else { return false }
         if let archiveStore = persisting as? any FocusSessionArchivePersisting {
+            let evidenceArchive = evidence.isEmpty ? nil : FocusSessionEvidenceArchive(
+                revision: evidenceArchiveRevision,
+                evidenceBySessionID: evidence
+            )
             return archiveStore.saveArchive(
                 FocusSessionArchive(
                     revision: revision,
                     sessions: sessions,
                     historyCompleteness: historySource.health == .available
                         ? archiveHistoryCompleteness
-                        : .partialRecovery
+                        : .partialRecovery,
+                    evidenceArchive: evidenceArchive
                 )
             )
         }
         return persisting.save(sessions)
+    }
+
+    /// Generates deterministic evidence for all sessions that have decision events.
+    /// This is called after every mutation to keep evidence in sync.
+    func generateEvidenceForSessions(_ sessions: [FocusSession]) -> [UUID: FocusSessionEvidence] {
+        var result: [UUID: FocusSessionEvidence] = [:]
+        for session in sessions {
+            guard let events = session.decisionEvents, !events.isEmpty else {
+                // Legacy sessions without decision events get no evidence.
+                continue
+            }
+            let input = FocusSessionEvidenceInput(
+                session: session,
+                attributedViaForegroundApp: true,
+                attributedViaGitActivity: false,
+                redactedForegroundAppID: nil,
+                redactedRepoIdentifier: nil
+            )
+            if let evidence = FocusSessionEvidenceEngine.generateEvidence(for: input) {
+                result[evidence.sessionID] = evidence
+            }
+        }
+        return result
     }
 
     func historyChanges(
@@ -1042,7 +1127,8 @@ private extension FocusSessionEngine {
                 reason: reason,
                 source: mode == .manual ? .userConfirmed : .automatic
             )],
-            mode: mode
+            mode: mode,
+            ruleVersion: ruleVersionProvider()
         )
         sessions.append(session)
     }
@@ -1260,7 +1346,10 @@ private extension FocusSessionEngine {
         guard !sessions.isEmpty else { return true }
         guard archiveRevision < Int64.max else { return false }
         let nextRevision = archiveRevision + 1
-        guard saveSessions(sessions, revision: nextRevision) else { return false }
+        let evidence = generateEvidenceForSessions(sessions)
+        guard saveSessions(sessions, revision: nextRevision, evidence: evidence) else { return false }
+        evidenceBySessionID = evidence
+        evidenceArchiveRevision += 1
         archiveRevision = nextRevision
         committedRevision += 1
         return true

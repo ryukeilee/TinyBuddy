@@ -29,6 +29,12 @@ struct FocusSessionReviewView: View {
         return sessions.first { $0.id == id }
     }
 
+    /// Evidence for the selected session, loaded from the engine.
+    private var selectedEvidence: FocusSessionEvidence? {
+        guard let id = selectedSession?.id, let engine else { return nil }
+        return engine.evidence(for: id)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("专注记录复核")
@@ -251,11 +257,17 @@ struct FocusSessionReviewView: View {
     private func sourceExplanation(_ session: FocusSession) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             LabeledContent("数据来源", value: authorityLabel(session))
+            // Evidence details (schema v2+)
+            if let evidence = selectedEvidence {
+                evidenceSection(evidence)
+            }
+            // Decision events (always shown when available)
             if let events = session.decisionEvents, !events.isEmpty {
-                ForEach(events.sorted { lhs, rhs in
+                let sortedEvents = events.sorted { lhs, rhs in
                     if lhs.at != rhs.at { return lhs.at < rhs.at }
                     return lhs.id.uuidString < rhs.id.uuidString
-                }) { event in
+                }
+                ForEach(sortedEvents) { event in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(event.at.formatted(date: .omitted, time: .shortened))
                             .font(.caption.monospacedDigit())
@@ -279,6 +291,106 @@ struct FocusSessionReviewView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func evidenceSection(_ evidence: FocusSessionEvidence) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Confidence badge
+            HStack(spacing: 4) {
+                Image(systemName: confidenceIcon(evidence.confidence))
+                    .foregroundStyle(confidenceColor(evidence.confidence))
+                Text(confidenceLabel(evidence.confidence))
+                    .font(.caption.weight(.medium))
+            }
+            .padding(.vertical, 2)
+
+            // Project attribution
+            LabeledContent("归属依据", value: evidence.projectAttribution.explanation)
+                .font(.caption)
+
+            // Attribution source
+            LabeledContent("归属方式", value: sourceLabel(evidence.projectAttribution.source))
+                .font(.caption)
+
+            // Rule version
+            LabeledContent("规则版本", value: "v\(evidence.ruleVersion.major).\(evidence.ruleVersion.minor)")
+                .font(.caption)
+
+            // Caveat (low confidence reason)
+            if let caveat = evidence.projectAttribution.caveat {
+                Label(caveat, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            // Detailed decision explanations
+            if !evidence.decisionExplanations.isEmpty {
+                Divider()
+                Text("决策详情")
+                    .font(.caption.weight(.semibold))
+                ForEach(evidence.decisionExplanations) { explanation in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(explanation.at.formatted(date: .omitted, time: .shortened))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 52, alignment: .leading)
+                        Text(explanation.explanation)
+                            .font(.caption)
+                        Spacer(minLength: 4)
+                        confidenceBadge(explanation.confidence)
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(confidenceColor(evidence.confidence).opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    private func confidenceIcon(_ confidence: FocusSessionEvidenceConfidence) -> String {
+        switch confidence {
+        case .high: return "checkmark.shield"
+        case .low: return "exclamationmark.shield"
+        case .pending: return "questionmark.shield"
+        }
+    }
+
+    private func confidenceColor(_ confidence: FocusSessionEvidenceConfidence) -> Color {
+        switch confidence {
+        case .high: return .green
+        case .low: return .orange
+        case .pending: return .secondary
+        }
+    }
+
+    private func confidenceLabel(_ confidence: FocusSessionEvidenceConfidence) -> String {
+        switch confidence {
+        case .high: return "高置信度 — 有明确证据支持"
+        case .low: return "低置信度 — 依据部分或间接证据"
+        case .pending: return "待确认 — 证据不足以确定归属"
+        }
+    }
+
+    @ViewBuilder
+    private func confidenceBadge(_ confidence: FocusSessionEvidenceConfidence) -> some View {
+        switch confidence {
+        case .high:
+            Text("确定").font(.caption2).foregroundStyle(.green)
+        case .low:
+            Text("存疑").font(.caption2).foregroundStyle(.orange)
+        case .pending:
+            Text("待定").font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private func sourceLabel(_ source: FocusSessionAttributionSource) -> String {
+        switch source {
+        case .foregroundApp: return "前段应用关联"
+        case .gitActivity: return "Git 活动关联"
+        case .manual: return "用户手动选择"
+        case .unknown: return "未知"
         }
     }
 

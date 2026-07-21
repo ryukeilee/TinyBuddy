@@ -22,7 +22,9 @@ public enum FocusSessionArchiveCompleteness: String, Codable, Equatable, Sendabl
 /// legacy bare-array format. Revisions are intentionally independent from a
 /// session's optional `manualRevision` field.
 public struct FocusSessionArchive: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    /// Schema version 3 adds `ruleVersion` to `FocusSession` and supports
+    /// rule-based session attribution tracking.
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public let revision: Int64
@@ -31,17 +33,23 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
     /// persists `.partialRecovery`, preventing a later restart from silently
     /// turning potentially missing records into trusted zeros.
     public let historyCompleteness: FocusSessionArchiveCompleteness
+    /// Evidence archive carried alongside sessions. `nil` for archives that
+    /// predate evidence tracking. Evidence is always present for sessions
+    /// created or modified by schema v2+ engines.
+    public let evidenceArchive: FocusSessionEvidenceArchive?
 
     public init(
         schemaVersion: Int = FocusSessionArchive.currentSchemaVersion,
         revision: Int64 = 0,
         sessions: [FocusSession],
-        historyCompleteness: FocusSessionArchiveCompleteness = .complete
+        historyCompleteness: FocusSessionArchiveCompleteness = .complete,
+        evidenceArchive: FocusSessionEvidenceArchive? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.revision = revision
         self.sessions = sessions
         self.historyCompleteness = historyCompleteness
+        self.evidenceArchive = evidenceArchive
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -49,6 +57,7 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
         case revision
         case sessions
         case historyCompleteness
+        case evidenceArchive
     }
 
     public init(from decoder: Decoder) throws {
@@ -60,6 +69,10 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
             FocusSessionArchiveCompleteness.self,
             forKey: .historyCompleteness
         ) ?? .complete
+        evidenceArchive = try container.decodeIfPresent(
+            FocusSessionEvidenceArchive.self,
+            forKey: .evidenceArchive
+        )
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -68,6 +81,7 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
         try container.encode(revision, forKey: .revision)
         try container.encode(sessions, forKey: .sessions)
         try container.encode(historyCompleteness, forKey: .historyCompleteness)
+        try container.encodeIfPresent(evidenceArchive, forKey: .evidenceArchive)
     }
 
     /// Decoding JSON proves only its syntax. This check protects history

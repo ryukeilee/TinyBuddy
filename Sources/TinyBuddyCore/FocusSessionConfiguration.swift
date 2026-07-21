@@ -2,7 +2,7 @@ import Foundation
 
 /// Tunable thresholds for focus-session determination. Defaults target a macOS
 /// desktop coding session; they can be shrunk for tests.
-public struct FocusSessionConfiguration: Sendable {
+public struct FocusSessionConfiguration: Equatable, Sendable {
     /// Continuous user-idle time that auto-pauses the running session.
     public var idleThreshold: TimeInterval
     /// If the user returns to the original project within this window, the away

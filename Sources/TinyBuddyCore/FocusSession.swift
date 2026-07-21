@@ -154,11 +154,15 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
     /// automatic detection and must use the explicit manual-control API.
     /// Defaults to `.automatic` for legacy records.
     public var mode: FocusMode
+    /// The rule version that produced this session. `nil` for legacy records
+    /// that predate rule version tracking, or for manually created sessions
+    /// that bypassed the rule engine entirely.
+    public var ruleVersion: FocusSessionRuleVersion?
 
     private enum CodingKeys: String, CodingKey {
         case id, project, dayIdentifier, startedAt, endedAt, status
         case lastUserActivityAt, lastStateChangeAt, pausedTotal, currentPauseStartedAt
-        case isManuallyConfirmed, manualRevision, decisionEvents, mode
+        case isManuallyConfirmed, manualRevision, decisionEvents, mode, ruleVersion
     }
 
     public init(from decoder: Decoder) throws {
@@ -177,6 +181,7 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         manualRevision = try container.decodeIfPresent(Int64.self, forKey: .manualRevision)
         decisionEvents = try container.decodeIfPresent([FocusSessionDecisionEvent].self, forKey: .decisionEvents)
         mode = try container.decodeIfPresent(FocusMode.self, forKey: .mode) ?? .automatic
+        ruleVersion = try container.decodeIfPresent(FocusSessionRuleVersion.self, forKey: .ruleVersion)
     }
 
     public init(
@@ -193,7 +198,8 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         isManuallyConfirmed: Bool = false,
         manualRevision: Int64? = nil,
         decisionEvents: [FocusSessionDecisionEvent]? = nil,
-        mode: FocusMode = .automatic
+        mode: FocusMode = .automatic,
+        ruleVersion: FocusSessionRuleVersion? = nil
     ) {
         self.id = id
         self.project = project
@@ -209,6 +215,7 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         self.manualRevision = manualRevision
         self.decisionEvents = decisionEvents
         self.mode = mode
+        self.ruleVersion = ruleVersion
     }
 
     /// Time during which this session is NOT counting toward focus:

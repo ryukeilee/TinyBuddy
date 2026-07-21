@@ -1,7 +1,7 @@
 import Foundation
 
 /// Policy decisions for attributing user activity to a focus project.
-public struct FocusAttributionPolicy: Sendable {
+public struct FocusAttributionPolicy: Equatable, Sendable {
     /// How long a git activity remains attributable after it was last seen.
     /// `nil` means git activities never expire.
     public var gitAttributionWindow: TimeInterval?
