@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// Abstraction over focus session persistence so the engine can be tested with
 /// an in-memory store.
@@ -192,15 +193,19 @@ public final class FocusSessionFileStore: FocusSessionArchivePersisting {
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let quarantine: TinyBuddyCorruptedRecordQuarantine?
+    private let logger = Logger(subsystem: "local.tinybuddy", category: "FocusSessionFileStore")
 
     public init(
         fileURL: URL,
         encoder: JSONEncoder = JSONEncoder(),
-        decoder: JSONDecoder = JSONDecoder()
+        decoder: JSONDecoder = JSONDecoder(),
+        quarantine: TinyBuddyCorruptedRecordQuarantine? = nil
     ) {
         self.fileURL = fileURL
         self.encoder = encoder
         self.decoder = decoder
+        self.quarantine = quarantine
     }
 
     /// Compatibility load API. Both an absent and an unrecoverable corrupt
@@ -214,12 +219,90 @@ public final class FocusSessionFileStore: FocusSessionArchivePersisting {
         let primary = readArchive(at: fileURL)
         switch primary {
         case .valid(let archive, let format):
-            return FocusSessionArchiveLoadResult(health: .available, archive: archive, format: format)
+            return validateAndCleanArchive(archive, format: format)
         case .missing:
             return recoverFromBackupIfPossible(primaryWasCorrupt: false)
         case .corrupt:
             return recoverFromBackupIfPossible(primaryWasCorrupt: true)
         }
+    }
+
+    /// Validates the loaded archive using `TinyBuddyDataValidator` and isolates
+    /// sessions affected by critical invariant violations via the quarantine
+    /// store. Returns an archive containing only the valid sessions.
+    private func validateAndCleanArchive(
+        _ archive: FocusSessionArchive,
+        format: FocusSessionArchiveFormat
+    ) -> FocusSessionArchiveLoadResult {
+        let violations = TinyBuddyDataValidator.validateFocusSessions(archive.sessions)
+
+        guard !violations.isEmpty else {
+            return FocusSessionArchiveLoadResult(health: .available, archive: archive, format: format)
+        }
+
+        let criticalViolations = violations.filter { $0.severity == .critical }
+        let errors = violations.filter { $0.severity == .error }
+        let warnings = violations.filter { $0.severity == .warning }
+
+        logger.debug("Archive validation: \(violations.count) violation(s) (\(criticalViolations.count) critical, \(errors.count) error(s), \(warnings.count) warning(s))")
+
+        for violation in violations {
+            logger.debug("[\(violation.severity.rawValue, privacy: .public)] \(violation.description, privacy: .public)")
+        }
+
+        // Isolate sessions affected by critical violations
+        if !criticalViolations.isEmpty, let quarantine {
+            var affectedSessionIDs = Set<UUID>()
+
+            for violation in criticalViolations {
+                for idString in violation.affectedIdentifiers {
+                    if let uuid = UUID(uuidString: idString),
+                       archive.sessions.contains(where: { $0.id == uuid }) {
+                        affectedSessionIDs.insert(uuid)
+                    }
+                }
+            }
+
+            // Remove quarantined sessions from the archive
+            let cleanSessions = archive.sessions.filter { !affectedSessionIDs.contains($0.id) }
+
+            // Isolate each corrupted session in the quarantine store
+            for sessionID in affectedSessionIDs {
+                let sessionViolations = criticalViolations.filter {
+                    $0.affectedIdentifiers.contains(sessionID.uuidString)
+                }
+                for violation in sessionViolations {
+                    quarantine.isolate(
+                        domain: .focusSession,
+                        violationKind: violation.kind,
+                        redactedOriginalData: "session_id=\(sessionID.uuidString)",
+                        diagnosticKey: violation.diagnosticKey
+                    )
+                }
+            }
+
+            logger.debug("Quarantined \(affectedSessionIDs.count) session(s), cleaned archive has \(cleanSessions.count) session(s)")
+
+            let cleanedArchive = FocusSessionArchive(
+                schemaVersion: archive.schemaVersion,
+                revision: archive.revision,
+                sessions: cleanSessions,
+                historyCompleteness: archive.historyCompleteness
+            )
+
+            return FocusSessionArchiveLoadResult(
+                health: .available,
+                archive: cleanedArchive,
+                format: format
+            )
+        }
+
+        // Non-critical violations only, or no quarantine configured — return as-is
+        return FocusSessionArchiveLoadResult(
+            health: .available,
+            archive: archive,
+            format: format
+        )
     }
 
     /// Saves a current-schema envelope. Invalid schema versions and negative

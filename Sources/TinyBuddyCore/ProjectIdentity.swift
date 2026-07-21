@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 public struct TinyBuddyProjectID: RawRepresentable, Codable, Hashable, Sendable, Comparable {
     public let rawValue: String
@@ -179,10 +180,28 @@ public final class TinyBuddyProjectRegistryFileStore: TinyBuddyProjectRegistryPe
         fileURL.appendingPathExtension("bak")
     }
 
+    private let logger = Logger(
+        subsystem: "local.tinybuddy",
+        category: "TinyBuddyProjectRegistryFileStore"
+    )
+
     private func read(_ url: URL) -> TinyBuddyProjectRegistrySnapshot? {
         guard let data = try? Data(contentsOf: url),
               let snapshot = try? decoder.decode(TinyBuddyProjectRegistrySnapshot.self, from: data),
               snapshot.isSemanticallyValid else { return nil }
+        // Additional diagnostic validation via unified validator
+        let violations = TinyBuddyDataValidator.validateProjectRegistry(snapshot)
+        if !violations.isEmpty {
+            let criticalCount = violations.filter { $0.severity == .critical }.count
+            let errorCount = violations.filter { $0.severity == .error }.count
+            let warningCount = violations.filter { $0.severity == .warning }.count
+            logger.debug(
+                "Project registry validation: \(criticalCount) critical, \(errorCount) errors, \(warningCount) warnings"
+            )
+            for violation in violations where violation.severity == .critical {
+                logger.debug("  [CRITICAL] \(violation.description, privacy: .public)")
+            }
+        }
         return snapshot
     }
 }

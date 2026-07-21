@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 public final class DailyStatsStore {
     private enum Key {
@@ -9,6 +10,7 @@ public final class DailyStatsStore {
         static let currentStatusDayIdentifier = "tinybuddy.currentStatus.dayIdentifier"
     }
 
+    private let logger = Logger(subsystem: "local.tinybuddy", category: "DailyStatsStore")
     private let userDefaults: UserDefaults
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let combinedSnapshotStoreFactory: () -> TinyBuddyCombinedSnapshotStore
@@ -91,16 +93,33 @@ public final class DailyStatsStore {
             return save(DailyStats(dayIdentifier: today, focusCount: 0, completionCount: 0))
         }
 
-        return DailyStats(
+        let loadedStats = DailyStats(
             dayIdentifier: today,
             focusCount: max(0, userDefaults.integer(forKey: Key.focusCount)),
             completionCount: max(0, userDefaults.integer(forKey: Key.completionCount))
+        )
+
+        let violations = TinyBuddyDataValidator.validateDailyStats(loadedStats, previousStats: loadLastValidStats())
+        for v in violations {
+            logger.debug("\(v.description, privacy: .public)")
+        }
+
+        return DailyStats(
+            dayIdentifier: loadedStats.dayIdentifier,
+            focusCount: max(0, loadedStats.focusCount),
+            completionCount: max(0, loadedStats.completionCount)
         )
     }
 
     @discardableResult
     public func recordFocusStarted() -> DailyStats {
         var stats = loadToday()
+
+        let violations = TinyBuddyDataValidator.validateDailyStats(stats, previousStats: loadLastValidStats())
+        for v in violations {
+            logger.debug("\(v.description, privacy: .public)")
+        }
+
         guard timeEnvironment.capture()?.dayIdentifier == stats.dayIdentifier else {
             return stats
         }
@@ -122,6 +141,12 @@ public final class DailyStatsStore {
     @discardableResult
     public func recordCompletion() -> DailyStats {
         var stats = loadToday()
+
+        let violations = TinyBuddyDataValidator.validateDailyStats(stats, previousStats: loadLastValidStats())
+        for v in violations {
+            logger.debug("\(v.description, privacy: .public)")
+        }
+
         guard timeEnvironment.capture()?.dayIdentifier == stats.dayIdentifier else {
             return stats
         }
@@ -174,6 +199,19 @@ public final class DailyStatsStore {
             return loadLastValidStats()
                 ?? DailyStats(dayIdentifier: "1970-01-01", focusCount: 0, completionCount: 0)
         }
+
+        // Validate before persisting
+        let violations = TinyBuddyDataValidator.validateDailyStats(stats, previousStats: loadLastValidStats())
+        for v in violations {
+            logger.debug("\(v.description, privacy: .public)")
+        }
+
+        // If day identifier rolled back, preserve previous valid stats
+        if let previous = loadLastValidStats(), previous.dayIdentifier > stats.dayIdentifier {
+            logger.debug("Day rollback detected: '\(stats.dayIdentifier, privacy: .public)' preserved '\(previous.dayIdentifier, privacy: .public)'")
+            return previous
+        }
+
         userDefaults.set(stats.dayIdentifier, forKey: Key.dayIdentifier)
         userDefaults.set(max(0, stats.focusCount), forKey: Key.focusCount)
         userDefaults.set(max(0, stats.completionCount), forKey: Key.completionCount)

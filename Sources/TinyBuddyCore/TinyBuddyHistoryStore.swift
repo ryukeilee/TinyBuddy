@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// Retention policy for historical daily snapshot archives.
 public struct TinyBuddyHistoryRetentionPolicy: Sendable, Equatable {
@@ -85,6 +86,7 @@ public final class TinyBuddyHistoryStore {
     private static let lock = NSLock()
     private static let snapshotFileExtension = "snapshot"
     private static let cleanupMarkerFile = ".cleanup-in-progress"
+    private let logger = Logger(subsystem: "local.tinybuddy", category: "TinyBuddyHistoryStore")
 
     public convenience init(
         retentionPolicy: TinyBuddyHistoryRetentionPolicy = .default
@@ -126,8 +128,25 @@ public final class TinyBuddyHistoryStore {
         Self.lock.lock()
         defer { Self.lock.unlock() }
 
-        guard TinyBuddyTimeContext.isValidDayIdentifier(snapshot.dayIdentifier),
-              let encoded = snapshotEncoder(snapshot),
+        guard TinyBuddyTimeContext.isValidDayIdentifier(snapshot.dayIdentifier) else {
+            return nil
+        }
+
+        // Validate before archiving — reject snapshots with critical violations.
+        let violations = TinyBuddyDataValidator.validateCombinedSnapshot(snapshot)
+        let criticalViolations = violations.filter { $0.severity == .critical }
+        if !criticalViolations.isEmpty {
+            logger.debug("archiveSnapshot(\(snapshot.dayIdentifier, privacy: .public)): rejected — \(criticalViolations.count) critical violation(s)")
+            for v in criticalViolations {
+                logger.debug("[critical] \(v.description, privacy: .public)")
+            }
+            return nil
+        }
+        if !violations.isEmpty {
+            logger.debug("archiveSnapshot(\(snapshot.dayIdentifier, privacy: .public)): \(violations.count) non-critical violation(s)")
+        }
+
+        guard let encoded = snapshotEncoder(snapshot),
               let directoryURL = historyDirectoryURL else {
             return nil
         }
@@ -167,6 +186,19 @@ public final class TinyBuddyHistoryStore {
         guard let data = try? Data(contentsOf: fileURL),
               let encoded = String(data: data, encoding: .utf8),
               let snapshot = snapshotDecoder(encoded) else {
+            return .corrupt
+        }
+
+        // Validate decoded snapshot for invariant violations.
+        let violations = TinyBuddyDataValidator.validateCombinedSnapshot(snapshot)
+        let criticalViolations = violations.filter { $0.severity == .critical }
+        if !violations.isEmpty {
+            logger.debug("readSnapshot(\(dayIdentifier, privacy: .public)): \(violations.count) violation(s) (\(criticalViolations.count) critical)")
+            for violation in violations {
+                logger.debug("[\(violation.severity.rawValue, privacy: .public)] \(violation.description, privacy: .public)")
+            }
+        }
+        if !criticalViolations.isEmpty {
             return .corrupt
         }
 

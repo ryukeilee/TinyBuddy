@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 public struct TinyBuddyCombinedSnapshot: Equatable, Sendable {
     public let revision: Int64
@@ -178,6 +179,10 @@ public final class TinyBuddyCombinedSnapshotStore {
     // and repair within that single process. WidgetKit uses repairOnLoad=false
     // and stays read-only; it never writes through this store.
     private static let writerLock = NSLock()
+    private static let logger = Logger(
+        subsystem: "local.tinybuddy",
+        category: "TinyBuddyCombinedSnapshotStore"
+    )
 
     // Write-failure cooldown prevents pointless retries when storage is full or
     // the preference domain is unavailable. After maxWriteFailuresBeforeCooldown
@@ -332,13 +337,17 @@ public final class TinyBuddyCombinedSnapshotStore {
     public func load() -> TinyBuddyCombinedSnapshot? {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
-        return readStateLocked(repair: repairOnLoad).snapshot
+        let snapshot = readStateLocked(repair: repairOnLoad).snapshot
+        guard validateSnapshot(snapshot) else { return nil }
+        return snapshot
     }
 
     public func loadReadOnly() -> TinyBuddyCombinedSnapshot? {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
-        return readStateLocked(repair: false).snapshot
+        let snapshot = readStateLocked(repair: false).snapshot
+        guard validateSnapshot(snapshot) else { return nil }
+        return snapshot
     }
 
     /// Returns the last valid snapshot only when doing so cannot move the
@@ -358,6 +367,7 @@ public final class TinyBuddyCombinedSnapshotStore {
               snapshot.dayIdentifier >= minimumDayIdentifier else {
             return nil
         }
+        guard validateSnapshot(snapshot) else { return nil }
         return snapshot
     }
 
@@ -462,6 +472,16 @@ public final class TinyBuddyCombinedSnapshotStore {
             )
         }
         if let secondSnapshot {
+            guard validateSnapshot(secondSnapshot) else {
+                return TinyBuddyValidatedCombinedSnapshotRead(
+                    snapshot: nil,
+                    observation: observation(
+                        reason: .snapshotCorrupt,
+                        recovery: .stopped,
+                        attemptCount: 2
+                    )
+                )
+            }
             return TinyBuddyValidatedCombinedSnapshotRead(
                 snapshot: secondSnapshot,
                 observation: observation(
@@ -1149,6 +1169,16 @@ public final class TinyBuddyCombinedSnapshotStore {
                 snapshot: nil,
                 observation: observation(
                     reason: .staleData,
+                    recovery: .stopped,
+                    attemptCount: attemptCount
+                )
+            )
+        }
+        if let safe, !validateSnapshot(safe) {
+            return TinyBuddyValidatedCombinedSnapshotRead(
+                snapshot: nil,
+                observation: observation(
+                    reason: .snapshotCorrupt,
                     recovery: .stopped,
                     attemptCount: attemptCount
                 )
@@ -1870,6 +1900,10 @@ public final class TinyBuddyCombinedSnapshotStore {
             focusHistoryPublication: retainedFocusHistoryPublication
         ))
 
+        guard validateSnapshot(combinedSnapshot) else {
+            return failureResult(current: current)
+        }
+
         guard let directSource = sourceValues().first,
               ensureCurrentSchemaLocked(directSource: directSource) else {
             return failureResult(current: current)
@@ -1918,6 +1952,26 @@ public final class TinyBuddyCombinedSnapshotStore {
         repairAncillaryCopiesLocked(combinedSnapshot)
 
         return UpdateResult(snapshot: combinedSnapshot, outcome: .saved, didPersist: true)
+    }
+
+    /// Validates a combined snapshot using `TinyBuddyDataValidator`. Logs all
+    /// violations. Returns `false` when critical violations exist (caller should
+    /// reject the snapshot). Returns `true` for nil snapshots (nothing to check).
+    private func validateSnapshot(_ snapshot: TinyBuddyCombinedSnapshot?) -> Bool {
+        guard let snapshot else { return true }
+        let violations = TinyBuddyDataValidator.validateCombinedSnapshot(snapshot)
+        guard !violations.isEmpty else { return true }
+
+        let criticalCount = violations.filter { $0.severity == .critical }.count
+        Self.logger.debug(
+            "\(violations.count) data invariant violation(s) (\(criticalCount) critical)"
+        )
+        for v in violations {
+            Self.logger.debug(
+                "[\(v.severity.rawValue, privacy: .public)] \(v.description, privacy: .public)"
+            )
+        }
+        return criticalCount == 0
     }
 
     private func failureResult(current: TinyBuddyCombinedSnapshot?) -> UpdateResult {
