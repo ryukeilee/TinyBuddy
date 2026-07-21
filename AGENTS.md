@@ -76,6 +76,28 @@ Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-fa
 - Reject diagnostics that expose repository paths, user data, credentials, or unstable raw identifiers. Confirm new shell commands and their indirect dependencies are allowed by the signed runtime boundary.
 - Require relevant regression coverage and exact validation evidence. Do not accept weakened assertions, hidden failures, or an unrelated refactor bundled with the fix.
 
+## Delegation to Subagents
+
+### When to delegate (high-confidence, low-friction)
+
+- **Single-file changes with a reference pattern in the same file or module.** Example: adding tests to an existing test class, following the style of the surrounding tests. Worker can read the reference, produce matching code, and run `swift test --filter <TestClass>` to self-verify.
+- **Read-only exploration.** Dispatch `explorer` for cross-module searches, dependency tracing, or gathering evidence across multiple files. Explorer has no side effects and the returned report is consumed once.
+- **Fill-in implementation after Root has frozen the API signature.** Root writes the protocol/type definition and one canonical implementation first, then delegates parallel copies (additional test cases, widget view variants, similar store adapters).
+
+### When NOT to delegate (Root does it directly)
+
+- **Cross-module changes that propagate type definitions.** Changing a field in `FocusSession` → updating engine validation → fixing codable fallback → adjusting 3 test files. The propagation chain is serial; parallel workers produce merge conflicts.
+- **New API or state machine design.** Worker lacks the full context of all consumers (HUD, Widget, menu bar, persistence) and will produce a locally-correct design that breaks integration.
+- **No self-verification path.** If the worker cannot run a decisive test or build to validate its own output, the cost of Root re-verifying and debugging exceeds direct implementation.
+
+### Task packet minimum
+
+When delegating, include: exact file path(s), a reference example (line range or function name), the expected verifier command, and the exact return format. Omit: full conversation history, unrelated project context, long raw logs.
+
+### Empirical baseline (2026-07-21)
+
+Worker one-shot success rate on single-file pattern-following tasks in this repo: **1/1 (100%)**. This covers XCTest additions following existing test patterns with `swift test --filter` as the verifier. No data yet on UI view implementations, store adapters, or multi-file tasks.
+
 ## Commit & Pull Request Guidelines
 
 Use short imperative commit subjects, matching the existing history style, such as `Verify release signing and widget registration`, `Add daily stats widget state`, or `Fix session persistence reset`. Pull requests should describe the user-visible behavior change, list the exact validation performed, note any signing or widget-specific verification, link related issues when available, and include screenshots only when the change is meaningfully visual.
