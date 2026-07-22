@@ -51,7 +51,9 @@
 		72C0AA9B7968FD23964ABD2D /* TinyBuddyTimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A3AFDC9C7B18C5496FDC4F2 /* TinyBuddyTimeEnvironment.swift */; };
 		7465C050F0D7FC469B84599C /* FocusSessionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E65DF4A3C743CEBA4F251955 /* FocusSessionEngine.swift */; };
 		770F76C21A74AC083D2B392A /* TinyBuddyWidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */; };
+		7943B127C74B840773F13CCF /* TinyBuddyTransactionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FE271908BF77E06439CD141 /* TinyBuddyTransactionCoordinator.swift */; };
 		7A711448682D280C4087C212 /* HUDWindowPositionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF61E1296ACEBF5E046FE9BC /* HUDWindowPositionController.swift */; };
+		7B80AE4F81FF40EDA92D8E08 /* TinyBuddyTransactionLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4362C69C975766D10F6DC396 /* TinyBuddyTransactionLog.swift */; };
 		809E5F0D06AD3B00ED44C931 /* FocusSessionEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 948ACEA5541D71A9AC84CFCA /* FocusSessionEvidence.swift */; };
 		8AC0469D9BB8F7ED958A9C02 /* DailyStatsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */; };
 		8F69DDB084E9DC2E6A897045 /* TinyBuddyWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE968875BF92D29F31399587 /* TinyBuddyWidget.swift */; };
@@ -153,6 +155,7 @@
 		36B82C6587B4222259145296 /* TinyBuddyPrivacyRedactor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyPrivacyRedactor.swift; sourceTree = "<group>"; };
 		407F72F9E84A576635B0E034 /* TinyBuddyDataValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyDataValidator.swift; sourceTree = "<group>"; };
 		41815B81BAED2AD15F32A336 /* TinyBuddyDataInvariant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyDataInvariant.swift; sourceTree = "<group>"; };
+		4362C69C975766D10F6DC396 /* TinyBuddyTransactionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyTransactionLog.swift; sourceTree = "<group>"; };
 		4378CF590FFCC47D0266D429 /* FocusGoalConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusGoalConfiguration.swift; sourceTree = "<group>"; };
 		4F04634FC6AC3EEBD15D2D2A /* FocusNotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusNotificationManager.swift; sourceTree = "<group>"; };
 		50DB07106220C7851D6FCAE1 /* FocusHistoryAggregation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusHistoryAggregation.swift; sourceTree = "<group>"; };
@@ -176,6 +179,7 @@
 		7DBE6C77E42279D5C576B601 /* FocusHistoryListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusHistoryListView.swift; sourceTree = "<group>"; };
 		7DDCB1D3B981C8D2317455D9 /* GitActivityRefreshStatusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitActivityRefreshStatusStore.swift; sourceTree = "<group>"; };
 		7E3BB0B2A6DCA205FC3E23A1 /* PetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetView.swift; sourceTree = "<group>"; };
+		7FE271908BF77E06439CD141 /* TinyBuddyTransactionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyTransactionCoordinator.swift; sourceTree = "<group>"; };
 		827D60AA48DCEA79FCE594AB /* TinyBuddyDisplayPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyDisplayPresentation.swift; sourceTree = "<group>"; };
 		8284BA7929C187A1757687AE /* ProjectManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectManagementView.swift; sourceTree = "<group>"; };
 		8583569262F912DC0B518C8E /* TinyBuddyAppGroupPreferencesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyAppGroupPreferencesStore.swift; sourceTree = "<group>"; };
@@ -379,6 +383,8 @@
 				580BF2840D1985E0FFF8198E /* TinyBuddySharedSnapshotObservation.swift */,
 				25F1C35932B251EA66E93277 /* TinyBuddyStorageCleanupService.swift */,
 				9A3AFDC9C7B18C5496FDC4F2 /* TinyBuddyTimeEnvironment.swift */,
+				7FE271908BF77E06439CD141 /* TinyBuddyTransactionCoordinator.swift */,
+				4362C69C975766D10F6DC396 /* TinyBuddyTransactionLog.swift */,
 				578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */,
 			);
 			path = TinyBuddyCore;
@@ -644,6 +650,8 @@
 				2843A6CB9249E5D895D87DAF /* TinyBuddySharedSnapshotObservation.swift in Sources */,
 				666183BDF5F6890C30D85C22 /* TinyBuddyStorageCleanupService.swift in Sources */,
 				72C0AA9B7968FD23964ABD2D /* TinyBuddyTimeEnvironment.swift in Sources */,
+				7943B127C74B840773F13CCF /* TinyBuddyTransactionCoordinator.swift in Sources */,
+				7B80AE4F81FF40EDA92D8E08 /* TinyBuddyTransactionLog.swift in Sources */,
 				770F76C21A74AC083D2B392A /* TinyBuddyWidgetPresentation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

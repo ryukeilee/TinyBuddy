@@ -1,6 +1,6 @@
 import Foundation
 
-public final class TinyBuddyConfigStore {
+public final class TinyBuddyConfigStore: @unchecked Sendable {
     public enum Key {
         public static let configPayload = "tinybuddy.appConfig.payload.v1"
         public static let configCommittedVersion = "tinybuddy.appConfig.committedVersion.v1"
