@@ -25,6 +25,7 @@
 		33C3435C57E15942B064BFDE /* TinyBuddyHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0494813761C44C77B9099155 /* TinyBuddyHistoryStore.swift */; };
 		34E170CFEC78EC8611BDD83A /* FocusSessionConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9D6DA131749430D91806308 /* FocusSessionConfiguration.swift */; };
 		36F026DF35A5348262813360 /* GitTodayActivityTrustedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA56754AC9F584945B58E161 /* GitTodayActivityTrustedSnapshotStore.swift */; };
+		3AFA12AF2C6A51FC7D4C42CC /* TinyBuddyCombinedSnapshotMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B92EADAC88E9435D9051841 /* TinyBuddyCombinedSnapshotMigrator.swift */; };
 		3B523B1756B12E368135D889 /* FocusSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70BA79A05D224EE63B9A6784 /* FocusSessionStore.swift */; };
 		3E04251D536919A72317B9A5 /* TinyBuddyInstanceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F84B7DE022ADAF9C86E5AD3 /* TinyBuddyInstanceCoordinator.swift */; };
 		407EDCD3CF74BB4793E8EADF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB4ACB92F9DC222B4FF0EB3D /* SwiftUI.framework */; };
@@ -144,6 +145,7 @@
 		01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayFocusBlockCountStore.swift; sourceTree = "<group>"; };
 		0494813761C44C77B9099155 /* TinyBuddyHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyHistoryStore.swift; sourceTree = "<group>"; };
 		177AF4D25C3F6AD6A73C54E8 /* TinyBuddyResetService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyResetService.swift; sourceTree = "<group>"; };
+		1B92EADAC88E9435D9051841 /* TinyBuddyCombinedSnapshotMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyCombinedSnapshotMigrator.swift; sourceTree = "<group>"; };
 		1ED892A30DA553AB4D2F2EC3 /* TimeEnvironmentChangeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeEnvironmentChangeMonitor.swift; sourceTree = "<group>"; };
 		21D1B761AA734FA499DB7428 /* TinyBuddySharedData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddySharedData.swift; sourceTree = "<group>"; };
 		25F1C35932B251EA66E93277 /* TinyBuddyStorageCleanupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyStorageCleanupService.swift; sourceTree = "<group>"; };
@@ -366,6 +368,7 @@
 				EF9DC48C7477D33FFB9BA8A9 /* TinyBuddyAppConfig.swift */,
 				8583569262F912DC0B518C8E /* TinyBuddyAppGroupPreferencesStore.swift */,
 				F621E187E17E0739A05B14B2 /* TinyBuddyArcReactorCore.swift */,
+				1B92EADAC88E9435D9051841 /* TinyBuddyCombinedSnapshotMigrator.swift */,
 				876BF9E3494E8DAA5CE1FFD8 /* TinyBuddyCombinedSnapshotStore.swift */,
 				C42D8241B1F42D0916D8FB70 /* TinyBuddyConfigStore.swift */,
 				2697A2C9FEB769C60B83FD66 /* TinyBuddyCorruptedRecordQuarantine.swift */,
@@ -633,6 +636,7 @@
 				1A8A87D0FDED2ED88EEF5F2D /* TinyBuddyAppConfig.swift in Sources */,
 				CFBBB584FCAF298FBB95DE04 /* TinyBuddyAppGroupPreferencesStore.swift in Sources */,
 				C3753687BCDB329534ED24B5 /* TinyBuddyArcReactorCore.swift in Sources */,
+				3AFA12AF2C6A51FC7D4C42CC /* TinyBuddyCombinedSnapshotMigrator.swift in Sources */,
 				FBDA6882DEF17849CDBAA5EE /* TinyBuddyCombinedSnapshotStore.swift in Sources */,
 				ADEF8FE72E462269953CDAA4 /* TinyBuddyConfigStore.swift in Sources */,
 				1411E8BD34748EFA00A58863 /* TinyBuddyCorruptedRecordQuarantine.swift in Sources */,

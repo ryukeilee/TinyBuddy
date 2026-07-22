@@ -97,8 +97,149 @@ final class FocusSessionEvidenceTests: XCTestCase {
 
         let session = try XCTUnwrap(engine.allSessions.first)
         let evidence = try XCTUnwrap(engine.evidence(for: session.id))
-        // Evidence engine receives attributedViaGitActivity = true
         XCTAssertEqual(evidence.projectAttribution.displayName, "Project A")
+        // Session is Git-attributed because project key "repo/a" contains "/"
+        // and the coordinator used the Git repo as the focus project.
+        XCTAssertEqual(evidence.projectAttribution.source, .gitActivity)
+        // Redacted identifier should be set (hashed path, not raw key).
+        XCTAssertNotNil(evidence.projectAttribution.redactedIdentifier)
+        XCTAssertFalse(evidence.projectAttribution.redactedIdentifier.isEmpty)
+        XCTAssertNotEqual(evidence.projectAttribution.redactedIdentifier, "repo/a")
+    }
+
+    // MARK: - Attribution Source Derivation
+
+    func test_evidence_source_is_git_activity_for_repo_path_key() throws {
+        // A session with a repository path-like key should have .gitActivity source
+        // even without explicit gitActivity decision events, because the coordinator
+        // attributes to the Git project when a code editor is active.
+        let repoProject = FocusProjectContext(key: "/Users/user/Projects/myapp", displayName: "MyApp")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: repoProject, at: start)
+        clock.advance(by: 30)
+        engine.lockScreen(at: clock.now)
+
+        let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        XCTAssertEqual(evidence.projectAttribution.source, .gitActivity)
+        XCTAssertEqual(evidence.confidence, .high)
+        XCTAssertTrue(evidence.projectAttribution.explanation.contains("Git"))
+    }
+
+    func test_evidence_source_is_foreground_app_for_bundle_id_key() throws {
+        // A session with a bundle-ID-like key (contains "." but no "/")
+        // should have .foregroundApp source.
+        let appProject = FocusProjectContext(key: "com.apple.dt.Xcode", displayName: "Xcode")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: appProject, at: start)
+        clock.advance(by: 30)
+        engine.lockScreen(at: clock.now)
+
+        let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        XCTAssertEqual(evidence.projectAttribution.source, .foregroundApp)
+        XCTAssertEqual(evidence.confidence, .high)
+        XCTAssertTrue(evidence.projectAttribution.explanation.contains("前段应用"))
+    }
+
+    func test_evidence_source_is_git_activity_when_event_reason_is_git() throws {
+        // A session whose decision events include .gitActivity reason should be
+        // Git-attributed even with a non-path key.
+        let appProject = FocusProjectContext(key: "com.example.Terminal", displayName: "Terminal")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: appProject, at: start, reason: .gitActivity)
+        clock.advance(by: 30)
+        engine.lockScreen(at: clock.now)
+
+        let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        XCTAssertEqual(evidence.projectAttribution.source, .gitActivity)
+        // Explanation should reference Git activity.
+        XCTAssertTrue(evidence.projectAttribution.explanation.contains("Git 活动"))
+    }
+
+    func test_evidence_redacted_identifier_for_repo_path() throws {
+        let repoProject = FocusProjectContext(key: "/Users/alice/secret-project", displayName: "Secret")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: repoProject, at: start)
+        clock.advance(by: 10)
+        engine.lockScreen(at: clock.now)
+
+        let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        // Redacted identifier must not contain the raw path.
+        let redacted = evidence.projectAttribution.redactedIdentifier
+        XCTAssertFalse(redacted.contains("/Users/alice/"))
+        XCTAssertFalse(redacted.contains("secret-project"))
+        // It should be a stable 12-char hex hash (SHA-256 prefix).
+        XCTAssertEqual(redacted.count, 12)
+        let hexChars = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        XCTAssertTrue(redacted.unicodeScalars.allSatisfy { hexChars.contains($0) })
+    }
+
+    func test_evidence_redacted_identifier_for_bundle_id() throws {
+        let appProject = FocusProjectContext(key: "com.apple.dt.Xcode", displayName: "Xcode")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: appProject, at: start)
+        clock.advance(by: 10)
+        engine.lockScreen(at: clock.now)
+
+        let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        // Bundle IDs are not sensitive, so the stable identifier returns them as-is.
+        XCTAssertEqual(evidence.projectAttribution.redactedIdentifier, "com.apple.dt.Xcode")
+    }
+
+    func test_evidence_source_is_manual_and_never_git_for_manual_mode() throws {
+        // Manual sessions must never be Git-attributed, regardless of project key.
+        let repoProject = FocusProjectContext(key: "/repo/some-project", displayName: "Some Project")
+        let (engine, clock, _) = makeEngine()
+        engine.startManualFocus(project: repoProject, at: start)
+        clock.advance(by: 60)
+        engine.endManualFocus(at: clock.now)
+
+        let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        XCTAssertEqual(evidence.projectAttribution.source, .manual)
+        XCTAssertEqual(evidence.confidence, .high)
+    }
+
+    func test_evidence_source_preserved_after_confirming_git_session() throws {
+        // A session attributed via Git and then confirmed should retain .gitActivity source.
+        let repoProject = FocusProjectContext(key: "/repo/my-app", displayName: "My App")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: repoProject, at: start)
+        clock.advance(by: 30)
+        engine.lockScreen(at: clock.now)
+
+        let sessionID = try XCTUnwrap(engine.allSessions.first?.id)
+        guard case .saved = engine.confirmSession(id: sessionID) else {
+            return XCTFail("Expected confirmation to succeed")
+        }
+
+        let evidence = try XCTUnwrap(engine.evidence(for: sessionID))
+        // After confirmation, evidence should still show .gitActivity source
+        // (the confirmation does not change the attribution source).
+        XCTAssertEqual(evidence.confidence, .high)
+        // The attribution explanation should mention user confirmation.
+        XCTAssertTrue(evidence.projectAttribution.explanation.contains("确认"))
+    }
+
+    func test_evidence_source_updates_after_manual_correction_to_foreground_app() throws {
+        // Session starts as Git-attributed (repo path), user corrects to a bundle ID project.
+        let repoProject = FocusProjectContext(key: "/repo/old", displayName: "Old Repo")
+        let appProject = FocusProjectContext(key: "com.example.NewApp", displayName: "New App")
+        let (engine, clock, _) = makeEngine()
+        engine.userActivity(in: repoProject, at: start)
+        clock.advance(by: 30)
+        engine.lockScreen(at: clock.now)
+
+        let sessionID = try XCTUnwrap(engine.allSessions.first?.id)
+        guard case .saved = engine.editSession(id: sessionID, project: appProject) else {
+            return XCTFail("Expected edit to succeed")
+        }
+
+        let evidence = try XCTUnwrap(engine.evidence(for: sessionID))
+        // Correction overrides to .manual source.
+        XCTAssertEqual(evidence.projectAttribution.source, .manual)
+        XCTAssertEqual(evidence.confidence, .high)
+        XCTAssertEqual(evidence.projectAttribution.displayName, "New App")
+        // Should have projectChanged decision explanation.
+        XCTAssertTrue(evidence.decisionExplanations.contains(where: { $0.kind == .projectChanged }))
     }
 
     // MARK: - Evidence Updates After Edits

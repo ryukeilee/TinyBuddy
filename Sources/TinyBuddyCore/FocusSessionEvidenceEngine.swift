@@ -165,11 +165,16 @@ public enum FocusSessionEvidenceEngine: Sendable {
             baseExplanation = prev.projectAttribution.explanation
             caveat = prev.projectAttribution.caveat
         } else {
-            // Fresh evidence generation fallback.
+            // Fresh evidence generation — derive from session properties
+            // instead of hardcoding a default attribution source.
+            let derivedAttributedViaGit = deriveAttributedViaGitActivity(from: session)
+            let redactedID = stableIdentifier(from: session.project.key)
             let input = FocusSessionEvidenceInput(
                 session: session,
-                attributedViaForegroundApp: true,
-                attributedViaGitActivity: false
+                attributedViaForegroundApp: !derivedAttributedViaGit,
+                attributedViaGitActivity: derivedAttributedViaGit,
+                redactedForegroundAppID: derivedAttributedViaGit ? nil : redactedID,
+                redactedRepoIdentifier: derivedAttributedViaGit ? redactedID : nil
             )
             if let fresh = generateEvidence(for: input) {
                 return fresh
@@ -246,6 +251,21 @@ public enum FocusSessionEvidenceEngine: Sendable {
                 explanation: explanationFor(event: event)
             )
         }
+    }
+
+    /// Derives whether a session was attributed via Git activity.
+    /// Uses the same logic as `FocusSessionEngine.deriveAttributedViaGitActivity`.
+    private static func deriveAttributedViaGitActivity(from session: FocusSession) -> Bool {
+        // Manual sessions are always user-chosen, never Git-attributed.
+        if session.mode == .manual { return false }
+        // Explicit Git activity in the decision trail.
+        if let events = session.decisionEvents,
+           events.contains(where: { $0.reason == .gitActivity }) {
+            return true
+        }
+        // Infer from project key pattern: repo paths contain "/".
+        if session.project.key.contains("/") { return true }
+        return false
     }
 
     /// Deterministic confidence for a single decision event.

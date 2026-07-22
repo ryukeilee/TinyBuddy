@@ -121,10 +121,15 @@ public final class FocusSessionEngine: @unchecked Sendable {
         var evidence = loaded.evidence
         if evidence.isEmpty {
             for session in loaded.sessions where session.decisionEvents?.isEmpty == false {
+                let sessionEvents = session.decisionEvents ?? []
+                let attributedViaGit = deriveAttributedViaGitActivity(from: session, events: sessionEvents)
+                let redactedID = stableIdentifier(from: session.project.key)
                 let input = FocusSessionEvidenceInput(
                     session: session,
-                    attributedViaForegroundApp: true,
-                    attributedViaGitActivity: false
+                    attributedViaForegroundApp: !attributedViaGit,
+                    attributedViaGitActivity: attributedViaGit,
+                    redactedForegroundAppID: attributedViaGit ? nil : redactedID,
+                    redactedRepoIdentifier: attributedViaGit ? redactedID : nil
                 )
                 if let ev = FocusSessionEvidenceEngine.generateEvidence(for: input) {
                     evidence[ev.sessionID] = ev
@@ -1007,6 +1012,15 @@ private extension FocusSessionEngine {
 
     /// Generates deterministic evidence for all sessions that have decision events.
     /// This is called after every mutation to keep evidence in sync.
+    ///
+    /// Attribution context is derived from the session itself:
+    ///   - If the session has any `.gitActivity` decision event, or the project key
+    ///     is a repository path (contains "/"), it is attributed via Git activity.
+    ///   - Manual sessions are never Git-attributed.
+    ///   - Otherwise, it is attributed via foreground app detection.
+    /// This ensures evidence always reflects the real attribution source, even when
+    /// the coordinator's attribution policy (code editor + recent Git → Git project)
+    /// is not explicitly recorded on individual decision events.
     func generateEvidenceForSessions(_ sessions: [FocusSession]) -> [UUID: FocusSessionEvidence] {
         var result: [UUID: FocusSessionEvidence] = [:]
         for session in sessions {
@@ -1014,18 +1028,42 @@ private extension FocusSessionEngine {
                 // Legacy sessions without decision events get no evidence.
                 continue
             }
+
+            // Derive attribution context from session properties.
+            let attributedViaGitActivity = deriveAttributedViaGitActivity(from: session, events: events)
+            let attributedViaForegroundApp = !attributedViaGitActivity
+            let redactedID = stableIdentifier(from: session.project.key)
+
             let input = FocusSessionEvidenceInput(
                 session: session,
-                attributedViaForegroundApp: true,
-                attributedViaGitActivity: false,
-                redactedForegroundAppID: nil,
-                redactedRepoIdentifier: nil
+                attributedViaForegroundApp: attributedViaForegroundApp,
+                attributedViaGitActivity: attributedViaGitActivity,
+                redactedForegroundAppID: attributedViaForegroundApp ? redactedID : nil,
+                redactedRepoIdentifier: attributedViaGitActivity ? redactedID : nil
             )
             if let evidence = FocusSessionEvidenceEngine.generateEvidence(for: input) {
                 result[evidence.sessionID] = evidence
             }
         }
         return result
+    }
+
+    /// Derives whether a session was attributed via Git activity.
+    /// - Manual sessions are never Git-attributed.
+    /// - If any decision event has reason `.gitActivity`, the session is Git-attributed.
+    /// - Otherwise, a project key containing "/" is a repository path (Git);
+    ///   a key with only "." (bundle ID) is a foreground app.
+    private func deriveAttributedViaGitActivity(
+        from session: FocusSession,
+        events: [FocusSessionDecisionEvent]
+    ) -> Bool {
+        // Manual sessions are always user-chosen, never Git-attributed.
+        if session.mode == .manual { return false }
+        // Explicit Git activity in the decision trail.
+        if events.contains(where: { $0.reason == .gitActivity }) { return true }
+        // Infer from project key pattern: repo paths contain "/".
+        if session.project.key.contains("/") { return true }
+        return false
     }
 
     func historyChanges(
