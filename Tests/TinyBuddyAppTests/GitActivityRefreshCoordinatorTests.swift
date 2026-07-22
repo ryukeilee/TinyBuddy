@@ -1303,9 +1303,104 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(harness.scriptCancellationCount, 1)
         XCTAssertEqual(harness.scriptRunCount, 2)
-        XCTAssertEqual(harness.widgetReloadCount, 2)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.statusHistory.count, 1)
         XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
         XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
+    func testAuthorizationReplacementDiscardsLateSuccessfulResultBeforeSnapshotAndWidgetPublication() {
+        let oldRoot = URL(fileURLWithPath: "/Authorized/OldProject")
+        let currentRoot = URL(fileURLWithPath: "/Authorized/CurrentProject")
+        let harness = makeHarness(authorizedRoots: [oldRoot])
+        let firstRunStarted = expectation(description: "old refresh started")
+        let releaseOldRun = DispatchSemaphore(value: 0)
+
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                firstRunStarted.fulfill()
+                releaseOldRun.wait()
+                harness.setActivitySnapshot(
+                    focusBlockCount: 9,
+                    commitCount: 9,
+                    recentProjectName: "OldProject"
+                )
+            case 2:
+                harness.setActivitySnapshot(
+                    focusBlockCount: 2,
+                    commitCount: 3,
+                    recentProjectName: "CurrentProject"
+                )
+            default:
+                return
+            }
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        harness.authorizedRoots = [currentRoot]
+        harness.coordinator.handleAuthorizationChanged()
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseOldRun.signal()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.focusBlockCount, 2)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.commitCount, 3)
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.recentProjectName, "CurrentProject")
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
+    func testRepeatedAuthorizationChangesCoalesceObsoleteQueuedReplacements() {
+        let firstRoot = URL(fileURLWithPath: "/Authorized/FirstProject")
+        let finalRoot = URL(fileURLWithPath: "/Authorized/FinalProject")
+        let harness = makeHarness(authorizedRoots: [firstRoot])
+        let firstRunStarted = expectation(description: "first refresh started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+
+        harness.setScriptRunnerHook { runCount in
+            switch runCount {
+            case 1:
+                firstRunStarted.fulfill()
+                releaseFirstRun.wait()
+                harness.setActivitySnapshot(
+                    focusBlockCount: 8,
+                    commitCount: 8,
+                    recentProjectName: "FirstProject"
+                )
+            case 2:
+                harness.setActivitySnapshot(
+                    focusBlockCount: 1,
+                    commitCount: 4,
+                    recentProjectName: "FinalProject"
+                )
+            default:
+                XCTFail("obsolete replacement must not run the script")
+            }
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        for _ in 0..<3 {
+            harness.authorizedRoots = [finalRoot]
+            harness.coordinator.handleAuthorizationChanged()
+        }
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRun.signal()
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
+        XCTAssertEqual(harness.capturedRootPaths, [finalRoot.path])
+        XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.recentProjectName, "FinalProject")
     }
 
     func testPartialAuthorizationWithSkippedScriptPreservesCommittedActivity() {
@@ -2053,6 +2148,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(harness.scriptCancellationCount, 1)
         XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 1)
+        XCTAssertEqual(harness.widgetReloadCount, 1)
         XCTAssertEqual(harness.combinedSnapshot?.activitySnapshot.recentProjectName, "AfterWake")
     }
 

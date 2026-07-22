@@ -217,6 +217,18 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         let requestedAt: Date
     }
 
+    /// Identifies one concrete script execution.  A lifecycle generation is
+    /// necessary for time/sleep invalidation, but it is not enough when a
+    /// configuration or authorization change replaces a still-running scan in
+    /// the same lifecycle.  The per-execution identifier keeps a late result
+    /// from publishing status, snapshots, or a Widget reload after its
+    /// replacement has been requested.
+    private struct RefreshExecution: Equatable {
+        let identifier: UInt64
+        let lifecycleGeneration: Int
+        let continuityGenerationAtStart: Int64
+    }
+
     private struct RefreshActivityContent: Equatable {
         let focusBlockCount: Int
         let commitCount: Int
@@ -334,13 +346,11 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private var lifecycleGeneration = 0
     private var lifecycleNotificationSequence = 0
     private var activityCommitGeneration = 0
+    private var activityCommitRefreshIdentifier: UInt64?
+    private var nextRefreshExecutionIdentifier: UInt64 = 0
+    private var activeRefreshExecution: RefreshExecution?
     private var activeTimeContext: TinyBuddyTimeContext
     private var currentTimeScopeToken = UUID().uuidString
-    /// The continuity-record calibration generation captured when the current
-    /// script execution started.  Compared against the current record when
-    /// the script completes to detect whether the calibrator observed a
-    /// time change during execution.
-    private var lastContinuityGenerationAtScriptStart: Int64 = 0
     private var currentTimeScopeFileURL: URL?
     private var needsWakeRevalidation = false
     private var isApplicationActive = false
@@ -349,7 +359,9 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         isOnBatteryPower: false,
         isLowPowerModeEnabled: false
     )
-    private var isRefreshing = false
+    private var isRefreshing: Bool {
+        activeRefreshExecution != nil
+    }
     private var repositoryDiscoveryRescanPending = false
     private var repositoryDiscoveryInvalidatedRootPaths = Set<String>()
     private var isPeriodicRefreshSuspended = false
@@ -601,7 +613,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     func handleWillSleep() {
         needsWakeRevalidation = true
         advanceLifecycleGeneration()
-        isRefreshing = false
+        invalidateActiveRefreshExecution()
         timer?.invalidate()
         timer = nil
         scheduledRefreshInterval = nil
@@ -624,13 +636,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         repositoryChangeMonitor?.stop()
         updateRepositoryChangeMonitoring()
         if isRefreshing {
-            enqueuePendingRefresh(
-                kind: .authorization,
-                trigger: .reopen,
-                requestedAt: activeTimeContext.now
-            )
+            invalidateActiveRefreshExecution()
             cancelScript()
-            return
         }
         _ = refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
     }
@@ -646,13 +653,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         updateRepositoryChangeMonitoring()
         scheduleTimerIfNeeded(forceReschedule: true)
         if isRefreshing {
-            enqueuePendingRefresh(
-                kind: .authorization,
-                trigger: .reopen,
-                requestedAt: activeTimeContext.now
-            )
+            invalidateActiveRefreshExecution()
             cancelScript()
-            return
         }
         _ = refresh(trigger: .reopen, force: true, bypassFailureBackoff: true)
     }
@@ -718,7 +720,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         advanceLifecycleGeneration()
         renewTimeScopeLease()
         isApplicationActive = false
-        isRefreshing = false
+        invalidateActiveRefreshExecution()
         timer?.invalidate()
         timer = nil
         scheduledRefreshInterval = nil
@@ -964,8 +966,14 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         }
     }
 
-    private func finishRefresh(succeeded: Bool) {
-        isRefreshing = false
+    private func finishRefresh(
+        _ refreshExecution: RefreshExecution,
+        succeeded: Bool
+    ) {
+        guard activeRefreshExecution == refreshExecution else {
+            return
+        }
+        invalidateActiveRefreshExecution()
         didReloadWidgetDuringCurrentRefresh = false
         if succeeded {
             directoryRecoveryRemainingAttempts = 0
@@ -1194,7 +1202,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         repositoryDiscoveryInvalidatedRootPaths.removeAll()
 
         isPeriodicRefreshSuspended = false
-        isRefreshing = true
+        let refreshExecution = beginRefreshExecution()
         timer?.invalidate()
         timer = nil
         scheduledRefreshInterval = nil
@@ -1205,8 +1213,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             userInfo: nextLifecycleNotificationUserInfo()
         )
         lastRefreshAttemptMonotonicTime = monotonicTime
-        lastContinuityGenerationAtScriptStart = continuityRecordProvider().calibrationGeneration
-        let lifecycleGeneration = self.lifecycleGeneration
+        let lifecycleGeneration = refreshExecution.lifecycleGeneration
         let scriptRunner = self.scriptRunner
         let timeScopeLease = GitRefreshTimeScopeLease(
             token: currentTimeScopeToken,
@@ -1223,6 +1230,12 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             }
 
             do {
+                let executionIsCurrent = self?.isRefreshExecutionEligibleForCommit(
+                    refreshExecution
+                ) == true
+                guard executionIsCurrent else {
+                    return
+                }
                 let result = try scriptRunner(
                     scriptURL,
                     authorizedRootURLs,
@@ -1239,7 +1252,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                     commitPreparation = nil
                 } else {
                     let lifecycleIsCurrent = DispatchQueue.main.sync { [weak self] in
-                        self?.lifecycleGeneration == lifecycleGeneration
+                        self?.isRefreshExecutionCurrent(refreshExecution) == true
                     }
                     guard lifecycleIsCurrent else {
                         return
@@ -1250,7 +1263,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                         }
                         return self.validatedCompletionContext(
                             for: timeContext,
-                            startedAtMonotonicTime: monotonicTime
+                            startedAtMonotonicTime: monotonicTime,
+                            continuityGenerationAtStart: refreshExecution.continuityGenerationAtStart
                         )
                     }
                     guard let completionContext else {
@@ -1262,6 +1276,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                     self?.beforeActivityCommit()
                     guard let self,
                           let currentCommitPreparation = self.prepareActivityCommitIfCurrent(
+                              refreshExecution: refreshExecution,
                               lifecycleGeneration: lifecycleGeneration,
                               refreshedAt: completionContext.now
                           ) else {
@@ -1278,7 +1293,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                         trigger: trigger,
                         startedWith: timeContext,
                         startedAtMonotonicTime: monotonicTime,
-                        lifecycleGeneration: lifecycleGeneration
+                        lifecycleGeneration: lifecycleGeneration,
+                        refreshExecution: refreshExecution
                     )
                 }
             } catch {
@@ -1289,7 +1305,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                         trigger: trigger,
                         startedWith: timeContext,
                         startedAtMonotonicTime: monotonicTime,
-                        lifecycleGeneration: lifecycleGeneration
+                        lifecycleGeneration: lifecycleGeneration,
+                        refreshExecution: refreshExecution
                     )
                 }
             }
@@ -1306,14 +1323,17 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         trigger: GitTodayActivityRefreshTrigger,
         startedWith timeContext: TinyBuddyTimeContext,
         startedAtMonotonicTime: TimeInterval,
-        lifecycleGeneration: Int
+        lifecycleGeneration: Int,
+        refreshExecution: RefreshExecution
     ) {
-        guard self.lifecycleGeneration == lifecycleGeneration else {
+        guard isRefreshExecutionCurrent(refreshExecution),
+              refreshExecution.lifecycleGeneration == lifecycleGeneration else {
             return
         }
         guard let completionContext = validatedCompletionContext(
             for: timeContext,
-            startedAtMonotonicTime: startedAtMonotonicTime
+            startedAtMonotonicTime: startedAtMonotonicTime,
+            continuityGenerationAtStart: refreshExecution.continuityGenerationAtStart
         ) else {
             handleDetectedTimeDiscontinuity(trigger: trigger)
             return
@@ -1342,7 +1362,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                     diagnostic: diagnostic
                 )
             )
-            finishRefresh(succeeded: false)
+            finishRefresh(refreshExecution, succeeded: false)
             return
         }
 
@@ -1376,7 +1396,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                     didChangePublishedWidgetActivity: false
                 )
             )
-            finishRefresh(succeeded: true)
+            finishRefresh(refreshExecution, succeeded: true)
             return
         }
 
@@ -1385,7 +1405,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         }
         guard validatedCompletionContext(
             for: timeContext,
-            startedAtMonotonicTime: startedAtMonotonicTime
+            startedAtMonotonicTime: startedAtMonotonicTime,
+            continuityGenerationAtStart: refreshExecution.continuityGenerationAtStart
         ) != nil else {
             handleDetectedTimeDiscontinuity(trigger: trigger)
             return
@@ -1412,7 +1433,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                     diagnostic: diagnostic
                 )
             )
-            finishRefresh(succeeded: false)
+            finishRefresh(refreshExecution, succeeded: false)
             return
         case .prepared(
             let didPublishSnapshot,
@@ -1463,7 +1484,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         lastRefreshFailureMonotonicTime = nil
         projectDiscoveryCommit(!hasPartialRecovery)
         activityDidCommit(previousActivity, currentActivity)
-        finishRefresh(succeeded: true)
+        finishRefresh(refreshExecution, succeeded: true)
     }
 
     private func completeFailedRefresh(
@@ -1472,14 +1493,17 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         trigger: GitTodayActivityRefreshTrigger,
         startedWith timeContext: TinyBuddyTimeContext,
         startedAtMonotonicTime: TimeInterval,
-        lifecycleGeneration: Int
+        lifecycleGeneration: Int,
+        refreshExecution: RefreshExecution
     ) {
-        guard self.lifecycleGeneration == lifecycleGeneration else {
+        guard isRefreshExecutionCurrent(refreshExecution),
+              refreshExecution.lifecycleGeneration == lifecycleGeneration else {
             return
         }
         guard let completionContext = validatedCompletionContext(
             for: timeContext,
-            startedAtMonotonicTime: startedAtMonotonicTime
+            startedAtMonotonicTime: startedAtMonotonicTime,
+            continuityGenerationAtStart: refreshExecution.continuityGenerationAtStart
         ) else {
             handleDetectedTimeDiscontinuity(trigger: trigger)
             return
@@ -1517,7 +1541,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                 diagnostic: diagnostic
             )
         )
-        finishRefresh(succeeded: false)
+        finishRefresh(refreshExecution, succeeded: false)
     }
 
     private func prepareActivityCommit(refreshedAt: Date) -> ActivityCommitPreparation {
@@ -1625,21 +1649,66 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         )
     }
 
-    /// Serializes the final semantic commit with lifecycle invalidation. A time
-    /// change that wins this lock advances the generation before an old refresh
-    /// can write; a commit that wins completes atomically before invalidation is
-    /// published, after which its completion notification is discarded.
+    /// Serializes the final semantic commit with lifecycle and execution
+    /// invalidation. A time/configuration change that wins this lock advances
+    /// or replaces the active execution before an old refresh can write; a
+    /// commit that wins completes atomically before invalidation is published,
+    /// after which its completion notification is discarded.
     private func prepareActivityCommitIfCurrent(
+        refreshExecution: RefreshExecution,
         lifecycleGeneration: Int,
         refreshedAt: Date
     ) -> ActivityCommitPreparation? {
         activityCommitLock.lock()
         defer { activityCommitLock.unlock() }
 
-        guard activityCommitGeneration == lifecycleGeneration else {
+        guard activityCommitGeneration == lifecycleGeneration,
+              activityCommitRefreshIdentifier == refreshExecution.identifier else {
             return nil
         }
         return prepareActivityCommit(refreshedAt: refreshedAt)
+    }
+
+    private func beginRefreshExecution() -> RefreshExecution {
+        nextRefreshExecutionIdentifier &+= 1
+        if nextRefreshExecutionIdentifier == 0 {
+            nextRefreshExecutionIdentifier = 1
+        }
+        let refreshExecution = RefreshExecution(
+            identifier: nextRefreshExecutionIdentifier,
+            lifecycleGeneration: lifecycleGeneration,
+            continuityGenerationAtStart: continuityRecordProvider().calibrationGeneration
+        )
+        activeRefreshExecution = refreshExecution
+        activityCommitLock.lock()
+        activityCommitGeneration = refreshExecution.lifecycleGeneration
+        activityCommitRefreshIdentifier = refreshExecution.identifier
+        activityCommitLock.unlock()
+        return refreshExecution
+    }
+
+    private func invalidateActiveRefreshExecution() {
+        let invalidatedIdentifier = activeRefreshExecution?.identifier
+        activeRefreshExecution = nil
+        activityCommitLock.lock()
+        if activityCommitRefreshIdentifier == invalidatedIdentifier {
+            activityCommitRefreshIdentifier = nil
+        }
+        activityCommitLock.unlock()
+    }
+
+    private func isRefreshExecutionCurrent(_ refreshExecution: RefreshExecution) -> Bool {
+        activeRefreshExecution == refreshExecution
+            && lifecycleGeneration == refreshExecution.lifecycleGeneration
+    }
+
+    private func isRefreshExecutionEligibleForCommit(
+        _ refreshExecution: RefreshExecution
+    ) -> Bool {
+        activityCommitLock.lock()
+        defer { activityCommitLock.unlock() }
+        return activityCommitGeneration == refreshExecution.lifecycleGeneration
+            && activityCommitRefreshIdentifier == refreshExecution.identifier
     }
 
     private func advanceLifecycleGeneration() {
@@ -1894,7 +1963,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     ) {
         advanceLifecycleGeneration()
         activeTimeContext = context
-        isRefreshing = false
+        invalidateActiveRefreshExecution()
         pendingRefreshRequest = nil
         didReloadWidgetDuringCurrentRefresh = false
         unchangedRefreshStreak = 0
@@ -1926,7 +1995,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
 
     private func validatedCompletionContext(
         for startedContext: TinyBuddyTimeContext,
-        startedAtMonotonicTime: TimeInterval
+        startedAtMonotonicTime: TimeInterval,
+        continuityGenerationAtStart: Int64
     ) -> TinyBuddyTimeContext? {
         let completionContext = timeEnvironment.capture() ?? activeTimeContext
         guard completionContext.dayIdentifier == startedContext.dayIdentifier,
@@ -1938,7 +2008,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         // calibration generation advanced during script execution, the
         // calibrator detected a time change that invalidates this completion.
         let continuity = continuityRecordProvider()
-        if continuity.calibrationGeneration != lastContinuityGenerationAtScriptStart {
+        if continuity.calibrationGeneration != continuityGenerationAtStart {
             return nil
         }
 
