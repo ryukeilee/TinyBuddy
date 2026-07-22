@@ -315,7 +315,7 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
             synchronize: { true },
             timeContextProvider: {
                 TinyBuddyTimeContext(
-                    now: Date(),
+                    now: Date(timeIntervalSince1970: 1_784_548_800),
                     timeZone: TimeZone(secondsFromGMT: 0)!,
                     locale: Locale(identifier: "en_US_POSIX"),
                     sourceCalendar: Calendar(identifier: .gregorian)

@@ -351,6 +351,43 @@ extension FocusSessionEngineTests {
         XCTAssertEqual(s!.activeDuration(now: clock.now), 30, accuracy: 0.001)
     }
 
+    func test_failed_startup_recovery_does_not_resume_or_count_offline_gap() {
+        let first = makeEngine(clock: clock, store: store)
+        XCTAssertEqual(first.userActivity(in: projectA, at: t0), .saved)
+        clock.advance(by: 30)
+        XCTAssertEqual(first.userActivity(in: projectA, at: clock.now), .saved)
+        let recoveredID = first.allSessions[0].id
+
+        // The process dies and its recovery write initially cannot reach disk.
+        // The live engine must still fail closed rather than re-open this row.
+        clock.advance(by: 300)
+        store.shouldFail = true
+        let restarted = makeEngine(clock: clock, store: store)
+
+        XCTAssertEqual(restarted.allSessions.count, 1)
+        XCTAssertEqual(restarted.allSessions[0].id, recoveredID)
+        XCTAssertEqual(restarted.allSessions[0].endedAt, t0.addingTimeInterval(30))
+        XCTAssertEqual(restarted.allSessions[0].activeDuration(now: clock.now), 30, accuracy: 0.001)
+
+        // A failed new-start command cannot mutate the recovered row or create
+        // an in-memory duplicate. Once persistence returns, the next activity
+        // begins a distinct session at the current boundary, never at t0+30.
+        XCTAssertEqual(restarted.userActivity(in: projectA, at: clock.now), .persistenceFailed)
+        XCTAssertEqual(restarted.allSessions.map(\.id), [recoveredID])
+
+        store.shouldFail = false
+        XCTAssertEqual(restarted.userActivity(in: projectA, at: clock.now), .saved)
+        let sessions = restarted.allSessions.sorted { $0.startedAt < $1.startedAt }
+        XCTAssertEqual(sessions.count, 2)
+        XCTAssertEqual(sessions[0].id, recoveredID)
+        XCTAssertEqual(sessions[0].endedAt, t0.addingTimeInterval(30))
+        XCTAssertEqual(sessions[1].startedAt, clock.now)
+        XCTAssertTrue(sessions[1].isOpen)
+        XCTAssertLessThanOrEqual(sessions[0].endedAt!, sessions[1].startedAt)
+        XCTAssertEqual(store.stored?.map(\.id), sessions.map(\.id))
+        XCTAssertEqual(store.stored?.first?.endedAt, t0.addingTimeInterval(30))
+    }
+
     func test_crash_recovery_with_idle_pause() {
         // Session: active 10s, idle pause at t0+10, crash at t0+30.
         // lastStateChangeAt = t0+30 (the idle event).

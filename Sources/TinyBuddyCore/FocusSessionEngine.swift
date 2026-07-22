@@ -143,16 +143,14 @@ public final class FocusSessionEngine: @unchecked Sendable {
             projectResolver: projectContextResolver
         )
         self.confirmedRevision = sessions.compactMap(\.manualRevision).max() ?? 0
-        let beforeReconcile = sessions
         if reconcileOnLoad(now: now) {
-            guard persistAfterReconcile() else {
-                sessions = beforeReconcile
-                historyCache = FocusHistoryAggregationCache(
-                    sessions: beforeReconcile,
-                    projectResolver: projectContextResolver
-                )
-                return
-            }
+            // A crash-recovered session must remain closed in memory even when
+            // the immediate repair write fails. Reverting it to `beforeReconcile`
+            // would let the first post-restart activity resume across the
+            // offline interval and incorrectly count that gap. The unchanged
+            // on-disk archive remains the recovery source; a later successful
+            // mutation atomically persists this already-closed authority row.
+            _ = persistAfterReconcile()
             historyCache = FocusHistoryAggregationCache(
                 sessions: sessions,
                 projectResolver: projectContextResolver

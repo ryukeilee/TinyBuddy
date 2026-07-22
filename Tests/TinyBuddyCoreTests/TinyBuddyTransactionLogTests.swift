@@ -165,8 +165,14 @@ final class TinyBuddyTransactionLogTests: XCTestCase {
             return
         }
 
-        // Corrupt the checksum
-        let corruptedChecksum = String(parts[0]).replacingOccurrences(of: "0", with: "f")
+        // Corrupt the checksum unconditionally. Replacing only `0` used to
+        // leave checksums without that digit intact, making this test random.
+        var corruptedChecksum = String(parts[0])
+        let firstIndex = corruptedChecksum.startIndex
+        corruptedChecksum.replaceSubrange(
+            firstIndex...firstIndex,
+            with: corruptedChecksum[firstIndex] == "0" ? "1" : "0"
+        )
         let corruptedContent = "\(corruptedChecksum)|\(parts[1])\n"
         try? corruptedContent.write(to: logURL, atomically: true, encoding: .utf8)
 

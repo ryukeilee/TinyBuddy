@@ -2780,7 +2780,17 @@ private final class RefreshHarness: @unchecked Sendable {
             sharedSnapshotDiagnosticRecorder: sharedSnapshotDiagnosticRecorder,
             repositoryChangeDebounceInterval: 0.01,
             repositoryMonitoringStartDelay: repositoryMonitoringStartDelay,
-            foregroundActivationRefreshDelay: foregroundActivationRefreshDelay
+            foregroundActivationRefreshDelay: foregroundActivationRefreshDelay,
+            // The harness owns its clock and preferences. Reading the real
+            // App Group continuity record would import an unrelated system
+            // day/time-zone and turn ordinary lifecycle events into forced
+            // time-environment refreshes.
+            continuityRecordProvider: {
+                TinyBuddyTimeContinuityRecord(
+                    lastObservedDayIdentifier: "",
+                    lastObservedTimeZoneIdentifier: ""
+                )
+            }
         )
         statusObserver = statusNotificationCenter.addObserver(
             forName: .gitActivityRefreshStatusDidChange,
