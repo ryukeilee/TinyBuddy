@@ -198,6 +198,26 @@ struct TinyBuddyProvider: TimelineProvider {
             )
         }
 
+        // Post-upgrade self-healing: when the primary app is still rebuilding
+        // state after a version upgrade, accept any valid snapshot regardless
+        // of day to avoid showing a blank neutral state while the first
+        // refresh is in flight.
+        if TinyBuddyVersionUpgradeTracker.isPostUpgradeRebuildRequired(),
+           let anySnapshot = combinedSnapshotStore.loadReadOnly() {
+            Self.logger.notice(
+                "widget self-healing accepted any-day snapshot day=\(anySnapshot.dayIdentifier, privacy: .public) revision=\(anySnapshot.revision, privacy: .public)"
+            )
+            return entry(
+                at: timeContext.now,
+                snapshot: anySnapshot.snapshot,
+                activitySnapshot: anySnapshot.activitySnapshot,
+                refreshStatus: refreshStatus,
+                dataAvailability: .stale,
+                timeContext: timeContext,
+                calibrationGeneration: continuity.calibrationGeneration
+            )
+        }
+
         if let observation = combinedRead.observation,
            observation.reason == .staleData || observation.reason == .snapshotCorrupt {
             let fallbackSnapshot = store.loadSnapshot()

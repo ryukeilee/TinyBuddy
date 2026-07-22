@@ -15,6 +15,11 @@ public final class DailyStatsStore {
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let combinedSnapshotStoreFactory: () -> TinyBuddyCombinedSnapshotStore
 
+    /// Token-based deduplication state for `recordFocusStarted`.
+    private var lastFocusToken: (token: UUID, dayIdentifier: String, result: DailyStats)?
+    /// Token-based deduplication state for `recordCompletion`.
+    private var lastCompletionToken: (token: UUID, dayIdentifier: String, result: DailyStats)?
+
     public convenience init(
         timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment()
     ) {
@@ -111,8 +116,22 @@ public final class DailyStatsStore {
         )
     }
 
+    /// Records one focus-start event.
+    ///
+    /// - Parameter token: An optional unique token.  When the same non-nil
+    ///   token is passed again within the same local day, the call is treated
+    ///   as a no-op and returns the result from the first invocation.
+    ///   This prevents duplicate notification, retry, or replay scenarios
+    ///   from double-counting a single focus event.
     @discardableResult
-    public func recordFocusStarted() -> DailyStats {
+    public func recordFocusStarted(token: UUID? = nil) -> DailyStats {
+        // Token-based dedup: same token within same day → cached result.
+        if let token, let cached = lastFocusToken,
+           cached.token == token,
+           cached.dayIdentifier == (timeEnvironment.capture()?.dayIdentifier ?? "") {
+            return cached.result
+        }
+
         var stats = loadToday()
 
         let violations = TinyBuddyDataValidator.validateDailyStats(stats, previousStats: loadLastValidStats())
@@ -120,11 +139,17 @@ public final class DailyStatsStore {
             logger.debug("\(v.description, privacy: .public)")
         }
 
-        guard timeEnvironment.capture()?.dayIdentifier == stats.dayIdentifier else {
+        guard let context = timeEnvironment.capture(),
+              context.dayIdentifier == stats.dayIdentifier else {
             return stats
         }
         stats.focusCount += 1
-        return save(stats)
+        let result = save(stats)
+
+        if let token {
+            lastFocusToken = (token, context.dayIdentifier, result)
+        }
+        return result
     }
 
     /// Replaces the derived focus-session count only for the current local
@@ -138,8 +163,22 @@ public final class DailyStatsStore {
         return save(stats)
     }
 
+    /// Records one completion event.
+    ///
+    /// - Parameter token: An optional unique token.  When the same non-nil
+    ///   token is passed again within the same local day, the call is treated
+    ///   as a no-op and returns the result from the first invocation.
+    ///   This prevents duplicate notification, retry, or replay scenarios
+    ///   from double-counting a single completion event.
     @discardableResult
-    public func recordCompletion() -> DailyStats {
+    public func recordCompletion(token: UUID? = nil) -> DailyStats {
+        // Token-based dedup: same token within same day → cached result.
+        if let token, let cached = lastCompletionToken,
+           cached.token == token,
+           cached.dayIdentifier == (timeEnvironment.capture()?.dayIdentifier ?? "") {
+            return cached.result
+        }
+
         var stats = loadToday()
 
         let violations = TinyBuddyDataValidator.validateDailyStats(stats, previousStats: loadLastValidStats())
@@ -147,11 +186,17 @@ public final class DailyStatsStore {
             logger.debug("\(v.description, privacy: .public)")
         }
 
-        guard timeEnvironment.capture()?.dayIdentifier == stats.dayIdentifier else {
+        guard let context = timeEnvironment.capture(),
+              context.dayIdentifier == stats.dayIdentifier else {
             return stats
         }
         stats.completionCount += 1
-        return save(stats)
+        let result = save(stats)
+
+        if let token {
+            lastCompletionToken = (token, context.dayIdentifier, result)
+        }
+        return result
     }
 
     public func loadStatus() -> PetStatus {

@@ -64,6 +64,95 @@ final class DailyStatsStoreTests: XCTestCase {
         XCTAssertEqual(store.loadStatus(), .idle)
     }
 
+    // MARK: - Token-based idempotent record methods
+
+    func testFocusTokenDeduplicatesWithinSameDay() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let date = makeDate(year: 2026, month: 8, day: 15)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { date }
+        )
+
+        let token = UUID()
+        let first = store.recordFocusStarted(token: token)
+        XCTAssertEqual(first.focusCount, 1)
+
+        // Same token: must be a no-op.
+        let second = store.recordFocusStarted(token: token)
+        XCTAssertEqual(second.focusCount, 1, "Same token must not increment focus count again")
+
+        // Different token: must increment.
+        let third = store.recordFocusStarted(token: UUID())
+        XCTAssertEqual(third.focusCount, 2, "Different token should increment focus count")
+    }
+
+    func testCompletionTokenDeduplicatesWithinSameDay() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let date = makeDate(year: 2026, month: 8, day: 15)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { date }
+        )
+
+        let token = UUID()
+        let first = store.recordCompletion(token: token)
+        XCTAssertEqual(first.completionCount, 1)
+
+        // Same token: must be a no-op.
+        let second = store.recordCompletion(token: token)
+        XCTAssertEqual(second.completionCount, 1, "Same token must not increment completion count again")
+
+        // Different token: must increment.
+        let third = store.recordCompletion(token: UUID())
+        XCTAssertEqual(third.completionCount, 2, "Different token should increment completion count")
+    }
+
+    func testFocusTokenExpiresOnDayChange() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        var currentDate = makeDate(year: 2026, month: 8, day: 15)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { currentDate }
+        )
+
+        let token = UUID()
+        _ = store.recordFocusStarted(token: token)
+        XCTAssertEqual(store.loadToday().focusCount, 1)
+
+        // Move to next day; same token should NOT deduplicate across days.
+        currentDate = makeDate(year: 2026, month: 8, day: 16)
+        let nextDay = store.recordFocusStarted(token: token)
+        XCTAssertEqual(nextDay.focusCount, 1, "Same token on new day should count as a new event")
+    }
+
+    func testNilTokenNeverDeduplicates() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let date = makeDate(year: 2026, month: 8, day: 15)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { date }
+        )
+
+        // Without a token, every call increments.
+        _ = store.recordFocusStarted()
+        _ = store.recordFocusStarted()
+        _ = store.recordCompletion()
+        _ = store.recordCompletion()
+
+        let stats = store.loadToday()
+        XCTAssertEqual(stats.focusCount, 2)
+        XCTAssertEqual(stats.completionCount, 2)
+    }
+
     func testCombinedSnapshotStoreUsesTheSameDefaultsAsDailyStats() {
         let defaults = makeDefaults()
         let store = DailyStatsStore(userDefaults: defaults)

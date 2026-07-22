@@ -36,6 +36,74 @@ final class PetSessionTests: XCTestCase {
         XCTAssertEqual(reloadedSession.stats.completionCount, 1)
     }
 
+    func testRepeatedFocusingIsIdempotent() {
+        let defaults = makeDefaults()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: makeCalendar(),
+            dateProvider: { self.makeDate(year: 2026, month: 7, day: 1) }
+        )
+        let session = PetSession(store: store)
+
+        // First call records one focus.
+        session.select(.focusing)
+        XCTAssertEqual(session.stats.focusCount, 1)
+        XCTAssertEqual(session.status, .focusing)
+
+        // Repeated call with same status is a no-op.
+        session.select(.focusing)
+        XCTAssertEqual(session.stats.focusCount, 1,
+                       "select(.focusing) when already .focusing must not increment again")
+
+        // Verified from store directly.
+        let stats = store.loadToday()
+        XCTAssertEqual(stats.focusCount, 1)
+    }
+
+    func testRepeatedCompletedOnceIsIdempotent() {
+        let defaults = makeDefaults()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: makeCalendar(),
+            dateProvider: { self.makeDate(year: 2026, month: 7, day: 1) }
+        )
+        let session = PetSession(store: store)
+
+        session.select(.focusing)
+        session.select(.completedOnce)
+        XCTAssertEqual(session.stats.completionCount, 1)
+        XCTAssertEqual(session.status, .completedOnce)
+
+        // Repeated call with same status is a no-op.
+        session.select(.completedOnce)
+        XCTAssertEqual(session.stats.completionCount, 1,
+                       "select(.completedOnce) when already .completedOnce must not increment again")
+
+        let stats = store.loadToday()
+        XCTAssertEqual(stats.completionCount, 1)
+    }
+
+    func testRepeatedIdleIsIdempotent() {
+        let defaults = makeDefaults()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: makeCalendar(),
+            dateProvider: { self.makeDate(year: 2026, month: 7, day: 1) }
+        )
+        let session = PetSession(store: store)
+
+        XCTAssertEqual(session.status, .idle)
+        session.select(.idle) // no-op, count stays 0
+        XCTAssertEqual(session.stats.focusCount, 0)
+        XCTAssertEqual(session.stats.completionCount, 0)
+
+        // idle -> focusing -> idle transition is still valid.
+        session.select(.focusing)
+        session.select(.idle)
+        XCTAssertEqual(session.status, .idle)
+        XCTAssertEqual(session.stats.focusCount, 1)
+    }
+
     func testSelectionAfterDayChangePersistsAfterDailyStatsReset() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()

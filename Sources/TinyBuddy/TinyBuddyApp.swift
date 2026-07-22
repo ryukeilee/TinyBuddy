@@ -424,6 +424,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isInterfaceVisible: isHUDVisible,
             powerState: TinyBuddyPowerState.current()
         )
+
+        // === Version upgrade detection: state reconstruction & widget self-healing ===
+        //
+        // Detect app version changes (cover install / upgrade) and set the
+        // post-upgrade rebuild flag.  The Git refresh coordinator already runs
+        // a forced refresh on launch; if this is an upgrade we ensure the
+        // widget timelines are reloaded once that refresh commits fresh state.
+        let upgradeState = TinyBuddyVersionUpgradeTracker.checkForUpgrade()
+        if upgradeState.isUpgrade {
+            tinyBuddyStartupLogger.notice(
+                "Version upgrade detected: \(upgradeState.previousShortVersion ?? "nil", privacy: .public) -> \(upgradeState.currentShortVersion ?? "nil", privacy: .public) build \(upgradeState.previousBuildVersion ?? "nil", privacy: .public) -> \(upgradeState.currentBuildVersion ?? "nil", privacy: .public)"
+            )
+            // The launch-time refresh will already rebuild state.  Enqueue an
+            // additional manual refresh only if the launch refresh has not yet
+            // started or has already finished.
+            gitActivityRefreshCoordinator.handleManualRefresh()
+            // Register a one-time observer that reloads widget timelines after
+            // the first post-upgrade refresh completes, guaranteeing the Widget
+            // sees freshly committed state rather than stale data.
+            registerPostUpgradeWidgetReloadObserver()
+        }
+        // Always record the current version after upgrade work is dispatched.
+        TinyBuddyVersionUpgradeTracker.recordCurrentVersion()
+
         let focusBridge = FocusSessionAppBridge.createStandard(projectRegistry: projectRegistry)
         focusSessionBridge = focusBridge
         // Keep the legacy callback solely for existing manual-reminder
@@ -825,6 +849,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "退出")
         alert.runModal()
         NSApp.terminate(nil)
+    }
+
+    /// Registers an observer on `.gitActivityRefreshStatusDidChange`.
+    /// When the post-upgrade rebuild flag is still set and a refresh status
+    /// arrives, it clears the flag and reloads all widget timelines so the
+    /// Widget recovers with committed state rather than pre-upgrade data.
+    /// The observer is cleaned up automatically on app termination.
+    private func registerPostUpgradeWidgetReloadObserver() {
+        guard TinyBuddyVersionUpgradeTracker.isPostUpgradeRebuildRequired() else {
+            return
+        }
+        authorizationCommandObservers.append(
+            notificationCenter.addObserver(
+                forName: .gitActivityRefreshStatusDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                guard TinyBuddyVersionUpgradeTracker.isPostUpgradeRebuildRequired() else {
+                    return
+                }
+                TinyBuddyVersionUpgradeTracker.clearPostUpgradeRebuildRequired()
+                tinyBuddyStartupLogger.notice(
+                    "Post-upgrade rebuild completed; reloading widget timelines"
+                )
+                WidgetCenter.shared.reloadAllTimelines()
+            }
+        )
     }
 
     private func observeAuthorizationCommand(

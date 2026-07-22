@@ -88,6 +88,7 @@
 		DEC823FA3D30129CBEDEDE2E /* FocusSessionQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6619ECAC55E516619FB7CCA /* FocusSessionQuery.swift */; };
 		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
 		E2B6035121A36F917A3DB16F /* TinyBuddyLoginItemManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D134899A4E957415BBAB3AE4 /* TinyBuddyLoginItemManager.swift */; };
+		E44B214CAB5E9AEFF3D99089 /* TinyBuddyVersionUpgradeTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14D1F7EDC61BB799D10E2729 /* TinyBuddyVersionUpgradeTracker.swift */; };
 		E6E1B9AFECD65BD5D59BB706 /* TinyBuddyDataValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 407F72F9E84A576635B0E034 /* TinyBuddyDataValidator.swift */; };
 		EA96DCD880D09ABFD283FF45 /* FocusSessionAppBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F2A2EF0094BFCE6D8C6700 /* FocusSessionAppBridge.swift */; };
 		EB9D58FB5AB5F5AB5D5E0479 /* GitTodayActivityRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96B45C0592764EBEE0461F5C /* GitTodayActivityRefreshPolicy.swift */; };
@@ -146,6 +147,7 @@
 		017D4A397F538FE4B2E9A799 /* TinyBuddyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyApp.swift; sourceTree = "<group>"; };
 		01F3CAC916ACFFDDF9665CA7 /* GitTodayFocusBlockCountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTodayFocusBlockCountStore.swift; sourceTree = "<group>"; };
 		0494813761C44C77B9099155 /* TinyBuddyHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyHistoryStore.swift; sourceTree = "<group>"; };
+		14D1F7EDC61BB799D10E2729 /* TinyBuddyVersionUpgradeTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyVersionUpgradeTracker.swift; sourceTree = "<group>"; };
 		177AF4D25C3F6AD6A73C54E8 /* TinyBuddyResetService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyResetService.swift; sourceTree = "<group>"; };
 		1B92EADAC88E9435D9051841 /* TinyBuddyCombinedSnapshotMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyCombinedSnapshotMigrator.swift; sourceTree = "<group>"; };
 		1ED892A30DA553AB4D2F2EC3 /* TimeEnvironmentChangeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeEnvironmentChangeMonitor.swift; sourceTree = "<group>"; };
@@ -394,6 +396,7 @@
 				9A3AFDC9C7B18C5496FDC4F2 /* TinyBuddyTimeEnvironment.swift */,
 				7FE271908BF77E06439CD141 /* TinyBuddyTransactionCoordinator.swift */,
 				4362C69C975766D10F6DC396 /* TinyBuddyTransactionLog.swift */,
+				14D1F7EDC61BB799D10E2729 /* TinyBuddyVersionUpgradeTracker.swift */,
 				578BE0BF861C58A187B4C171 /* TinyBuddyWidgetPresentation.swift */,
 			);
 			path = TinyBuddyCore;
@@ -664,6 +667,7 @@
 				72C0AA9B7968FD23964ABD2D /* TinyBuddyTimeEnvironment.swift in Sources */,
 				7943B127C74B840773F13CCF /* TinyBuddyTransactionCoordinator.swift in Sources */,
 				7B80AE4F81FF40EDA92D8E08 /* TinyBuddyTransactionLog.swift in Sources */,
+				E44B214CAB5E9AEFF3D99089 /* TinyBuddyVersionUpgradeTracker.swift in Sources */,
 				770F76C21A74AC083D2B392A /* TinyBuddyWidgetPresentation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

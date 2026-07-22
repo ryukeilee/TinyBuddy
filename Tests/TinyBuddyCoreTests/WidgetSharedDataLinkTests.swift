@@ -1452,7 +1452,11 @@ final class WidgetSharedDataLinkTests: XCTestCase {
         let appSession = PetSession(store: appStore)
 
         appSession.select(.focusing)
-        appSession.select(.focusing)
+        // Call the store directly for the second focus recording to bypass
+        // PetSession's state-machine guard (which correctly prevents duplicate
+        // same-status transitions).  This test validates the Widget data-link
+        // layer, not the PetSession dedup behavior.
+        appStore.recordFocusStarted()
         appSession.select(.completedOnce)
         GitTodayFocusBlockCountStore(
             userDefaults: defaults,

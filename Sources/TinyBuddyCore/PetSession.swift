@@ -13,8 +13,26 @@ public final class PetSession {
         self.stats = snapshot.stats
     }
 
+    /// Selects a new status and records the associated count change.
+    ///
+    /// Idempotency guarantees:
+    /// - Calling `select(.focusing)` when already `.focusing` is a no-op;
+    ///   the focus count is not incremented again.
+    /// - Calling `select(.completedOnce)` when already `.completedOnce` is a
+    ///   no-op; the completion count is not incremented again.
+    /// - Calling `select(.idle)` when already `.idle` is a no-op.
+    ///
+    /// A transition from any status to a different status always records
+    /// normally.  This prevents double-tap, duplicate notification, and
+    /// retry scenarios from accumulating duplicate counts.
     @discardableResult
     public func select(_ nextStatus: PetStatus) -> DailyStats {
+        // State-machine guard: same-status transitions are idempotent no-ops.
+        guard status != nextStatus else {
+            stats = store.loadToday()
+            return stats
+        }
+
         status = nextStatus
 
         switch nextStatus {
