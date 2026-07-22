@@ -12,6 +12,7 @@ extension Notification.Name {
     static let gitActivitySnapshotDidChange = Notification.Name("TinyBuddy.gitActivitySnapshotDidChange")
     static let gitScanRootAuthorizationRequested = Notification.Name("TinyBuddy.gitScanRootAuthorizationRequested")
     static let tinyBuddyTimeEnvironmentDidChange = Notification.Name("TinyBuddy.timeEnvironmentDidChange")
+    static let tinyBuddyTimeRecalibrationRequired = Notification.Name("TinyBuddy.timeRecalibrationRequired")
 }
 
 enum TinyBuddyLifecycleNotification {
@@ -299,6 +300,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let gitCommandExecutor: GitCommandExecutor?
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let monotonicTimeProvider: () -> TimeInterval
+    private let continuityRecordProvider: () -> TinyBuddyTimeContinuityRecord
     private let powerStateProvider: PowerStateProvider
     private let timeScopePublisher: TimeScopePublisher
     private let beforeActivityCommit: ActivityCommitHook
@@ -333,9 +335,12 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private var lifecycleNotificationSequence = 0
     private var activityCommitGeneration = 0
     private var activeTimeContext: TinyBuddyTimeContext
-    private var lastObservedTimeContext: TinyBuddyTimeContext
-    private var lastObservedMonotonicTime: TimeInterval
     private var currentTimeScopeToken = UUID().uuidString
+    /// The continuity-record calibration generation captured when the current
+    /// script execution started.  Compared against the current record when
+    /// the script completes to detect whether the calibrator observed a
+    /// time change during execution.
+    private var lastContinuityGenerationAtScriptStart: Int64 = 0
     private var currentTimeScopeFileURL: URL?
     private var needsWakeRevalidation = false
     private var isApplicationActive = false
@@ -407,7 +412,10 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         repositoryMonitoringStartDelay: TimeInterval = 5,
         foregroundActivationRefreshDelay: TimeInterval = 5,
         minimumPowerStateRefreshInterval: TimeInterval = 30,
-        clockDiscontinuityTolerance: TimeInterval = 5
+        clockDiscontinuityTolerance: TimeInterval = 5,
+        continuityRecordProvider: @escaping () -> TinyBuddyTimeContinuityRecord = {
+            TinyBuddyTimeContinuityRecord.load()
+        }
     ) {
         var adapterCalendar = Calendar.autoupdatingCurrent
         adapterCalendar.timeZone = .autoupdatingCurrent
@@ -417,7 +425,6 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         )
         let initialTimeContext = resolvedTimeEnvironment.capture()
             ?? GitActivityRefreshCoordinator.fallbackTimeContext
-        let initialMonotonicTime = monotonicTimeProvider()
         self.activityStore = activityStore
         self.dailyStatsStore = dailyStatsStore
         self.combinedSnapshotStore = combinedSnapshotStore ?? dailyStatsStore.makeCombinedSnapshotStore()
@@ -477,9 +484,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         self.foregroundActivationRefreshDelay = max(0, foregroundActivationRefreshDelay)
         self.minimumPowerStateRefreshInterval = max(0, minimumPowerStateRefreshInterval)
         self.clockDiscontinuityTolerance = clockDiscontinuityTolerance
+        self.continuityRecordProvider = continuityRecordProvider
         self.activeTimeContext = initialTimeContext
-        self.lastObservedTimeContext = initialTimeContext
-        self.lastObservedMonotonicTime = initialMonotonicTime
         self.lastWidgetContent = PublishedWidgetContent(
             dayIdentifier: initialTimeContext.dayIdentifier,
             snapshot: dailyStatsStore.loadSnapshot(),
@@ -502,7 +508,6 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         isPeriodicRefreshSuspended = false
         if let context = timeEnvironment.capture() {
             activeTimeContext = context
-            observeTimeContext(context, at: monotonicTimeProvider())
         }
         renewTimeScopeLease()
         registerWorkspaceNotificationsIfNeeded()
@@ -584,7 +589,6 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     func handleTimeEnvironmentChanged(_ context: TinyBuddyTimeContext) {
         let monotonicTime = monotonicTimeProvider()
         guard shouldRevalidateTimeContext(context, at: monotonicTime) else {
-            observeTimeContext(context, at: monotonicTime)
             return
         }
         invalidateTimeEnvironment(
@@ -924,7 +928,6 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                 )
                 return
             }
-            observeTimeContext(context, at: monotonicTime)
             if isStarted {
                 scheduleDayBoundaryTimer()
                 scheduleTimerIfNeeded(forceReschedule: true)
@@ -1202,6 +1205,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             userInfo: nextLifecycleNotificationUserInfo()
         )
         lastRefreshAttemptMonotonicTime = monotonicTime
+        lastContinuityGenerationAtScriptStart = continuityRecordProvider().calibrationGeneration
         let lifecycleGeneration = self.lifecycleGeneration
         let scriptRunner = self.scriptRunner
         let timeScopeLease = GitRefreshTimeScopeLease(
@@ -1826,7 +1830,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         let context = timeEnvironment.capture() ?? activeTimeContext
         let monotonicTime = monotonicTimeProvider()
         guard shouldRevalidateTimeContext(context, at: monotonicTime) else {
-            observeTimeContext(context, at: monotonicTime)
+            activeTimeContext = context
             return false
         }
         invalidateTimeEnvironment(
@@ -1841,22 +1845,46 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         _ context: TinyBuddyTimeContext,
         at monotonicTime: TimeInterval
     ) -> Bool {
+        // The calibrator's persistence record is the single source of truth for
+        // past observations.  If the continuity record is populated (non-empty
+        // day), use it for comparisons.  Otherwise fall back to the in-memory
+        // `activeTimeContext` to support early-lifecycle and test paths where
+        // no calibrator has run yet.
+        let continuity = continuityRecordProvider()
+        let scopeIdentifier = context.signature.portableScopeIdentifier
+
+        if !continuity.lastObservedDayIdentifier.isEmpty {
+            if context.dayIdentifier != continuity.lastObservedDayIdentifier
+                || scopeIdentifier != continuity.lastScopeIdentifier {
+                return true
+            }
+
+            // Clock-jump detection using the calibrator's persisted monotonic
+            // reference.  If wall-clock and monotonic elapsed times diverged
+            // beyond the tolerance, something changed.
+            guard continuity.lastMonotonicTime > 0,
+                  continuity.lastCalibrationDate.timeIntervalSince1970 > 0 else {
+                return false
+            }
+            let monotonicElapsed = max(0, monotonicTime - continuity.lastMonotonicTime)
+            let wallElapsed = context.now.timeIntervalSince(continuity.lastCalibrationDate)
+            let withinWindow = wallElapsed > 0
+                && wallElapsed < 86_400
+                && monotonicElapsed >= 0
+                && monotonicElapsed < 86_400
+            guard withinWindow else {
+                return false
+            }
+            let drift = abs(wallElapsed - monotonicElapsed)
+            return drift > clockDiscontinuityTolerance
+        }
+
+        // Calibrator has never run; fall back to own cached context.
         if context.dayIdentifier != activeTimeContext.dayIdentifier
             || context.signature != activeTimeContext.signature {
             return true
         }
-
-        let monotonicElapsed = max(0, monotonicTime - lastObservedMonotonicTime)
-        let expectedNow = lastObservedTimeContext.now.addingTimeInterval(monotonicElapsed)
-        return abs(context.now.timeIntervalSince(expectedNow)) > clockDiscontinuityTolerance
-    }
-
-    private func observeTimeContext(
-        _ context: TinyBuddyTimeContext,
-        at monotonicTime: TimeInterval
-    ) {
-        lastObservedTimeContext = context
-        lastObservedMonotonicTime = monotonicTime
+        return false
     }
 
     private func invalidateTimeEnvironment(
@@ -1866,7 +1894,6 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     ) {
         advanceLifecycleGeneration()
         activeTimeContext = context
-        observeTimeContext(context, at: monotonicTime)
         isRefreshing = false
         pendingRefreshRequest = nil
         didReloadWidgetDuringCurrentRefresh = false
@@ -1906,6 +1933,15 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
               completionContext.signature == startedContext.signature else {
             return nil
         }
+
+        // Also verify against the calibrator's continuity record.  If the
+        // calibration generation advanced during script execution, the
+        // calibrator detected a time change that invalidates this completion.
+        let continuity = continuityRecordProvider()
+        if continuity.calibrationGeneration != lastContinuityGenerationAtScriptStart {
+            return nil
+        }
+
         let elapsed = max(0, monotonicTimeProvider() - startedAtMonotonicTime)
         let expectedNow = startedContext.now.addingTimeInterval(elapsed)
         guard abs(completionContext.now.timeIntervalSince(expectedNow))

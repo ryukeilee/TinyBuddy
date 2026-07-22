@@ -94,6 +94,34 @@ final class TinyBuddyTimeEnvironmentTests: XCTestCase {
         )
     }
 
+    func testDSTTransitionDayLengths() throws {
+        let losAngeles = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let spring = try XCTUnwrap(makeContext(
+            now: makeDate(year: 2026, month: 3, day: 8, hour: 12, minute: 0, timeZone: losAngeles),
+            timeZone: losAngeles
+        ))
+        let fall = try XCTUnwrap(makeContext(
+            now: makeDate(year: 2026, month: 11, day: 1, hour: 12, minute: 0, timeZone: losAngeles),
+            timeZone: losAngeles
+        ))
+        let normal = try XCTUnwrap(makeContext(
+            now: makeDate(year: 2026, month: 7, day: 1, hour: 12, minute: 0, timeZone: losAngeles),
+            timeZone: losAngeles
+        ))
+
+        // Spring-forward day should be 23h (82800 seconds)
+        XCTAssertEqual(spring.localDayLength, 82_800, accuracy: 1.0)
+        XCTAssertTrue(spring.isDSTTransitionDay())
+
+        // Fall-back day should be 25h (90000 seconds)
+        XCTAssertEqual(fall.localDayLength, 90_000, accuracy: 1.0)
+        XCTAssertTrue(fall.isDSTTransitionDay())
+
+        // Normal day should be 24h (86400 seconds)
+        XCTAssertEqual(normal.localDayLength, 86_400, accuracy: 1.0)
+        XCTAssertFalse(normal.isDSTTransitionDay())
+    }
+
     func testInvalidDateCannotCreateContext() {
         XCTAssertNil(TinyBuddyTimeContext(
             now: Date(timeIntervalSinceReferenceDate: .infinity),

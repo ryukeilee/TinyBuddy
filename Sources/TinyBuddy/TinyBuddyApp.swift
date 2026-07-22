@@ -123,6 +123,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var gitScanRootAuthorizationStore: GitScanRootAuthorizationStore!
     private let notificationCenter = NotificationCenter.default
     private let timeEnvironment = TinyBuddyTimeEnvironment()
+    private lazy var timeCalibrator = TinyBuddyTimeCalibrator(
+        timeEnvironment: timeEnvironment,
+        onChange: { [weak self] outcome in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.handleCalibrationOutcome(outcome)
+            }
+        }
+    )
     private let resetService: TinyBuddyResetService
     private let resetRecoveryError: TinyBuddyResetError?
     private var authorizationCommandObservers: [NSObjectProtocol] = []
@@ -244,10 +253,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch event {
         case .environmentChanged(let context):
             self.gitActivityRefreshCoordinator.handleTimeEnvironmentChanged(context)
+            // Run calibration after the coordinator processes the change.
+            // The calibrator's monotonic-clock comparison may detect a
+            // discontinuity that the notification alone does not reveal.
+            self.timeCalibrator.calibrate()
         case .willSleep:
             self.gitActivityRefreshCoordinator.handleWillSleep()
         }
     }
+
+    /// Reacts to time-calibration outcomes.  Meaningful changes trigger a
+    /// notification that in-app listeners (including the Widget reload path)
+    /// can observe, and advance the shared continuity record so cross-process
+    /// readers detect the change.
+    private func handleCalibrationOutcome(_ outcome: TinyBuddyCalibrationOutcome) {
+        let continuity: TinyBuddyTimeContinuityRecord?
+        switch outcome {
+        case .dayChanged(_, _, let c),
+             .discontinuityDetected(_, _, _, _, let c),
+             .timeZoneChanged(_, _, let c):
+            continuity = c
+        case .stable(let c):
+            continuity = c
+        case .invalid:
+            continuity = nil
+        }
+
+        guard let continuity else { return }
+
+        let isMeaningful: Bool
+        switch outcome {
+        case .dayChanged, .discontinuityDetected, .timeZoneChanged:
+            isMeaningful = true
+        case .stable, .invalid:
+            isMeaningful = false
+        }
+
+        // Always persist the observation in userInfo for diagnostics.
+        let userInfo: [String: Any] = [
+            "calibrationGeneration": continuity.calibrationGeneration,
+            "discontinuityCount": continuity.discontinuityCount,
+            "dayIdentifier": continuity.lastObservedDayIdentifier,
+            "timeZoneIdentifier": continuity.lastObservedTimeZoneIdentifier
+        ]
+
+        if isMeaningful {
+            notificationCenter.post(
+                name: .tinyBuddyTimeRecalibrationRequired,
+                object: outcome,
+                userInfo: userInfo
+            )
+            // The refresh coordinator already handles widget reloads when its
+            // own time-context invalidation triggers a refresh cycle.  For
+            // changes detected purely through the calibrator (e.g., a manual
+            // clock adjustment without a system notification), request a
+            // widget reload so the Widget picks up the new continuity record.
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
     private lazy var gitScanRootAuthorizationController = GitScanRootAuthorizationController(
         store: gitScanRootAuthorizationStore,
         onboardingStore: onboardingStore
@@ -353,6 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerAuthorizationCommandObservers()
         registerSettingsChangeObserver()
         timeEnvironmentChangeMonitor.start()
+        _ = timeCalibrator.calibrate()
         configCoordinator.start()
         gitActivityRefreshCoordinator.start(
             isApplicationActive: NSApp.isActive,

@@ -10,17 +10,23 @@ struct TinyBuddyEntry: TimelineEntry {
     let presentation: TinyBuddyDisplayPresentation
     let focusSessionSnapshot: FocusSessionDerivedSnapshot?
     let focusHistoryPublication: FocusHistoryPublication?
+    /// The calibration generation at the time this entry was built.
+    /// Tracked so the Widget can detect when time was recalibrated
+    /// (timezone change, clock adjustment, DST) between timeline reloads.
+    let calibrationGeneration: Int64
 
     init(
         date: Date,
         presentation: TinyBuddyDisplayPresentation,
         focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
-        focusHistoryPublication: FocusHistoryPublication? = nil
+        focusHistoryPublication: FocusHistoryPublication? = nil,
+        calibrationGeneration: Int64 = 0
     ) {
         self.date = date
         self.presentation = presentation
         self.focusSessionSnapshot = focusSessionSnapshot
         self.focusHistoryPublication = focusHistoryPublication
+        self.calibrationGeneration = calibrationGeneration
     }
 }
 
@@ -31,6 +37,7 @@ struct TinyBuddyProvider: TimelineProvider {
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let sharedDefaults: UserDefaults
     private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
+    private static let lastSeenCalibrationGenerationKey = "tinybuddy.widget.lastSeenCalibrationGeneration"
 
     private let configStore: TinyBuddyConfigStore
 
@@ -44,6 +51,16 @@ struct TinyBuddyProvider: TimelineProvider {
         )
         self.sharedDefaults = TinyBuddySharedData.makeUserDefaults()
         self.configStore = TinyBuddyConfigStore()
+    }
+
+    /// Returns the current calibration generation from the shared continuity
+    /// record, or 0 if no record exists.
+    private static func currentCalibrationGeneration(
+        userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults()
+    ) -> Int64 {
+        TinyBuddyTimeContinuityRecord.currentCalibrationGeneration(
+            userDefaults: userDefaults
+        )
     }
 
     func placeholder(in context: Context) -> TinyBuddyEntry {
@@ -118,6 +135,25 @@ struct TinyBuddyProvider: TimelineProvider {
         }
         Self.logger.notice("app config \(configState, privacy: .public)")
 
+        // Check time continuity.  If the calibration generation advanced since
+        // the last timeline build, a time-environment change occurred that may
+        // affect data staleness.
+        let continuity = TinyBuddyTimeContinuityRecord.load(
+            userDefaults: sharedDefaults
+        )
+        let lastSeenGeneration = sharedDefaults.value(
+            forKey: Self.lastSeenCalibrationGenerationKey
+        ) as? Int64 ?? 0
+        if continuity.calibrationGeneration != lastSeenGeneration {
+            Self.logger.notice(
+                "time recalibrated generation=\(continuity.calibrationGeneration, privacy: .public) lastSeen=\(lastSeenGeneration, privacy: .public) day=\(continuity.lastObservedDayIdentifier, privacy: .public) zone=\(continuity.lastObservedTimeZoneIdentifier, privacy: .public)"
+            )
+            sharedDefaults.set(
+                continuity.calibrationGeneration,
+                forKey: Self.lastSeenCalibrationGenerationKey
+            )
+        }
+
         let combinedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
         )
@@ -141,7 +177,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 ),
                 timeContext: timeContext,
                 focusSessionSnapshot: combinedSnapshot.focusSessionSnapshot,
-                focusHistoryPublication: combinedSnapshot.focusHistoryPublication
+                focusHistoryPublication: combinedSnapshot.focusHistoryPublication,
+                calibrationGeneration: continuity.calibrationGeneration
             )
         }
 
@@ -156,7 +193,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 activitySnapshot: retainedSnapshot.activitySnapshot,
                 refreshStatus: refreshStatus,
                 dataAvailability: .stale,
-                timeContext: timeContext
+                timeContext: timeContext,
+                calibrationGeneration: continuity.calibrationGeneration
             )
         }
 
@@ -174,7 +212,8 @@ struct TinyBuddyProvider: TimelineProvider {
                     observation: observation,
                     hasSnapshot: false
                 ),
-                timeContext: timeContext
+                timeContext: timeContext,
+                calibrationGeneration: continuity.calibrationGeneration
             )
         }
 
@@ -187,7 +226,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 observation: combinedRead.observation,
                 hasSnapshot: false
             ),
-            timeContext: timeContext
+            timeContext: timeContext,
+            calibrationGeneration: continuity.calibrationGeneration
         )
     }
 
@@ -199,7 +239,8 @@ struct TinyBuddyProvider: TimelineProvider {
         dataAvailability: TinyBuddyDisplayDataAvailability,
         timeContext: TinyBuddyTimeContext,
         focusSessionSnapshot: FocusSessionDerivedSnapshot? = nil,
-        focusHistoryPublication: FocusHistoryPublication? = nil
+        focusHistoryPublication: FocusHistoryPublication? = nil,
+        calibrationGeneration: Int64 = 0
     ) -> TinyBuddyEntry {
         TinyBuddyEntry(
             date: date,
@@ -215,7 +256,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 timeZone: timeContext.timeZone
             ),
             focusSessionSnapshot: focusSessionSnapshot,
-            focusHistoryPublication: focusHistoryPublication
+            focusHistoryPublication: focusHistoryPublication,
+            calibrationGeneration: calibrationGeneration
         )
     }
 

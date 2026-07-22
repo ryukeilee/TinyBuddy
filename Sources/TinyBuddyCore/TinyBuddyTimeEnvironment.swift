@@ -96,6 +96,22 @@ public struct TinyBuddyTimeContext: Sendable {
         Self.dayIdentifier(for: date, calendar: businessCalendar)
     }
 
+    /// The length of the current local day in seconds, computed as the
+    /// difference between `nextDayBoundary` and the start of the current
+    /// local day.  On standard days this equals 86400; on DST spring-forward
+    /// days it equals 82800 (23h); on DST fall-back days it equals 90000 (25h).
+    public var localDayLength: TimeInterval {
+        let startOfToday = businessCalendar.startOfDay(for: now)
+        return nextDayBoundary.timeIntervalSince(startOfToday)
+    }
+
+    /// Returns `true` when the current local day length differs from the
+    /// standard 86400 seconds by more than the given tolerance, indicating
+    /// a DST transition day (spring-forward or fall-back).
+    public func isDSTTransitionDay(tolerance: TimeInterval = 1.0) -> Bool {
+        abs(localDayLength - 86_400) > tolerance
+    }
+
     public func isSameLocalDay(_ lhs: Date, _ rhs: Date) -> Bool {
         guard let lhsDay = dayIdentifier(for: lhs),
               let rhsDay = dayIdentifier(for: rhs) else {
