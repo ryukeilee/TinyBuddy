@@ -1404,9 +1404,12 @@ public final class TinyBuddyCombinedSnapshotStore {
             return true
         }
 
+        // Use the migrator to validate and optionally decode legacy data before
+        // backing it up.  `sanitizeToCurrentSchema` handles V1, V2, and V3
+        // uniformly so legacy-only decode logic is no longer needed here.
         if directString(forKey: Key.migrationBackupV1) == nil,
            let legacyValue = directSource.legacySnapshot,
-           Self.decode(legacyValue) != nil {
+           Self.sanitizeToCurrentSchema(legacyValue).snapshot != nil {
             guard writeValue(legacyValue, Key.migrationBackupV1),
                   synchronizeWrites(),
                   directString(forKey: Key.migrationBackupV1) == legacyValue else {
@@ -1424,6 +1427,10 @@ public final class TinyBuddyCombinedSnapshotStore {
             _ = synchronizeWrites()
             return false
         }
+
+        Self.logger.info(
+            "Schema upgraded to v\(Self.currentSchemaVersion) via migrator"
+        )
         return true
     }
 
