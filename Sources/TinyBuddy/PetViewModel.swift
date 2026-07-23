@@ -628,7 +628,8 @@ final class PetViewModel: ObservableObject {
         return didChange
     }
 
-    private func reloadCommittedHUDState() {
+    @discardableResult
+    private func reloadCommittedHUDState() -> Bool {
         let fallbackSnapshot = store.loadSnapshot()
         let expectedDayIdentifier = timeEnvironment.capture()?.dayIdentifier
             ?? fallbackSnapshot.stats.dayIdentifier
@@ -642,8 +643,9 @@ final class PetViewModel: ObservableObject {
         if let observation = combinedRead.observation,
            combinedRead.snapshot == nil,
            observation.reason == .snapshotCorrupt || observation.reason == .staleData {
-            _ = reloadHUDState()
-            return
+            let didChange = reloadHUDState()
+            updateHiddenSnapshotDiagnosticSummary()
+            return didChange
         }
         if let combinedSnapshot = combinedRead.snapshot {
             snapshot = combinedSnapshot.snapshot
@@ -656,7 +658,7 @@ final class PetViewModel: ObservableObject {
                 recentProjectName: nil
             )
         }
-        _ = applyHUDState(
+        let didChange = applyHUDState(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,
             committedSnapshot: combinedRead.snapshot,
@@ -666,13 +668,16 @@ final class PetViewModel: ObservableObject {
             )
         )
         updateHiddenSnapshotDiagnosticSummary()
+        return didChange
     }
 
     /// A focus-session journal transaction already reached disk. Re-read the
     /// same committed combined snapshot path used by HUD and Widget, rather
-    /// than applying an optimistic in-memory presentation.
+    /// than applying an optimistic in-memory presentation.  The combined
+    /// snapshot was already written by the caller; this re-reads without
+    /// re-writing to avoid an unnecessary revision increment.
     func focusSessionStatsDidChange() {
-        if reloadHUDState() {
+        if reloadCommittedHUDState() {
             reloadWidgetIfPossible()
         }
     }
@@ -958,6 +963,24 @@ final class PetViewModel: ObservableObject {
             return CombinedHUDState(
                 committedSnapshot: rebuiltSnapshot,
                 didPersist: true
+            )
+        }
+
+        // Cold-start fast path: skip writing when the existing combined
+        // snapshot is already current for the expected day, the pet stats
+        // have not changed, and the activity store does not have a newer
+        // revision.  This prevents an unnecessary revision increment and
+        // downstream cascade (Widget reload, HUD re-render) on every cold
+        // start when nothing has changed.
+        if validatedRead.observation == nil,
+           let existingSnapshot = validatedRead.snapshot,
+           existingSnapshot.dayIdentifier == expectedDayIdentifier,
+           snapshot == existingSnapshot.snapshot,
+           activityRead?.trustedRevision.map({ $0 > (existingSnapshot.activityRevision ?? -1) }) != true {
+            return CombinedHUDState(
+                committedSnapshot: existingSnapshot,
+                didPersist: false,
+                dataAvailability: .available
             )
         }
 

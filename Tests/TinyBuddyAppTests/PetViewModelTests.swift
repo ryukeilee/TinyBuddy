@@ -64,7 +64,7 @@ final class PetViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.hudPresentation.focusCount, 1)
         XCTAssertEqual(viewModel.hudPresentation.completionCount, 2)
-        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "数据读取失败 · Persisted")
+        XCTAssertEqual(viewModel.hudPresentation.statusDisplayTitle, "今日完成 · Persisted")
         XCTAssertEqual(combinedStore.load(), persisted)
     }
 
