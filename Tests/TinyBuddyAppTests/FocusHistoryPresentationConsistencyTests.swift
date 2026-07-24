@@ -29,9 +29,11 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
 
         XCTAssertTrue(report.contains("publication = publicationProvider()"))
         XCTAssertFalse(report.contains("} { _ in\n            refreshHistory()"))
-        XCTAssertTrue(widget.contains("return \"专注历史尚未就绪\""))
+        // Widget 在 publication 不可用时回退到 Git 活动数据而非显示"未知"
         XCTAssertFalse(widget.contains("guard let focus = entry.focusSessionSnapshot"))
         XCTAssertTrue(widget.contains("focusMetricIsKnown ? presentation.focusCountText : \"未知\""))
+        // 回退逻辑使用 Git 活动数据中的专注块计数
+        XCTAssertTrue(widget.contains("presentation.focusCount > 0"))
     }
 
     private func source(_ relativePath: String) throws -> String {

@@ -110,13 +110,17 @@ struct TinyBuddyProvider: TimelineProvider {
     }
 
     private func makeRolloverEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
-        entry(
+        let continuity = TinyBuddyTimeContinuityRecord.load(
+            userDefaults: sharedDefaults
+        )
+        return entry(
             at: timeContext.now,
             snapshot: neutralSnapshot(dayIdentifier: timeContext.dayIdentifier),
             activitySnapshot: neutralActivitySnapshot,
             refreshStatus: nil,
             dataAvailability: .available,
-            timeContext: timeContext
+            timeContext: timeContext,
+            calibrationGeneration: continuity.calibrationGeneration
         )
     }
 
@@ -194,6 +198,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 refreshStatus: refreshStatus,
                 dataAvailability: .stale,
                 timeContext: timeContext,
+                focusSessionSnapshot: retainedSnapshot.focusSessionSnapshot,
+                focusHistoryPublication: retainedSnapshot.focusHistoryPublication,
                 calibrationGeneration: continuity.calibrationGeneration
             )
         }
@@ -214,6 +220,8 @@ struct TinyBuddyProvider: TimelineProvider {
                 refreshStatus: refreshStatus,
                 dataAvailability: .stale,
                 timeContext: timeContext,
+                focusSessionSnapshot: anySnapshot.focusSessionSnapshot,
+                focusHistoryPublication: anySnapshot.focusHistoryPublication,
                 calibrationGeneration: continuity.calibrationGeneration
             )
         }
@@ -341,16 +349,26 @@ struct TinyBuddyWidgetView: View {
 
     private var focusSessionSummary: String? {
         guard let day = entry.focusHistoryPublication?.snapshot.recentDays.last else {
-            return "专注历史尚未就绪"
+            // 当专注历史 publication 不可用时，检查 Git 活动数据是否有专注块计数
+            if presentation.focusCount > 0 {
+                return "有 \(presentation.focusCountText) 个专注块（来自 Git 活动）"
+            }
+            return nil
         }
         switch day.state {
         case .sessions:
             let minutes = Int((day.focusDuration ?? 0) / 60)
             return "已专注 \(minutes / 60) 小时 \(minutes % 60) 分 · \(day.completedSessionCount ?? 0) 段"
         case .noSessions:
+            if presentation.focusCount > 0 {
+                return "有 \(presentation.focusCountText) 个专注块（来自 Git 活动）"
+            }
             return "今日暂无已结束会话"
         case .unknown:
-            return "专注历史未知"
+            if presentation.focusCount > 0 {
+                return "有 \(presentation.focusCountText) 个专注块（来自 Git 活动）"
+            }
+            return nil
         }
     }
 
@@ -363,18 +381,17 @@ struct TinyBuddyWidgetView: View {
         return "本周 \(minutes / 60) 小时 \(minutes % 60) 分"
     }
 
-    /// Do not fall back to the legacy count when the authoritative history
-    /// publication is absent or unknown. A missing migration/read result is
-    /// semantically different from a known day with zero completed sessions.
+    /// 优先使用权威 publication 判断已知性，并在其不可用时回退到 Git 活动数据
     private var focusMetricText: String {
         focusMetricIsKnown ? presentation.focusCountText : "未知"
     }
 
     private var focusMetricIsKnown: Bool {
-        guard let day = entry.focusHistoryPublication?.snapshot.recentDays.last else {
-            return false
+        if let day = entry.focusHistoryPublication?.snapshot.recentDays.last {
+            return day.state != .unknown && day.completedSessionCount != nil
         }
-        return day.state != .unknown && day.completedSessionCount != nil
+        // 回退：没有 publication 时，检查 Git 活动数据是否有有效计数
+        return presentation.focusCount > 0
     }
 
     private var displayEnvironment: TinyBuddyDisplayEnvironment {
