@@ -425,6 +425,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             powerState: TinyBuddyPowerState.current()
         )
 
+        // Ensure the combined snapshot exists for the current local day so
+        // the Widget never sees a stale-day-only shared snapshot on a fresh
+        // launch when no refresh commit has completed yet.  If a snapshot
+        // already exists for today, the read-validated check below returns
+        // it without writing; otherwise the available pet and activity data
+        // is published atomically and the Widget timeline is reloaded.
+        initializeCombinedSnapshotForCurrentDay()
+
         // === Version upgrade detection: state reconstruction & widget self-healing ===
         //
         // Detect app version changes (cover install / upgrade) and set the
@@ -915,6 +923,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if result.requiresStandaloneWidgetReload {
             WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
+    /// Ensures the combined snapshot for the current local day is committed
+    /// to the App Group store at launch, regardless of when the PetViewModel
+    /// initializes or the first Git refresh completes.
+    ///
+    /// If a combined snapshot for today already exists, the read-validated
+    /// check returns it without writing. Otherwise a new snapshot is built
+    /// from whatever DailyStats and activity data are currently available
+    /// and published atomically, followed by a Widget timeline reload so the
+    /// Widget can immediately consume it.
+    private func initializeCombinedSnapshotForCurrentDay() {
+        guard resetRecoveryError == nil else { return }
+
+        let timeContext = timeEnvironment.capture()
+        let expectedDayIdentifier = timeContext?.dayIdentifier
+            ?? dailyStatsStore.loadSnapshot().stats.dayIdentifier
+
+        // Fast path: a valid snapshot for today already exists.
+        let existingRead = combinedSnapshotStore.readValidated(
+            expectedDayIdentifier: expectedDayIdentifier
+        )
+        if existingRead.observation == nil, existingRead.snapshot != nil {
+            return
+        }
+
+        // Build and publish a snapshot for today from available data.
+        let snapshot = dailyStatsStore.loadSnapshot()
+        var fallbackActivitySnapshot: GitTodayActivitySnapshot?
+        var fallbackActivityRevision: Int64?
+        if timeContext?.dayIdentifier == snapshot.stats.dayIdentifier {
+            let activityRead = activityStore.loadTodaySnapshotRead()
+            fallbackActivitySnapshot = activityRead.snapshot
+            fallbackActivityRevision = activityRead.trustedRevision
+        }
+
+        let result = combinedSnapshotStore.updatePetSlice(
+            snapshot,
+            fallbackActivitySnapshot: fallbackActivitySnapshot,
+            fallbackActivityRevision: fallbackActivityRevision
+        )
+
+        if result.didPersist || result.outcome == .alreadyCurrent {
+            tinyBuddyStartupLogger.notice(
+                "Combined snapshot initialized for day=\(expectedDayIdentifier, privacy: .public) outcome=\(String(describing: result.outcome), privacy: .public)"
+            )
+            WidgetCenter.shared.reloadAllTimelines()
+        } else {
+            tinyBuddyStartupLogger.error(
+                "Failed to initialize combined snapshot for day=\(expectedDayIdentifier, privacy: .public) outcome=\(String(describing: result.outcome), privacy: .public)"
+            )
         }
     }
 
