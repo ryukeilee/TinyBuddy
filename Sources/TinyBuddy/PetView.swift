@@ -324,7 +324,8 @@ struct PetView: View {
                     for: colorScheme,
                     increasedContrast: increasedContrast
                 ),
-                animation: semanticAnimation
+                animation: semanticAnimation,
+                isUnknown: !focusMetricIsKnown
             )
             CounterView(
                 title: "今日完成",
@@ -752,6 +753,7 @@ private struct CounterView<PanelFill: ShapeStyle>: View {
     let panelFill: PanelFill
     let border: Color
     let animation: Animation?
+    var isUnknown: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -760,7 +762,7 @@ private struct CounterView<PanelFill: ShapeStyle>: View {
                 .foregroundStyle(secondaryText)
                 .lineLimit(1)
             Text(value)
-                .font(.title3.weight(.heavy).monospacedDigit())
+                .font(isUnknown ? .title2.weight(.heavy) : .title3.weight(.heavy).monospacedDigit())
                 .foregroundStyle(primaryText)
                 .contentTransition(.numericText())
                 .lineLimit(1)
