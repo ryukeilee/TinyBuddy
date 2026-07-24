@@ -250,10 +250,20 @@ final class PetViewModel: ObservableObject {
             activitySnapshot: activitySnapshot,
             committedSnapshot: combinedHUDState.committedSnapshot
         )
+        // Trigger a Widget timeline reload when the combined snapshot was
+        // just committed for a day the Widget may not have seen yet, or
+        // when data availability is not optimal.  The refresh coordinator
+        // also independently reloads widget timelines after its content-
+        // change check; this additional path ensures the Widget picks up
+        // the snapshot even when the coordinator skips the reload (e.g.
+        // when the activity data happened to match a day-boundary rebuild).
         if combinedHUDState.dataAvailability != .available
             || (combinedHUDState.didPersist
                 && (hadSameDayCommittedSnapshot
-                    || widgetPresentationBeforePublication != widgetPresentation)) {
+                    || widgetPresentationBeforePublication != widgetPresentation))
+            || (!hadSameDayCommittedSnapshot
+                && combinedHUDState.dataAvailability == .available
+                && committedSnapshotBeforePublication != nil) {
             reloadWidgetIfPossible()
         }
         observers.append(notificationCenter.addObserver(
@@ -283,6 +293,10 @@ final class PetViewModel: ObservableObject {
                 self.latestRefreshStatus = refreshStatus
                 self.updateRefreshDiagnostics(for: refreshStatus)
                 self.reloadCommittedHUDState()
+                // Ensure the Widget picks up the latest committed snapshot
+                // even when the coordinator's own content-change check did
+                // not trigger a timeline reload.
+                self.reloadWidgetIfPossible()
             }
         })
         observers.append(notificationCenter.addObserver(
@@ -645,6 +659,13 @@ final class PetViewModel: ObservableObject {
            observation.reason == .snapshotCorrupt || observation.reason == .staleData {
             let didChange = reloadHUDState()
             updateHiddenSnapshotDiagnosticSummary()
+            // The reloadHUDState call above may have written a new combined
+            // snapshot for today via publishAndLoadCombinedSnapshot.  Ensure
+            // the Widget gets a chance to consume it, even when the refresh
+            // coordinator's own content-change check did not trigger a reload.
+            if didChange {
+                reloadWidgetIfPossible()
+            }
             return didChange
         }
         if let combinedSnapshot = combinedRead.snapshot {

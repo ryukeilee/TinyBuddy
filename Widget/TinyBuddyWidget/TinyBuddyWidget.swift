@@ -186,7 +186,7 @@ struct TinyBuddyProvider: TimelineProvider {
            observation.reason == .staleData,
            let retainedSnapshot = combinedSnapshotStore.loadReadOnly(
                minimumDayIdentifier: expectedDayIdentifier
-           ) {
+           ) ?? combinedSnapshotStore.loadReadOnly() {
             return entry(
                 at: timeContext.now,
                 snapshot: retainedSnapshot.snapshot,
