@@ -371,6 +371,28 @@ public final class TinyBuddyCombinedSnapshotStore {
         return snapshot
     }
 
+    /// Reads the stored schema version from the first available source (direct
+    /// preferences, shared preferences, or fallback defaults). Returns `nil`
+    /// when no schema version has been stored yet (first launch).
+    public func loadSchemaVersion() -> Int? {
+        synchronizeReads()
+        let direct = directPreferencesProvider()
+        if let marker = direct[Key.schemaVersion] as? String,
+           let version = Self.decodeSchemaVersion(marker) {
+            return version
+        }
+        let shared = sharedPreferencesProvider()
+        if let marker = shared?[Key.schemaVersion] as? String,
+           let version = Self.decodeSchemaVersion(marker) {
+            return version
+        }
+        if let fallback = fallbackDefaults?.string(forKey: Key.schemaVersion),
+           let version = Self.decodeSchemaVersion(fallback) {
+            return version
+        }
+        return nil
+    }
+
     /// Repairs redundant local copies for a snapshot that was already validated
     /// by `readValidated`. This is intentionally unavailable to read-only
     /// WidgetKit callers through their use of `readValidated` alone.

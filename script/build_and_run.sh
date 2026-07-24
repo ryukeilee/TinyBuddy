@@ -2944,6 +2944,45 @@ run_locked_release_workflow() {
   return "$workflow_status"
 }
 
+# Signs the widget extension and app bundle with the Apple Development
+# certificate so macOS 14+ WidgetKit accepts the extension.
+sign_widget_extension_for_run() {
+  local identity
+  local appex
+
+  identity="$(resolve_local_code_sign_identity)" || return $?
+  appex="$(find_widget_extension "$APP_BUNDLE")"
+  if [ -z "$appex" ]; then
+    echo "sign_widget_extension_for_run: missing $WIDGET_EXTENSION_NAME.appex in $APP_BUNDLE" >&2
+    return 1
+  fi
+
+  "$CODESIGN_BIN" \
+    --force \
+    --sign "$identity" \
+    --timestamp=none \
+    --generate-entitlement-der \
+    --entitlements "$ROOT_DIR/Resources/TinyBuddyWidget/TinyBuddyWidget.entitlements" \
+    "$appex"
+  "$CODESIGN_BIN" \
+    --force \
+    --sign "$identity" \
+    --timestamp=none \
+    --generate-entitlement-der \
+    --entitlements "$ROOT_DIR/Resources/TinyBuddyApp/TinyBuddy.entitlements" \
+    "$APP_BUNDLE"
+  echo "signed widget extension and app for run mode: identity=$identity"
+}
+
+case "$MODE" in
+  release-install|--release-install|release-verify|--release-verify|release-acceptance|--release-acceptance)
+    ;;
+
+  *)
+    pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+    ;;
+esac
+
 case "$MODE" in
   release-install|--release-install|release-verify|--release-verify|release-acceptance|--release-acceptance)
     ;;
@@ -2970,18 +3009,31 @@ case "$MODE" in
     ;;
   run)
     build_current_app
+    # Ensure the widget extension is properly code-signed with a
+    # development certificate (not just ad-hoc/linker-signed) so
+    # macOS 14+ WidgetKit can load it, then register it with
+    # pluginkit so it appears in the widget gallery.
+    unregister_widget_extensions
+    sign_widget_extension_for_run
+    register_widget_extension "$APP_BUNDLE" 1
     run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     open_app
     ;;
   --debug|debug)
     build_current_app
+    unregister_widget_extensions
+    sign_widget_extension_for_run
+    register_widget_extension "$APP_BUNDLE" 1
     run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     lldb -- "$APP_BINARY"
     ;;
   --logs|logs)
     build_current_app
+    unregister_widget_extensions
+    sign_widget_extension_for_run
+    register_widget_extension "$APP_BUNDLE" 1
     run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     open_app
@@ -2989,6 +3041,9 @@ case "$MODE" in
     ;;
   --telemetry|telemetry)
     build_current_app
+    unregister_widget_extensions
+    sign_widget_extension_for_run
+    register_widget_extension "$APP_BUNDLE" 1
     run_optional_git_pre_refresh
     check_widget_runtime_source_match warn
     open_app
@@ -2997,12 +3052,16 @@ case "$MODE" in
     ;;
   --verify|verify)
     build_current_app
+    unregister_widget_extensions
+    sign_widget_extension_for_run
+    register_widget_extension "$APP_BUNDLE" 1
     run_optional_git_pre_refresh
     open_app
     sleep 1
     pgrep -x "$APP_NAME" >/dev/null
     check_widget_runtime_source_match fail
     ;;
+
   --regression-gate|regression-gate)
     initialize_build_artifact_paths
     echo "running full regression gate..." >&2
