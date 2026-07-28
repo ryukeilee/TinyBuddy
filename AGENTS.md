@@ -2,19 +2,21 @@
 
 ## Project Structure & Module Organization
 
-TinyBuddy is a Swift 5.9 macOS 14 project with both Swift Package Manager and Xcode project entry points.
+TinyBuddy is a Swift 6.0 (swiftLanguageMode .v6) macOS 14 project with both Swift Package Manager and Xcode project entry points.
 
-- `Sources/TinyBuddyCore/` contains shared domain logic, daily stats persistence, Git activity stores, and widget presentation models.
-- `Sources/TinyBuddy/` contains the macOS SwiftUI HUD app, authorization flow, refresh coordination, and app lifecycle wiring.
+- `Sources/TinyBuddyCore/` contains shared domain logic: daily stats persistence, Git activity stores, focus session engine, data repair/validation, transaction log, time calibration, combined snapshot store, widget presentation models, and release verification support.
+- `Sources/TinyBuddy/` contains the macOS SwiftUI HUD app, authorization flow, Git refresh coordination, focus session UI and manual control, pet status display, app lifecycle wiring, onboarding, reset/repair coordination, and diagnostics.
 - `Sources/TinyBuddyReleaseInstaller/` contains the narrow command-line helper that atomically installs a clean Release bundle with an exclusive destination or exchanges staged and installed bundles without removing the canonical app path.
 - `Sources/TinyBuddyReleaseVerifier/` contains the read-only command-line verifier used by signed Release workflows to validate the shared snapshot artifact.
-- `Widget/TinyBuddyWidget/` contains the WidgetKit extension implementation.
-- `Tests/TinyBuddyCoreTests/` contains deterministic XCTest coverage for the shared core module.
-- `Tests/TinyBuddyAppTests/` contains app-target tests for refresh coordination, authorization, scripts, and view model behavior.
-- `Tests/TinyBuddyAppTests/GitActivityRealRepositoryFixtureTests.swift` owns real Git regression coverage for worktrees, rewrites, duplicate roots, day boundaries, filtering, and partial failures.
-- `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` contain Info.plist, entitlements, and app/widget resources.
+- `Widget/TinyBuddyWidget/` contains the WidgetKit extension implementation (single `TinyBuddyWidget.swift` entry point).
+- `Tests/TinyBuddyCoreTests/` contains deterministic XCTest coverage for the shared core module (stores, engines, invariants, migration, query, transaction, widget lifecycle).
+- `Tests/TinyBuddyAppTests/` contains app-target tests for refresh coordination, authorization, scripts, view model behavior, focus session presentation, widget rendering, release workflow hardening, concurrency safety, and fault simulation.
+- `Tests/TinyBuddyAppTests/Helpers/` contains reusable test infrastructure: `DeterministicRandom.swift`, `DeterministicScheduler.swift`, `EventTimeline.swift`, `FaultScenario.swift`.
+- `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` contain Info.plist, entitlements, and app/widget resources (including `Assets.xcassets` for app icons).
 - `script/build_and_run.sh` is the main local build, launch, install, and verification entry point.
-- `script/update_git_completion_count.sh` performs the launch-time Git refresh and writes shared daily-activity data; `script/benchmark_git_refresh.sh` exercises accuracy, incremental latency, resource use, and cancellation against disposable repositories; `script/verify_resource_stability.sh` is the opt-in macOS lifecycle/resource verifier.
+- `script/update_git_completion_count.sh` performs the launch-time Git refresh and writes shared daily-activity data; `script/benchmark_git_refresh.sh` exercises accuracy, incremental latency, resource use, and cancellation against disposable repositories; `script/verify_resource_stability.sh` is the opt-in macOS lifecycle/resource verifier; `script/regression_gate.sh` is the comprehensive performance, energy & stability regression gate (reuses benchmark and resource scripts, adds cold/warm start, Widget reload, and multi-cycle refresh measurements).
+- `script/local_build_env.sh` sets up isolated SwiftPM module cache and scratch paths for repository wrapper builds.
+- `script/process_resource_probe.swift` is a lightweight CLI that samples `proc_pid_rusage(RUSAGE_INFO_V4)` for a given PID and outputs CSV — used by the regression gate.
 - `project.yml` is the XcodeGen source of truth for `TinyBuddy.xcodeproj`; regenerate the project after target, bundle, entitlement, or signing changes.
 
 ## Build, Test, and Development Commands
@@ -45,6 +47,30 @@ Use the existing Swift style: 4-space indentation, concise types, explicit acces
 
 Keep `project.yml` authoritative for Xcode targets, build settings, resources, entitlements, and signing. When any of those change, update `project.yml` first, regenerate `TinyBuddy.xcodeproj`, and keep the app/widget Info.plist and entitlement files synchronized.
 
+### Focus Session Architecture
+
+The focus session system is split across core and app:
+- **Core (`TinyBuddyCore`)**: `FocusSession`, `FocusSessionEngine`, `FocusSessionStore`, `FocusSessionCoordinator`, `FocusSessionRule` (with versioning), `FocusSessionEvidence` / `FocusSessionEvidenceEngine`, `FocusSessionQuery` / `FocusSessionQueryService`, `FocusSessionRecalculation`, `FocusSessionUpgradeCoordinator`, `FocusSessionEditing`, `FocusSessionClock`, `FocusSessionConfiguration`, `FocusGoalConfiguration`, `FocusHistoryAggregation`, `PetSession`, `PetStatus`.
+- **App (`TinyBuddy`)**: `FocusSessionAppBridge`, `FocusSessionSnapshotPublicationJournal`, `FocusGoalCoordinator`, `FocusGoalSettingsView`, `FocusHistoryView`, `FocusHistoryListView`, `FocusSessionReviewView`, `ManualFocusMenuBarController`, `ManualFocusProjectPicker`, `PetView`, `PetViewModel`.
+- Focus sessions use a rule pipeline with mutable evidence and upgrade lifecycle, managed by a transaction coordinator for crash-safe writes.
+
+### Data Integrity & Repair
+
+Core includes a layered data integrity subsystem: `TinyBuddyDataInvariant` (invariant definitions), `TinyBuddyDataValidator` (runtime validation), `TinyBuddyDataRepairEngine` (localized repair), and `TinyBuddyCorruptedRecordQuarantine` (isolation of unrecoverable records). The `TinyBuddyCombinedSnapshotStore` serves as the single source of truth for day state, with `TinyBuddyCombinedSnapshotMigrator` for schema evolution.
+
+### Time Model
+
+Time handling is centralized through `TinyBuddyTimeCalibrator` (system time sanity, DST transition detection) and `TinyBuddyTimeContinuityRecord` (cross-process clock continuity). `TinyBuddyTimeEnvironment` provides the authoritative local-day boundary for all snapshot, focus, and Git activity attribution.
+
+### Focus Session Invariants
+
+- A focus session is identified by its stable `ProjectIdentity` and a time range. Sessions are non-overlapping per project; overlapping ranges are resolved by the coordinator during start/end transitions.
+- Focus evidence is derived from session properties (start/end time, project, display representation) rather than hardcoded defaults. The evidence pipeline supports custom rules with versioned schemas.
+- The `FocusSessionRecalculation` engine can re-derive all focus blocks for a given day when rules or evidence sources change, preserving idempotent results.
+- Focus goals are configured per project/day via `FocusGoalConfiguration`; daily goal progress is aggregated through `FocusHistoryAggregation`.
+- Manual focus control (menu bar) and automatic refresh coordination share the same session engine and store; the `ManualFocusMenuBarController` provides user-initiated start/end with project selection.
+- Pet status (`PetViewModel`, `PetSession`) derives focus state and completion activity from the combined snapshot for HUD display.
+
 ## Git Activity & Snapshot Invariants
 
 - Identify a logical repository by its canonical common Git directory. A normal checkout, linked worktree, symlinked scan root, or repeated scan path must not duplicate repository or event counts.
@@ -58,11 +84,12 @@ Keep `project.yml` authoritative for Xcode targets, build settings, resources, e
 
 ## Testing & Definition of Done
 
-Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-facing coverage under `Tests/TinyBuddyAppTests/`. Name files with the `Tests.swift` suffix and test methods with the `test` prefix. Prefer deterministic dependencies such as isolated `UserDefaults`, fixed calendars, fixed dates, and stubbed process/script inputs. Run `swift test` before submitting changes that affect shared logic, app behavior, Git refresh flow, or widget presentation. If you change build, signing, widget, or launch behavior, also run the smallest relevant `./script/build_and_run.sh` verification mode.
+Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-facing coverage under `Tests/TinyBuddyAppTests/`. Name files with the `Tests.swift` suffix and test methods with the `test` prefix. Prefer deterministic dependencies such as isolated `UserDefaults`, fixed calendars, fixed dates, and stubbed process/script inputs. Reusable test helpers (`DeterministicRandom`, `DeterministicScheduler`, `EventTimeline`, `FaultScenario`) live in `Tests/TinyBuddyAppTests/Helpers/`. Run `swift test` before submitting changes that affect shared logic, app behavior, Git refresh flow, focus session engine, data repair, or widget presentation. If you change build, signing, widget, or launch behavior, also run the smallest relevant `./script/build_and_run.sh` verification mode.
 
-- Start with the narrowest affected test or syntax check, then run `swift test` once after the implementation is stable when shared logic, app behavior, Git refresh, or widget presentation changed.
+- Start with the narrowest affected test or syntax check, then run `swift test` once after the implementation is stable when shared logic, app behavior, Git refresh, focus session, data integrity, or widget presentation changed.
 - Git, snapshot, bookmark, sandbox, or widget-data changes must cover atomic recovery, mixed valid/invalid repositories or worktrees, stable `success`/`partial`/`failed`/`skipped` behavior, redacted diagnostics, and permission boundaries when applicable.
 - Git refresh performance, timeout, cache, enumeration, or cancellation changes should also run `./script/benchmark_git_refresh.sh`; report the configured workload when it differs from the script defaults.
+- Focus session, transaction log, data repair, time calibration, or combined snapshot changes should run the relevant core and app tests, and also consider `script/regression_gate.sh --quick` for broader regression coverage.
 - Use real Git fixtures for behavior that depends on reflog ordering, object rewriting, common-dir identity, worktrees, or filesystem aliases; do not replace those cases with only synthetic reflog text.
 - Build/signing/widget/launch changes require the smallest relevant `build_and_run.sh` mode. `release-install` requires explicit authorization because it replaces an installed app bundle; after it succeeds, reuse it as terminal install evidence and rerun `release-verify` only after an invalidating change or when evidence was incomplete.
 - A successful `release-acceptance` supersedes separate `swift test`, `release-install`, and `release-verify` runs for the same unchanged inputs. Do not report release acceptance from a lower-level stage, a run without `release-complete`, or a run whose evidence directory contains a failed or missing stage.
@@ -70,9 +97,11 @@ Tests use XCTest. Add core coverage under `Tests/TinyBuddyCoreTests/` and app-fa
 
 ## Review guidelines
 
-- Treat regressions in shared snapshot integrity, Git partial-success behavior, sandbox/bookmark access, signing/entitlements, or installed Widget source verification as blocking findings.
+- Treat regressions in shared snapshot integrity, Git partial-success behavior, sandbox/bookmark access, signing/entitlements, installed Widget source verification, focus session consistency, or data repair safety as blocking findings.
 - Check app and widget consumers against the same `TinyBuddyCore` state and day semantics; flag duplicated business rules or independent persistence paths.
 - For Git activity changes, verify canonical common-dir identity, rewrite/amend replacement, deterministic recent-project ordering, global focus-block deduplication, noise filtering, cache invalidation, and preservation of valid repositories on partial failure.
+- For focus session changes, verify session non-overlap, evidence attribution from session properties, rule versioning compatibility, recalculation idempotency, and coordinator crash safety.
+- For data integrity changes, verify invariant definitions match actual store constraints, repair engine preserves valid records, and quarantine isolates unrecoverable state without data loss.
 - Reject diagnostics that expose repository paths, user data, credentials, or unstable raw identifiers. Confirm new shell commands and their indirect dependencies are allowed by the signed runtime boundary.
 - Require relevant regression coverage and exact validation evidence. Do not accept weakened assertions, hidden failures, or an unrelated refactor bundled with the fix.
 
