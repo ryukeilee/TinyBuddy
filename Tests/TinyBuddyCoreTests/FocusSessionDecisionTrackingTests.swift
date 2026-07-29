@@ -71,6 +71,48 @@ final class FocusSessionDecisionTrackingTests: XCTestCase {
         XCTAssertEqual(sessions[1].decisionEvents?.first?.reason, .userActivity)
     }
 
+    func testSwitchingEditorsDoesNotReusePreviousRepositoryAttribution() async throws {
+        let (engine, clock, _) = makeEngine()
+        let eventStart = start
+        let firstProject = projectA
+        let coordinator = await MainActor.run {
+            FocusSessionCoordinator(
+                engine: engine,
+                clock: clock,
+                gitProjectResolver: { key, name in
+                    FocusProjectContext(key: key, displayName: name)
+                }
+            )
+        }
+
+        await MainActor.run {
+            coordinator.reportForegroundApp(
+                bundleID: "com.microsoft.VSCode",
+                displayName: "Code",
+                isCodeEditor: true,
+                at: eventStart
+            )
+            coordinator.reportGitActivity(
+                repoKey: firstProject.key,
+                displayName: firstProject.displayName,
+                automated: false,
+                at: eventStart
+            )
+        }
+        clock.advance(by: 20)
+        await MainActor.run {
+            coordinator.reportForegroundApp(
+                bundleID: "com.jetbrains.intellij",
+                displayName: "IntelliJ IDEA",
+                isCodeEditor: true,
+                at: clock.now
+            )
+            coordinator.reportUserInput(at: clock.now)
+        }
+
+        XCTAssertEqual(engine.allSessions.last?.project.key, "com.jetbrains.intellij")
+    }
+
     func testSleepAndAutomaticTerminationRecordTheirOwnEndReasons() throws {
         let (engine, clock, _) = makeEngine()
         engine.userActivity(in: projectA, at: start)

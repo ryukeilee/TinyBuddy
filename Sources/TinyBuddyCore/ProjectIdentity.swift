@@ -416,10 +416,40 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
         let candidateIndices = Set(fingerprintMatches + aliasMatches)
 
         let resolvedIndex: Int
-        if let activeIndex = candidateIndices.first(where: {
-            working.projects[$0].state != .removed
-        }) {
+        if let activeIndex = canonicalCandidateIndex(
+            from: candidateIndices,
+            fingerprint: fingerprint,
+            in: working
+        ) {
             resolvedIndex = activeIndex
+
+            // A path move, a worktree alias, or a fingerprint upgrade can make
+            // one observation match identities that were created by older
+            // scans.  Consolidate those matches immediately.  Otherwise the
+            // next scan can choose a different Set element and publish a
+            // project under the wrong owner (or leave duplicate rows forever).
+            let sourceIndices = candidateIndices.filter { $0 != resolvedIndex &&
+                working.projects[$0].state != .removed
+            }
+            if !sourceIndices.isEmpty {
+                var target = working.projects[resolvedIndex]
+                for sourceIndex in sourceIndices.sorted(by: { working.projects[$0].id < working.projects[$1].id }) {
+                    let source = working.projects[sourceIndex]
+                    target.aliases.formUnion(source.aliases)
+                    if target.repositoryFingerprint == nil {
+                        target.repositoryFingerprint = source.repositoryFingerprint
+                    }
+                    working.projects[sourceIndex].state = .removed
+                    working.redirects[source.id] = target.id
+                    for (sourceID, targetID) in working.redirects where targetID == source.id {
+                        working.redirects[sourceID] = target.id
+                    }
+                }
+                working.projects[resolvedIndex] = target
+                working = advanced(working, generation: working.generation + 1)
+                guard store.save(working) else { return .persistenceFailed }
+                snapshot = working
+            }
         } else if let removedIndex = candidateIndices.first {
             // A merged/removed identity is a tombstone. Resolve it through the
             // redirect instead of recreating the old project.
@@ -700,6 +730,31 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
     private func normalize(_ value: String) -> String? {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return normalized.isEmpty ? nil : normalized
+    }
+
+    private func canonicalCandidateIndex(
+        from indices: Set<Int>,
+        fingerprint: String,
+        in value: TinyBuddyProjectRegistrySnapshot
+    ) -> Int? {
+        let live = indices.filter { value.projects[$0].state != .removed }
+        guard !live.isEmpty else { return nil }
+        return live.sorted { lhs, rhs in
+            let left = value.projects[lhs]
+            let right = value.projects[rhs]
+            // Prefer an exact fingerprint over an alias-only match.  This is
+            // what lets a moved repository reclaim its durable identity even
+            // when an old path alias belongs to another stale row.
+            let leftExact = left.repositoryFingerprint == fingerprint
+            let rightExact = right.repositoryFingerprint == fingerprint
+            if leftExact != rightExact { return leftExact }
+            // Explicit names are user data and must not be overwritten by an
+            // automatically discovered worktree name.
+            if left.isDisplayNameCustomized != right.isDisplayNameCustomized {
+                return left.isDisplayNameCustomized
+            }
+            return left.id < right.id
+        }.first
     }
 
     private func terminalTarget(

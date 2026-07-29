@@ -54,6 +54,13 @@ public final class FocusSessionCoordinator {
         isCodeEditor: Bool,
         at date: Date? = nil
     ) {
+        // A Git event belongs to the editor instance/project that produced it,
+        // not to every later code editor.  Clear it on an application switch;
+        // otherwise returning to another editor can attribute input to a
+        // stale repository for the attribution window.
+        if let previous = foreground, previous.bundleID != bundleID {
+            recentGit = nil
+        }
         foreground = (bundleID, displayName, isCodeEditor)
         engine.foregroundProjectChanged(to: focusProject(), at: date ?? clock.now)
     }

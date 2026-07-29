@@ -86,6 +86,11 @@ public final class GitTodayRecentProjectStore {
         } else {
             userDefaults.removeObject(forKey: Key.projectName)
         }
+        // The name-only API is also used by legacy and fallback writers.  A
+        // missing name must never leave an ID pointing at yesterday's project;
+        // otherwise App and Widget can resolve different projects from the
+        // same day-scoped preferences.
+        userDefaults.removeObject(forKey: Key.projectID)
     }
 
     public func loadTodayProjectID() -> TinyBuddyProjectID? {
