@@ -274,7 +274,7 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
             synchronize: { true },
             timeContextProvider: {
                 TinyBuddyTimeContext(
-                    now: Date(),
+                    now: Self.fixedDateForDay("2026-07-20"),
                     timeZone: TimeZone(secondsFromGMT: 0)!,
                     locale: Locale(identifier: "en_US_POSIX"),
                     sourceCalendar: Calendar(identifier: .gregorian)
@@ -603,6 +603,17 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
 
     // MARK: - Helpers
 
+    private static func fixedDateForDay(_ dayId: String) -> Date {
+        let calendar = Calendar(identifier: .gregorian)
+        return calendar.date(from: DateComponents(
+            timeZone: TimeZone(secondsFromGMT: 0),
+            year: Int(dayId.prefix(4)),
+            month: Int(dayId.dropFirst(5).prefix(2)),
+            day: Int(dayId.suffix(2)),
+            hour: 12
+        ))!
+    }
+
     private func makeCombinedSnapshot(
         dayIdentifier: String,
         revision: Int64
@@ -651,7 +662,7 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
             synchronize: { true },
             timeContextProvider: {
                 TinyBuddyTimeContext(
-                    now: Date(),
+                    now: Self.fixedDateForDay("2026-07-20"),
                     timeZone: TimeZone(secondsFromGMT: 0)!,
                     locale: Locale(identifier: "en_US_POSIX"),
                     sourceCalendar: Calendar(identifier: .gregorian)
@@ -689,7 +700,7 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
             synchronize: { true },
             timeContextProvider: {
                 TinyBuddyTimeContext(
-                    now: Date(),
+                    now: Self.fixedDateForDay("2026-07-20"),
                     timeZone: TimeZone(secondsFromGMT: 0)!,
                     locale: Locale(identifier: "en_US_POSIX"),
                     sourceCalendar: Calendar(identifier: .gregorian)

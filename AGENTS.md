@@ -4,8 +4,8 @@
 
 TinyBuddy is a Swift 6.0 (swiftLanguageMode .v6) macOS 14 project with both Swift Package Manager and Xcode project entry points.
 
-- `Sources/TinyBuddyCore/` contains shared domain logic: daily stats persistence, Git activity stores, focus session engine, data repair/validation, transaction log, time calibration, combined snapshot store, widget presentation models, and release verification support.
-- `Sources/TinyBuddy/` contains the macOS SwiftUI HUD app, authorization flow, Git refresh coordination, focus session UI and manual control, pet status display, app lifecycle wiring, onboarding, reset/repair coordination, and diagnostics.
+- `Sources/TinyBuddyCore/` contains shared domain logic: daily stats persistence, Git activity stores, focus session engine, data repair/validation, transaction log, time calibration, combined snapshot store, widget presentation models, widget lifecycle health check, timeline generation tracking, version upgrade tracking, project identity, and release verification support.
+- `Sources/TinyBuddy/` contains the macOS SwiftUI HUD app, authorization flow, Git refresh coordination, focus session UI and manual control, pet status display, app lifecycle wiring, onboarding, reset/repair coordination, diagnostics, focus notification management, history query, and project management.
 - `Sources/TinyBuddyReleaseInstaller/` contains the narrow command-line helper that atomically installs a clean Release bundle with an exclusive destination or exchanges staged and installed bundles without removing the canonical app path.
 - `Sources/TinyBuddyReleaseVerifier/` contains the read-only command-line verifier used by signed Release workflows to validate the shared snapshot artifact.
 - `Widget/TinyBuddyWidget/` contains the WidgetKit extension implementation (single `TinyBuddyWidget.swift` entry point).
@@ -15,9 +15,12 @@ TinyBuddy is a Swift 6.0 (swiftLanguageMode .v6) macOS 14 project with both Swif
 - `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` contain Info.plist, entitlements, and app/widget resources (including `Assets.xcassets` for app icons).
 - `script/build_and_run.sh` is the main local build, launch, install, and verification entry point.
 - `script/update_git_completion_count.sh` performs the launch-time Git refresh and writes shared daily-activity data; `script/benchmark_git_refresh.sh` exercises accuracy, incremental latency, resource use, and cancellation against disposable repositories; `script/verify_resource_stability.sh` is the opt-in macOS lifecycle/resource verifier; `script/regression_gate.sh` is the comprehensive performance, energy & stability regression gate (reuses benchmark and resource scripts, adds cold/warm start, Widget reload, and multi-cycle refresh measurements).
+- `script/build-and-install.sh` is a convenience script for manual codesign build and installation to `/Applications`, intended for environments without Xcode accounts (free Apple ID).
 - `script/local_build_env.sh` sets up isolated SwiftPM module cache and scratch paths for repository wrapper builds.
 - `script/process_resource_probe.swift` is a lightweight CLI that samples `proc_pid_rusage(RUSAGE_INFO_V4)` for a given PID and outputs CSV — used by the regression gate.
 - `project.yml` is the XcodeGen source of truth for `TinyBuddy.xcodeproj`; regenerate the project after target, bundle, entitlement, or signing changes.
+- `.gitignore` and `.gitleaks.toml` provide repository-level security and secret scanning configuration.
+- `docs/superpowers/` contains design plans and specifications for feature development.
 
 ## Build, Test, and Development Commands
 
@@ -33,6 +36,7 @@ TinyBuddy is a Swift 6.0 (swiftLanguageMode .v6) macOS 14 project with both Swif
 - `./script/build_and_run.sh --verify` builds and launches the app, verifies startup, and compares the desktop Widget source/hash with the current build when an installed bundle is present.
 - `./script/build_and_run.sh --logs` launches the app and streams process logs.
 - `./script/build_and_run.sh --telemetry` launches the app and streams subsystem telemetry logs.
+- `./script/build-and-install.sh` builds the app with manual codesigning and installs it to `/Applications`; set `DEVPULSE_SIGNING_IDENTITY=<hash>` to specify a signing identity. Intended for headless CI or Xcode CLI environments without configured Apple accounts.
 - Release modes default to `TINYBUDDY_SIGNING_MODE=local`: build with signing disabled, select the sole valid Apple Development identity or require an exact `TINYBUDDY_LOCAL_CODE_SIGN_IDENTITY` fingerprint when selection is ambiguous, sign Widget then App, and enforce the source entitlement allowlist plus real runtime verification. This profile-free path preserves the existing App Group only on macOS 14 and is not a distribution/notarization workflow. `TINYBUDDY_SIGNING_MODE=signed` remains an explicit profile-backed option.
 - `script/build_and_run.sh` stores full Xcode output under `$TMPDIR/TinyBuddyBuildLogs` by default and returns a concise success or bounded failure summary; set `TINYBUDDY_BUILD_LOG_MODE=verbose` only when the full live build stream is required.
 - `./script/build_and_run.sh release-install` builds a signed Release app, stages and verifies it on the installation filesystem, atomically installs it at an empty destination or exchanges it with an existing app while preserving the canonical bundle path and Widget registration, rolls back on failure, then verifies the relaunched app and widget processes use the installed executables. Replacement and rollback relaunches execute the verified installed binary directly so LaunchServices does not rebuild the embedded Widget record; a clean install uses the normal bundle launch after adding its first registration. Only a clean install may add a missing Widget registration; stale, duplicate, or missing registration state on an existing install fails closed without automatic mutation. The default destination is `/Applications/TinyBuddy.app`; `TINYBUDDY_INSTALL_DIR` overrides it. Reuse a successful run as the terminal install gate unless code/build inputs changed or its evidence was incomplete.
@@ -51,7 +55,7 @@ Keep `project.yml` authoritative for Xcode targets, build settings, resources, e
 
 The focus session system is split across core and app:
 - **Core (`TinyBuddyCore`)**: `FocusSession`, `FocusSessionEngine`, `FocusSessionStore`, `FocusSessionCoordinator`, `FocusSessionRule` (with versioning), `FocusSessionEvidence` / `FocusSessionEvidenceEngine`, `FocusSessionQuery` / `FocusSessionQueryService`, `FocusSessionRecalculation`, `FocusSessionUpgradeCoordinator`, `FocusSessionEditing`, `FocusSessionClock`, `FocusSessionConfiguration`, `FocusGoalConfiguration`, `FocusHistoryAggregation`, `PetSession`, `PetStatus`.
-- **App (`TinyBuddy`)**: `FocusSessionAppBridge`, `FocusSessionSnapshotPublicationJournal`, `FocusGoalCoordinator`, `FocusGoalSettingsView`, `FocusHistoryView`, `FocusHistoryListView`, `FocusSessionReviewView`, `ManualFocusMenuBarController`, `ManualFocusProjectPicker`, `PetView`, `PetViewModel`.
+- **App (`TinyBuddy`)**: `FocusSessionAppBridge`, `FocusSessionSnapshotPublicationJournal`, `FocusGoalCoordinator`, `FocusGoalSettingsView`, `FocusHistoryView`, `FocusHistoryListView`, `FocusSessionReviewView`, `ManualFocusMenuBarController`, `ManualFocusProjectPicker`, `FocusNotificationManager`, `ProjectManagementView`, `HistoryQueryController`, `PetView`, `PetViewModel`.
 - Focus sessions use a rule pipeline with mutable evidence and upgrade lifecycle, managed by a transaction coordinator for crash-safe writes.
 
 ### Data Integrity & Repair
