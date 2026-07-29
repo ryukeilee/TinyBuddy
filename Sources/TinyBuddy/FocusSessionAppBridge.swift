@@ -85,6 +85,9 @@ final class FocusSessionAppBridge {
         registerWorkspaceObservers()
         startIdleDetection()
         seedForegroundApp()
+        // Immediately sample user activity so active users don't wait for
+        // the first idle poll (up to 30s) before the session starts.
+        sampleInitialActivity()
         logger.notice("FocusSessionAppBridge started")
     }
 
@@ -128,7 +131,10 @@ final class FocusSessionAppBridge {
         observers.append(
             workspaceNC.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
                                     queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.coordinator.reportWake() }
+                MainActor.assumeIsolated {
+                    self?.coordinator.reportWake()
+                    self?.reportCurrentStateAfterIdle()
+                }
             }
         )
         // Lock / unlock
@@ -141,7 +147,10 @@ final class FocusSessionAppBridge {
         observers.append(
             workspaceNC.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification,
                                     object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.coordinator.reportUnlock() }
+                MainActor.assumeIsolated {
+                    self?.coordinator.reportUnlock()
+                    self?.reportCurrentStateAfterIdle()
+                }
             }
         )
         // Foreground app change
@@ -159,6 +168,7 @@ final class FocusSessionAppBridge {
                         displayName: displayName,
                         isCodeEditor: Self.isCodeEditor(bundleID)
                     )
+                    self?.checkDayChange()
                 }
             }
         )
@@ -205,6 +215,11 @@ final class FocusSessionAppBridge {
             lastPublishedFocusMinute = nil
             checkDayChange()
             coordinator.reportIdle()
+        } else if isNowIdle, wasIdle {
+            // Already idle — check if the pause has exceeded the long absence
+            // threshold so the session is properly ended.
+            checkDayChange()
+            coordinator.reportProlongedIdle()
         } else if !isNowIdle, wasIdle {
             wasIdle = false
             checkDayChange()
@@ -212,9 +227,43 @@ final class FocusSessionAppBridge {
             publishLiveFocusHistoryIfNeeded()
         } else if !isNowIdle {
             activeCount += 1
-            if activeCount % 6 == 0 {
-                checkDayChange()
-            }
+            // Check day change every active poll (not just every 6th) so
+            // cross-midnight active sessions are closed promptly.
+            checkDayChange()
+            publishLiveFocusHistoryIfNeeded()
+        }
+    }
+
+    /// After wake or unlock, check whether the user is currently active and
+    /// immediately start a session instead of waiting for the next idle poll.
+    private func reportCurrentStateAfterIdle() {
+        let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
+        let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
+        let idleSeconds = min(idleKey, idleMouse)
+
+        checkDayChange()
+
+        if idleSeconds <= idleThreshold {
+            wasIdle = false
+            // Re‑seed the foreground app so the coordinator has accurate context.
+            seedForegroundApp()
+            coordinator.reportActiveAfterIdle()
+            publishLiveFocusHistoryIfNeeded()
+        } else {
+            wasIdle = true
+        }
+    }
+
+    /// Immediately after launch, check whether the user is already active and
+    /// start a session directly instead of waiting for the first idle poll.
+    private func sampleInitialActivity() {
+        let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
+        let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
+        let idleSeconds = min(idleKey, idleMouse)
+
+        if idleSeconds <= idleThreshold {
+            wasIdle = false
+            coordinator.reportActiveAfterIdle()
             publishLiveFocusHistoryIfNeeded()
         }
     }
@@ -242,6 +291,7 @@ final class FocusSessionAppBridge {
             displayName: frontApp.localizedName ?? bundleID,
             isCodeEditor: Self.isCodeEditor(bundleID)
         )
+        checkDayChange()
     }
 
     // MARK: - Day change / time change

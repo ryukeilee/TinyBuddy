@@ -90,6 +90,11 @@ public final class FocusSessionCoordinator {
         engine.idleDetected(at: date ?? clock.now)
     }
 
+    /// Prolonged idle beyond the long‑absence threshold.
+    public func reportProlongedIdle(at date: Date? = nil) {
+        engine.endPausedSessionAfterLongAbsence(at: date ?? clock.now)
+    }
+
     /// Screen was locked.
     public func reportLock(at date: Date? = nil) {
         engine.lockScreen(at: date ?? clock.now)
@@ -98,6 +103,17 @@ public final class FocusSessionCoordinator {
     /// Screen was unlocked.  Does NOT resume a session; the next activity starts fresh.
     public func reportUnlock(at date: Date? = nil) {
         engine.unlock(at: date ?? clock.now)
+    }
+
+    /// Call after unlock or wake when the user is already active, to skip
+    /// waiting for the next idle poll.
+    public func reportActiveAfterIdle(at date: Date? = nil) {
+        let now = date ?? clock.now
+        if let project = currentFocusProject() {
+            engine.userActivity(in: project, at: now, reason: .userActivity)
+        } else {
+            engine.userActivity(in: nil, at: now, reason: .userActivity)
+        }
     }
 
     /// System is about to sleep.

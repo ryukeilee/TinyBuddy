@@ -230,11 +230,34 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public func idleDetected(at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
-            guard let idx = sessions.firstIndex(where: \.isOpen),
-                  sessions[idx].currentPauseStartedAt == nil else { return }
-            // Manual sessions are not auto-paused by idle.
+            guard let idx = sessions.firstIndex(where: \.isOpen) else { return }
             guard sessions[idx].mode != .manual else { return }
+            if let pauseStart = sessions[idx].currentPauseStartedAt {
+                // Already paused: if the pause exceeds longAbsenceThreshold,
+                // end the session so it does not linger indefinitely.
+                let pauseDuration = when.timeIntervalSince(pauseStart)
+                if pauseDuration >= config.longAbsenceThreshold {
+                    endSession(at: idx, endedAt: pauseStart, reason: .idle, into: &sessions)
+                }
+                return
+            }
             pauseSession(at: idx, at: when, reason: .idle, into: &sessions)
+        }
+    }
+
+    /// Called when idle has persisted beyond `longAbsenceThreshold` while a
+    /// session was already paused by a foreground‑project change (not by idle).
+    /// The session is ended at the pause start so the idle gap is never counted.
+    @discardableResult
+    public func endPausedSessionAfterLongAbsence(at date: Date) -> FocusSessionUpdateOutcome {
+        let when = clampToNow(date)
+        return apply { sessions in
+            guard let idx = sessions.firstIndex(where: \.isOpen),
+                  let pauseStart = sessions[idx].currentPauseStartedAt else { return }
+            let pauseDuration = when.timeIntervalSince(pauseStart)
+            guard pauseDuration >= config.longAbsenceThreshold else { return }
+            endSession(at: idx, endedAt: pauseStart, reason: .idle, into: &sessions)
+            pendingSwitch = nil
         }
     }
 
