@@ -70,12 +70,13 @@ final class GitActivityExperienceStateTests: XCTestCase {
             ),
             .failed
         )
+        // .partialRecovery with complete activity data → shows real activity state (.ready)
         XCTAssertEqual(
             GitActivityExperienceState(
                 refreshStatus: status(outcome: .partial, diagnosticReason: .partialRecovery),
                 activitySnapshot: active
             ),
-            .partial
+            .ready
         )
         XCTAssertEqual(
             GitActivityExperienceState(

@@ -60,12 +60,32 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                 .noRepositories
             ),
             (
-                "partial",
+                "partial with incomplete data",
+                presentation(
+                    activity: activity(focus: nil, completion: nil),
+                    refreshStatus: status(outcome: .partial, repositoryCount: 1)
+                ),
+                .partial
+            ),
+            (
+                "partial with complete data shows real activity",
                 presentation(
                     activity: activity(focus: 2, completion: 3),
                     refreshStatus: status(outcome: .partial, repositoryCount: 1)
                 ),
-                .partial
+                .completedToday
+            ),
+            (
+                "partial recovery with complete data shows real activity",
+                presentation(
+                    activity: activity(focus: 0, completion: 0),
+                    refreshStatus: status(
+                        outcome: .partial,
+                        diagnosticReason: .partialRecovery,
+                        repositoryCount: 1
+                    )
+                ),
+                .noActivity
             ),
             (
                 "no activity",
@@ -105,8 +125,14 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             presentation(dataAvailability: .failed(.sandboxReadDenied)),
             presentation(dataAvailability: .stale),
             presentation(refreshStatus: status(outcome: .succeeded, authorizedRootCount: 1, repositoryCount: 0)),
+            // Partial with complete data → shows real activity state
             presentation(
                 activity: activity(focus: 1, completion: 1),
+                refreshStatus: status(outcome: .partial, repositoryCount: 1)
+            ),
+            // Partial with incomplete data → shows .partial
+            presentation(
+                activity: activity(focus: nil, completion: nil),
                 refreshStatus: status(outcome: .partial, repositoryCount: 1)
             ),
             presentation(activity: activity(focus: 0, completion: 0)),
@@ -136,7 +162,8 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             readFailed|数据读取失败|当前继续保留上次可信结果；可重试读取。|exclamationmark.triangle|error|rescan|×_×|no-metrics
             stale|数据已过期|当前快照不属于今天，刷新完成前不会当作今日数据展示。|clock.badge.exclamationmark|warning|rescan|•_•|no-metrics
             noRepositories|未发现 Git 仓库|已授权目录中没有可识别的 Git 仓库。|folder.badge.minus|warning|addDirectory|•ᴗ•|no-metrics
-            partial|数据部分可用|可用仓库已更新，异常仓库已安全跳过。|exclamationmark.circle|warning|rescan|•~•|metrics
+            completedToday|今日完成|今天已经有完成记录，可以继续推进下一项。|checkmark.circle.fill|success|-|★ᴗ★|metrics
+            partial|数据部分可用|可用仓库已更新，异常仓库已安全跳过。|exclamationmark.circle|warning|rescan|•~•|no-metrics
             noActivity|今日无活动|仓库读取正常，今天还没有提交、合并或专注记录。|moon.zzz|neutral|rescan|•ᴗ•|metrics
             idle|待机|TinyBuddy 已准备好，随时可以进入今天的节奏。|circle.dotted|neutral|-|•ᴗ•|no-metrics
             focusing|专注中|保持当前专注，今天的投入会持续累积。|scope|focus|-|–_–|metrics
@@ -207,9 +234,19 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             ).state,
             .noRepositories
         )
+        // Partial outcome with complete data → show real activity
         XCTAssertEqual(
             presentation(
                 activity: activity(focus: 3, completion: 4),
+                refreshStatus: status(outcome: .partial, repositoryCount: 1)
+            ).state,
+            .completedToday
+        )
+        // Partial outcome with incomplete data → show .partial
+        // (dataAvailability: .available + no activity snapshot = not complete)
+        XCTAssertEqual(
+            presentation(
+                activity: activity(focus: nil, completion: nil),
                 refreshStatus: status(outcome: .partial, repositoryCount: 1)
             ).state,
             .partial
@@ -293,13 +330,30 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(partialRecovery.state, .partial)
+        // .partialRecovery with complete data → show real activity state
+        XCTAssertEqual(partialRecovery.state, .completedToday)
+        // .partialAuthorizationRecovery always shows .partial (user action required)
         XCTAssertEqual(partialAuthorization.state, .partial)
         XCTAssertNotEqual(partialRecovery.title, partialAuthorization.title)
         XCTAssertNotEqual(
             partialRecovery.transitionIdentity,
             partialAuthorization.transitionIdentity
         )
+
+        // .partialRecovery with incomplete data → shows .partial
+        let partialRecoveryIncomplete = presentation(
+            activity: GitTodayActivitySnapshot(
+                focusBlockCount: nil,
+                commitCount: nil,
+                recentProjectName: nil
+            ),
+            refreshStatus: status(
+                outcome: .partial,
+                diagnosticReason: .partialRecovery,
+                repositoryCount: 1
+            )
+        )
+        XCTAssertEqual(partialRecoveryIncomplete.state, .partial)
 
         let firstLaunch = presentation(onboardingCompleted: false)
         let missingAuthorization = presentation(
@@ -442,8 +496,9 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
     }
 
     func testLayoutStrategyCoversAllSizesTextScalesAndSystemPreferences() {
+        // Partial with incomplete data (no activity counts) → stays .partial
         let value = presentation(
-            activity: activity(focus: 1, completion: 1, project: "TinyBuddy"),
+            activity: activity(focus: nil, completion: nil, project: "TinyBuddy"),
             refreshStatus: status(outcome: .partial, repositoryCount: 1)
         )
 
@@ -467,18 +522,22 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
 
                             let isHUD = size == .standard
                             let isExpandedWidget = size == .expanded
-                            let showsPartialActivityDetails = isExpandedWidget && !isAccessibility
+                            // With incomplete data (no activity snapshot) the
+                            // state is .partial but showsActivityMetrics = false,
+                            // so showsPartialActivityDetails is always false.
+                            let showsPartialActivityDetails = false
                             XCTAssertEqual(layout.showsBrandLabel, isHUD || !isAccessibility)
                             XCTAssertEqual(layout.showsExpression, !isAccessibility)
-                            XCTAssertEqual(layout.showsMetrics, isHUD || showsPartialActivityDetails)
+                            // showsActivityMetrics is false → no metrics on any surface
+                            XCTAssertEqual(layout.showsMetrics, false)
                             XCTAssertEqual(
                                 layout.showsProject,
-                                !isAccessibility && (isHUD || showsPartialActivityDetails)
+                                !isAccessibility && isHUD
                             )
-                            XCTAssertEqual(layout.showsMessage, !showsPartialActivityDetails)
+                            XCTAssertEqual(layout.showsMessage, true)
                             XCTAssertEqual(
                                 layout.showsDataDate,
-                                !isAccessibility && (isHUD || showsPartialActivityDetails)
+                                !isAccessibility && isHUD
                             )
                             XCTAssertEqual(
                                 layout.stacksMetricsVertically,
@@ -486,12 +545,10 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                             )
                             XCTAssertEqual(layout.usesEnhancedContrast, increasedContrast)
                             XCTAssertEqual(layout.allowsMotion, !reduceMotion && !lowPower)
-                            XCTAssertEqual(layout.titleLineLimit, showsPartialActivityDetails ? 1 : 2)
+                            XCTAssertEqual(layout.titleLineLimit, 2)
                             XCTAssertEqual(
                                 layout.messageLineLimit,
-                                showsPartialActivityDetails
-                                    ? 1
-                                    : expectedMessageLineLimit(size: size, accessibility: isAccessibility)
+                                expectedMessageLineLimit(size: size, accessibility: isAccessibility)
                             )
                         }
                     }
@@ -526,16 +583,17 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             XCTAssertEqual(activityStandard.showsDataDate, size == .expanded)
             XCTAssertEqual(activityStandard.titleLineLimit, size == .compact ? 2 : 1)
 
+            // partialValue now shows .completedToday (complete data + activity,
+            // so the partial outcome is suppressed → layout matches activityValue)
             let partialStandard = TinyBuddyDisplayLayout(
                 presentation: partialValue,
                 environment: TinyBuddyDisplayEnvironment(size: size)
             )
-            XCTAssertEqual(partialStandard.showsMetrics, size == .expanded)
-            XCTAssertEqual(partialStandard.showsMessage, size == .compact)
+            XCTAssertTrue(partialStandard.showsMetrics)
+            XCTAssertFalse(partialStandard.showsMessage)
             XCTAssertEqual(partialStandard.showsProject, size == .expanded)
             XCTAssertEqual(partialStandard.showsDataDate, size == .expanded)
-            XCTAssertEqual(partialStandard.titleLineLimit, size == .expanded ? 1 : 2)
-            XCTAssertEqual(partialStandard.messageLineLimit, size == .expanded ? 1 : 2)
+            XCTAssertEqual(partialStandard.titleLineLimit, size == .compact ? 2 : 1)
 
             let staleStandard = TinyBuddyDisplayLayout(
                 presentation: staleValue,
@@ -615,6 +673,182 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             XCTAssertTrue(layout.showsMessage, value.state.rawValue)
         }
     }
+
+    // MARK: - Partial availability self-healing & regression tests
+
+    func testColdStartWithPartialStatusShowsActivityWhenDataComplete() {
+        // Cold-start scenario: stored refreshStatus shows .partial from a
+        // previous session, but the combined snapshot already has complete
+        // activity data. The display should NOT show .partial because data
+        // is fully usable.
+        let presentation = self.presentation(
+            activity: activity(focus: 3, completion: 5, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+        XCTAssertEqual(presentation.state, .completedToday,
+                       "Stale partial status must not suppress real activity")
+        XCTAssertEqual(presentation.title, "今日完成")
+        XCTAssertEqual(presentation.showsActivityMetrics, true)
+    }
+
+    func testColdStartWithPartialStatusAndNoActivityShowsPartial() {
+        // Cold-start scenario: stored refreshStatus shows .partial and there
+        // is NO activity data yet. The display should show .partial because
+        // the failure coverage may have hidden real activity.
+        let presentation = self.presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+        XCTAssertEqual(presentation.state, .partial,
+                       "Partial outcome without activity data must show .partial")
+        XCTAssertEqual(presentation.title, "数据部分可用")
+        XCTAssertEqual(presentation.showsActivityMetrics, false)
+    }
+
+    func testPartialAuthorizationRecoveryAlwaysShowsPartialRegardlessOfData() {
+        // .partialAuthorizationRecovery requires user action (re-authorize).
+        // It must always show .partial even when activity data is complete.
+        let presentation = self.presentation(
+            activity: activity(focus: 3, completion: 5, project: "TinyBuddy"),
+            refreshStatus: status(
+                outcome: .partial,
+                diagnosticReason: .partialAuthorizationRecovery,
+                repositoryCount: 1
+            )
+        )
+        XCTAssertEqual(presentation.state, .partial,
+                       "Partial authorization recovery always shows .partial")
+        XCTAssertEqual(presentation.title, "部分仓库目录授权已失效")
+        XCTAssertEqual(presentation.action, .reauthorize)
+    }
+
+    func testPartialRecoveryTransitionsToActivityAfterCompleteRefresh() {
+        // Simulate: first refresh was .partial, then a second full refresh
+        // completes with .succeeded. The system should show the real
+        // activity state, not .partial (the new status overwrites the old).
+        let afterPartial = self.presentation(
+            activity: activity(focus: 2, completion: 3, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+        let afterFullRefresh = self.presentation(
+            activity: activity(focus: 2, completion: 3, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .succeeded, repositoryCount: 1)
+        )
+
+        // After partial refresh with complete data → data is usable, show activity
+        XCTAssertEqual(afterPartial.state, .completedToday,
+                       "Partial refresh with complete data must show activity")
+        // After full .succeeded refresh → definitely show activity
+        XCTAssertEqual(afterFullRefresh.state, .completedToday)
+        // Both should have same content (same data)
+        XCTAssertEqual(afterPartial.title, afterFullRefresh.title)
+        XCTAssertEqual(afterPartial.showsActivityMetrics, afterFullRefresh.showsActivityMetrics)
+    }
+
+    func testCrossDayPartialStatusDoesNotAffectNewDay() {
+        // The refresh status from yesterday (partial) is filtered out by
+        // isForDisplayDay, so the display falls back to no-status behavior.
+        // With no refresh status and complete data, show the activity state.
+        let yesterday = Date(timeIntervalSince1970: 0)
+        let todayPresentation = self.presentation(
+            activity: activity(focus: 1, completion: 2, project: "TinyBuddy"),
+            refreshStatus: nil  // No status for today
+        )
+        XCTAssertEqual(todayPresentation.state, .completedToday,
+                       "Cross-day status filtered: show real activity")
+        XCTAssertEqual(todayPresentation.title, "今日完成")
+    }
+
+    func testWidgetReloadAfterPartialToCompleteTransition() {
+        // Widget reload scenario: the Widget creates an entry with a
+        // .partial refresh status but the combined snapshot shows complete
+        // data. The entry's presentation should show the real activity, not
+        // .partial, so the Widget renders correctly on reload.
+        let widgetEntryPresentation = self.presentation(
+            activity: activity(focus: 4, completion: 7, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+
+        // The Widget entry must NOT show .partial when data is complete.
+        XCTAssertNotEqual(widgetEntryPresentation.state, .partial,
+                          "Widget must not show .partial when data is complete")
+        XCTAssertEqual(widgetEntryPresentation.state, .completedToday)
+        XCTAssertEqual(widgetEntryPresentation.completionCount, 7)
+        XCTAssertEqual(widgetEntryPresentation.showsActivityMetrics, true)
+    }
+
+    func testWidgetReloadWithPartialStatusAndEmptyData() {
+        // Widget reload scenario: .partial outcome with NO activity data.
+        // The Widget must show .partial (data is truly partially missing).
+        let widgetEntryPresentation = self.presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1)
+        )
+        XCTAssertEqual(widgetEntryPresentation.state, .partial,
+                       "Widget shows .partial when no activity data present")
+        XCTAssertEqual(widgetEntryPresentation.showsActivityMetrics, false)
+    }
+
+    func testMultipleReposPartialFailureDoesNotMaskAuthorizationState() {
+        // Even with .partial outcome, authorization states take priority.
+        let authInvalid = self.presentation(
+            activity: activity(focus: 3, completion: 5),
+            refreshStatus: status(
+                outcome: .partial,
+                diagnosticReason: .authorizationInvalid
+            )
+        )
+        XCTAssertEqual(authInvalid.state, .authorizationInvalid,
+                       "Authorization invalid takes priority over partial")
+
+        let authRequired = self.presentation(
+            activity: activity(focus: 3, completion: 5),
+            refreshStatus: status(
+                outcome: .partial,
+                diagnosticReason: .authorizationRequired
+            )
+        )
+        XCTAssertEqual(authRequired.state, .authorizationRequired,
+                       "Authorization required takes priority over partial")
+    }
+
+    func testPartialStatusWithFailedDataAvailability() {
+        // When dataAvailability is .failed, the state should be .readFailed
+        // (higher priority than .partial), regardless of partial outcome.
+        let partialWithFailedData = self.presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1),
+            dataAvailability: .failed(.sandboxReadDenied)
+        )
+        XCTAssertEqual(partialWithFailedData.state, .readFailed,
+                       "Failed data takes priority over partial")
+    }
+
+    func testPartialStatusWithStaleDataAvailability() {
+        // When dataAvailability is .stale, the state should be .stale
+        // (higher priority than .partial).
+        let partialWithStaleData = self.presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1),
+            dataAvailability: .stale
+        )
+        XCTAssertEqual(partialWithStaleData.state, .stale,
+                       "Stale data takes priority over partial")
+    }
+
+    func testPartialStatusWithLoadingDataAvailability() {
+        // When dataAvailability is .loading, the state should be .loading
+        // (higher priority than .partial).
+        let partialWithLoadingData = self.presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .partial, repositoryCount: 1),
+            dataAvailability: .loading
+        )
+        XCTAssertEqual(partialWithLoadingData.state, .loading,
+                       "Loading data takes priority over partial")
+    }
+
+    // MARK: - Private helpers
 
     private func presentation(
         activity: GitTodayActivitySnapshot = GitTodayActivitySnapshot(

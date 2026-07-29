@@ -324,10 +324,24 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             return .noRepositories
         }
 
-        if refreshStatus?.outcome == .partial
-            || refreshStatus?.diagnostic?.reason == .partialAuthorizationRecovery
-            || refreshStatus?.diagnostic?.reason == .partialRecovery {
+        // Partial state: only show when data is truly partially available.
+        // When `dataAvailability == .available` and we have real activity
+        // data, the data is fully usable — show the real activity state.
+        // Exception: .partialAuthorizationRecovery always shows partial
+        // because the user needs to re-authorize regardless of data state.
+        let diagnosticReason = refreshStatus?.diagnostic?.reason
+        if diagnosticReason == .partialAuthorizationRecovery {
             return .partial
+        }
+        if refreshStatus?.outcome == .partial
+            || diagnosticReason == .partialRecovery {
+            // Only stay .partial when data is not fully usable.
+            // If the combined snapshot is healthy and activity data exists,
+            // treat as normal activity state (the partial coverage is a
+            // transient issue that doesn't affect available data).
+            if dataAvailability != .available || !hasActivitySnapshot {
+                return .partial
+            }
         }
 
         if hasActivitySnapshot,

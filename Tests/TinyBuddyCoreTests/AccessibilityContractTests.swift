@@ -52,7 +52,7 @@ final class AccessibilityContractTests: XCTestCase {
             (
                 "partial",
                 presentation(
-                    activity: activity(focus: 2, completion: 3),
+                    activity: activity(focus: nil, completion: nil),
                     refreshStatus: status(outcome: .partial, repositoryCount: 1)
                 ),
                 "数据部分可用", "可用仓库已更新"
