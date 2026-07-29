@@ -106,14 +106,13 @@ public final class FocusSessionCoordinator {
     }
 
     /// Call after unlock or wake when the user is already active, to skip
-    /// waiting for the next idle poll.
+    /// waiting for the next idle poll.  This uses the coordinator's attribution
+    /// logic (foreground app, recent git activity) to determine the project,
+    /// rather than checking the engine's current project (which is nil when no
+    /// session is active yet), so that a session is started immediately.
     public func reportActiveAfterIdle(at date: Date? = nil) {
         let now = date ?? clock.now
-        if let project = currentFocusProject() {
-            engine.userActivity(in: project, at: now, reason: .userActivity)
-        } else {
-            engine.userActivity(in: nil, at: now, reason: .userActivity)
-        }
+        engine.userActivity(in: focusProject(), at: now, reason: .userActivity)
     }
 
     /// System is about to sleep.

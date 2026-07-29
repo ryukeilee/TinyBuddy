@@ -642,6 +642,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if update.snapshot?.focusHistoryPublication?.revision ?? -1 >= publication.revision {
                 _ = focusSessionPublicationJournal.clear(expected: publication)
             }
+            // If the committed publication is different but the writer was a
+            // concurrent caller, the newer publication was already written and
+            // the Widget should have been reloaded by that caller.
             return
         }
 
@@ -656,11 +659,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             postFocusHistorySynchronization(succeeded: false)
             return
         }
-        // An equal publication has already reached every reader. Emitting a
-        // success notification here would make a report view re-publish the
-        // same payload and create a feedback loop.
+
         if update.didPersist {
+            // Full notification path: Widget reload + event broadcast.
             postFocusHistorySynchronization(succeeded: true)
+        } else {
+            // The publication is already current (same revision and content).
+            // Reload the Widget directly so it picks up any latest in-memory
+            // state from the combined snapshot, but skip the event broadcast
+            // to avoid a notification loop when FocusHistoryView calls the
+            // engine republish in response to the notification.
+            Logger(
+                subsystem: "local.tinybuddy",
+                category: "SharedSnapshot"
+            ).notice(
+                "focus history already current, reloading widget without notification"
+            )
+            WidgetCenter.shared.reloadAllTimelines()
         }
     }
 
