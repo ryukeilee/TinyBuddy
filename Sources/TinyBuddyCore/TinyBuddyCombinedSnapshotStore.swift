@@ -686,10 +686,15 @@ public final class TinyBuddyCombinedSnapshotStore {
     /// revision is the ordering authority: a delayed publication cannot undo
     /// a newer confirmed archive, while equal revisions may refresh changed
     /// goal/project configuration.
+    ///
+    /// The optional `snapshotOverride` allows the caller to atomically update
+    /// the pet-status portion of the combined snapshot in the same write as
+    /// the focus history, eliminating a redundant save-and-reload round trip.
     @discardableResult
     public func updateFocusHistorySlice(
         _ focusHistoryPublication: FocusHistoryPublication,
-        fallbackSnapshot: TinyBuddySnapshot
+        fallbackSnapshot: TinyBuddySnapshot,
+        snapshotOverride: TinyBuddySnapshot? = nil
     ) -> UpdateResult {
         Self.writerLock.lock()
         defer { Self.writerLock.unlock() }
@@ -727,8 +732,12 @@ public final class TinyBuddyCombinedSnapshotStore {
             }
         }
 
+        let baseSnapshot = snapshotOverride
+            ?? currentPayload?.snapshot
+            ?? fallbackSnapshot
+
         return saveLocked(
-            snapshot: currentPayload?.snapshot ?? fallbackSnapshot,
+            snapshot: baseSnapshot,
             activitySnapshot: currentPayload?.activitySnapshot,
             activityRevision: currentPayload?.activityRevision,
             focusHistoryPublication: focusHistoryPublication,

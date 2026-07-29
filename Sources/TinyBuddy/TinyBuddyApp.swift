@@ -471,10 +471,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 let isActivelyFocusing = self.focusSessionEngine?.isFocusSessionActive == true
                 let completedCount = publication.snapshot.recentDays.last?.completedSessionCount ?? 0
-                self.petViewModel.synchronizeFocusSessionStatus(
-                    isActivelyFocusing ? .focusing : (completedCount > 0 ? .completedOnce : .idle)
-                )
-                self.synchronizeFocusHistoryPublication(publication)
+                let status: PetStatus = isActivelyFocusing ? .focusing : (completedCount > 0 ? .completedOnce : .idle)
+                // Apply the status to the legacy store and pet-view-model state
+                // without a separate combined-snapshot write.  The history
+                // publication below atomically commits both the focus history
+                // and the updated status in one combined snapshot write.
+                self.petViewModel.applyFocusStatusForPublication(status)
+                self.synchronizeFocusHistoryPublication(publication, status: status)
             }
         }
         focusBridge?.start()
@@ -590,7 +593,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func synchronizeFocusHistoryPublication(
-        _ publication: FocusHistoryPublication
+        _ publication: FocusHistoryPublication,
+        status: PetStatus? = nil
     ) {
         switch focusSessionPublicationJournal.stage(publication) {
         case .persistenceFailed:
@@ -610,9 +614,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Build a snapshot override when a status change accompanies this
+        // publication, so the combined snapshot atomically reflects both the
+        // new pet status and the focus history in a single write.
+        let snapshotOverride: TinyBuddySnapshot?
+        if let status {
+            snapshotOverride = TinyBuddySnapshot(
+                status: status,
+                stats: current.stats
+            )
+        } else {
+            snapshotOverride = nil
+        }
+
         let update = combinedSnapshotStore.updateFocusHistorySlice(
             publication,
-            fallbackSnapshot: current
+            fallbackSnapshot: current,
+            snapshotOverride: snapshotOverride
         )
         guard update.didPersist || update.outcome == .alreadyCurrent else {
             postFocusHistorySynchronization(succeeded: false)

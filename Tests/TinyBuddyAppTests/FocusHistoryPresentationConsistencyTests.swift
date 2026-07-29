@@ -51,9 +51,14 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertTrue(viewModel.contains("let previousHistory = focusHistoryPublication"))
         XCTAssertTrue(viewModel.contains("didChange || focusHistoryPublication != previousHistory"))
         XCTAssertTrue(viewModel.contains("func synchronizeFocusSessionStatus(_ status: PetStatus)"))
+        XCTAssertTrue(viewModel.contains("func applyFocusStatusForPublication(_ status: PetStatus)"))
         let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
-        XCTAssertTrue(app.contains("self.petViewModel.synchronizeFocusSessionStatus("))
+        // The handler now uses the lightweight status update + combined write
+        // instead of a separate combined-snapshot-write in synchronizeFocusSessionStatus.
+        XCTAssertTrue(app.contains("self.petViewModel.applyFocusStatusForPublication(status)"))
+        XCTAssertTrue(app.contains("self.synchronizeFocusHistoryPublication(publication, status: status)"))
         XCTAssertTrue(app.contains("isActivelyFocusing ? .focusing"))
+        XCTAssertFalse(app.contains("petViewModel.synchronizeFocusSessionStatus("))
     }
 
     private func source(_ relativePath: String) throws -> String {

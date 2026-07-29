@@ -160,6 +160,36 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         XCTAssertNil(update.snapshot?.focusHistoryPublication?.snapshot.recentDays.last?.completedSessionCount)
     }
 
+    func testSnapshotOverrideWritesStatusAndHistoryAtomically() {
+        let preferences = MemoryPreferences()
+        let store = makeStore(preferences)
+        let fallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: "2026-07-20", focusCount: 0, completionCount: 0)
+        )
+        let publication = makePublication(revision: 8, completedSessionCount: 3, goalMinutes: 60)
+        let overrideSnapshot = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(dayIdentifier: "2026-07-20", focusCount: 3, completionCount: 0)
+        )
+
+        // Write both status and history in a single call
+        let update = store.updateFocusHistorySlice(
+            publication,
+            fallbackSnapshot: fallback,
+            snapshotOverride: overrideSnapshot
+        )
+
+        XCTAssertEqual(update.outcome, .saved)
+        XCTAssertEqual(update.didPersist, true)
+        XCTAssertEqual(update.snapshot?.snapshot.status, .focusing)
+        XCTAssertEqual(update.snapshot?.snapshot.stats.focusCount, 3)
+        XCTAssertEqual(update.snapshot?.focusHistoryPublication, publication)
+
+        // Verify the combined snapshot reflects both
+        XCTAssertEqual(update.snapshot?.dayIdentifier, "2026-07-20")
+    }
+
     func testHistoryUpdateRejectsSemanticallyInvalidUnknownDay() {
         let preferences = MemoryPreferences()
         let store = makeStore(preferences)

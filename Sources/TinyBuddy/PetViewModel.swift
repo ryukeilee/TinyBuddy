@@ -395,6 +395,7 @@ final class PetViewModel: ObservableObject {
     /// Applies an automatic focus-state transition without incrementing the
     /// compatibility counters used by the manual pet controls. The combined
     /// snapshot keeps its committed focus-history slice while status changes.
+    /// This writes the combined snapshot and triggers a widget reload.
     func synchronizeFocusSessionStatus(_ status: PetStatus) {
         guard self.status != status else { return }
         let synchronizedStats = session.synchronizeStatus(status)
@@ -408,6 +409,21 @@ final class PetViewModel: ObservableObject {
         }
         _ = reloadCommittedHUDState()
         reloadWidgetIfPossible()
+    }
+
+    /// Lightweight status update for the combined publication path.  Writes
+    /// the legacy DailyStats store and updates the in-memory status property,
+    /// but does NOT write the combined snapshot or reload the Widget — the
+    /// caller merges the status into the same combined-snapshot write that
+    /// carries the focus history slice.
+    func applyFocusStatusForPublication(_ status: PetStatus) {
+        guard self.status != status else { return }
+        let synchronizedStats = session.synchronizeStatus(status)
+        // Only update HUD state from the legacy store; the combined snapshot
+        // write (with focus history) happens in the caller.
+        updateDisplayPresentation()
+        self.status = status
+        self.stats = synchronizedStats
     }
 
     func requestGitScanAuthorization() {
@@ -432,11 +448,10 @@ final class PetViewModel: ObservableObject {
     // MARK: - Manual Focus Control
 
     /// Called by AppDelegate to set the engine reference after bridge creation.
+    /// The timer starts only when an active manual session exists.
     func setFocusSessionEngine(_ engine: FocusSessionEngine?) {
         focusSessionEngine = engine
-        if engine != nil {
-            startManualControlRefresh()
-        } else {
+        if engine == nil {
             stopManualControlRefresh()
         }
         refreshManualControlState()
@@ -447,6 +462,7 @@ final class PetViewModel: ObservableObject {
         guard let engine = focusSessionEngine else { return }
         let token = UUID()
         _ = engine.startManualFocus(project: project, at: Date(), commandToken: token)
+        startManualControlRefreshIfNeeded()
         refreshManualControlState()
         reloadWidgetIfPossible()
     }
@@ -464,6 +480,7 @@ final class PetViewModel: ObservableObject {
         guard let engine = focusSessionEngine else { return }
         let token = UUID()
         _ = engine.resumeManualFocus(at: Date(), commandToken: token)
+        startManualControlRefreshIfNeeded()
         refreshManualControlState()
         reloadWidgetIfPossible()
     }
@@ -478,8 +495,10 @@ final class PetViewModel: ObservableObject {
     }
 
     /// Refresh the published manual control state from the engine.
+    /// Automatically stops the 1-second timer when the session ends.
     func refreshManualControlState() {
         guard let engine = focusSessionEngine else {
+            stopManualControlRefresh()
             if manualControlState != .idle {
                 manualControlState = .idle
             }
@@ -489,9 +508,16 @@ final class PetViewModel: ObservableObject {
         if manualControlState != newState {
             manualControlState = newState
         }
+        // Stop the timer when the session ends; start it when a session becomes active.
+        switch newState {
+        case .focusing, .paused:
+            startManualControlRefreshIfNeeded()
+        case .idle:
+            stopManualControlRefresh()
+        }
     }
 
-    private func startManualControlRefresh() {
+    private func startManualControlRefreshIfNeeded() {
         guard manualControlTimer == nil else { return }
         manualControlTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {

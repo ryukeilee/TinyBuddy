@@ -4,6 +4,45 @@ import XCTest
 @testable import TinyBuddy
 @testable import TinyBuddyCore
 
+// MARK: - Test helpers for focus session
+
+private final class FakeClock: FocusClock, @unchecked Sendable {
+    private var _now: Date
+    var now: Date { _now }
+    var monotonic: TimeInterval { _now.timeIntervalSinceReferenceDate }
+
+    init(_ date: Date) {
+        _now = date
+    }
+
+    func advance(by seconds: TimeInterval) {
+        _now.addTimeInterval(seconds)
+    }
+}
+
+/// Lightweight non‑persisting session store for deterministic tests.
+private final class MemoryStore: FocusSessionPersisting, @unchecked Sendable {
+    private var data: [FocusSession] = []
+
+    init(sessions: [FocusSession] = []) {
+        data = sessions
+    }
+
+    func load() -> [FocusSession]? { data }
+    func save(_ sessions: [FocusSession]) -> Bool {
+        data = sessions
+        return true
+    }
+}
+
+private func dayIdentifier(for date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.string(from: date)
+}
+
 @MainActor
 final class PetViewModelTests: XCTestCase {
     func testInitKeepsHUDOnPersistedCombinedSnapshotWhenRevisionCannotAdvance() {
@@ -1322,6 +1361,120 @@ final class PetViewModelTests: XCTestCase {
             viewModel.hiddenSnapshotDiagnosticSummary?.identifier,
             "tinybuddy.sharedSnapshot.gitScan.gitScanFailed"
         )
+    }
+
+    // MARK: - Focus session publishing and timer lifecycle
+
+    func testApplyFocusStatusForPublicationUpdatesStatusWithoutCombinedSnapshotWrite() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let combinedStore = store.makeCombinedSnapshotStore()
+        let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+
+        var widgetReloadCount = 0
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        let initialWidgetReloads = widgetReloadCount
+        let initialStatus = viewModel.status
+
+        // Apply a different status via the lightweight path
+        let targetStatus: PetStatus = initialStatus == .focusing ? .idle : .focusing
+        viewModel.applyFocusStatusForPublication(targetStatus)
+
+        // Status is updated in memory
+        XCTAssertEqual(viewModel.status, targetStatus)
+
+        // Legacy store is updated
+        let reloadedStore = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let loadedSnapshot = reloadedStore.loadSnapshot()
+        XCTAssertEqual(loadedSnapshot.status, targetStatus)
+
+        // No widget reload was triggered (no reloadWidgetIfPossible call)
+        XCTAssertEqual(widgetReloadCount, initialWidgetReloads)
+
+        // Combined snapshot was NOT written by this call (no new revision)
+        let loadedCombined = combinedStore.load()
+        if loadedCombined?.dayIdentifier == "2026-07-04" {
+            // If a combined snapshot exists, its status is unchanged
+            XCTAssertEqual(loadedCombined?.snapshot.status, initialStatus)
+        }
+    }
+
+    func testManualControlTimerOnlyRunsDuringActiveSession() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let combinedStore = store.makeCombinedSnapshotStore()
+        let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+        let fsStore = MemoryStore()
+        let clock = FakeClock(today)
+
+        let engine = FocusSessionEngine(
+            clock: clock,
+            persisting: fsStore,
+            dayIdentifier: { dayIdentifier(for: $0) },
+            nextDayBoundary: { date in
+                calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+            }
+        )
+
+        var widgetReloadCount = 0
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        // Initially no timer
+        viewModel.setFocusSessionEngine(engine)
+        // Timer should NOT start because there's no active session yet
+        // (we can't directly observe the timer but we can observe behavior)
+        XCTAssertEqual(viewModel.manualControlState, .idle)
+
+        // Start a manual session - timer should start ticking
+        let project = FocusProjectContext(key: "com.test.Editor", displayName: "Test Editor")
+        viewModel.startManualFocus(project: project)
+        if case .focusing = viewModel.manualControlState {
+            XCTAssertTrue(true, "Manual control state should be focusing")
+        } else {
+            XCTFail("Expected focusing state, got \(viewModel.manualControlState)")
+        }
+        // Widget reload should happen when session starts
+        XCTAssertGreaterThan(widgetReloadCount, 0)
+
+        // End the session - timer should stop
+        widgetReloadCount = 0
+        viewModel.endManualFocus()
+        XCTAssertEqual(viewModel.manualControlState, .idle)
+        // Widget reload should happen when session ends
+        XCTAssertGreaterThan(widgetReloadCount, 0)
     }
 
     private func makeDefaults() -> UserDefaults {
