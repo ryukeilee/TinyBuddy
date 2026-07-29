@@ -15,7 +15,7 @@ TinyBuddy is a Swift 6.0 (swiftLanguageMode .v6) macOS 14 project with both Swif
 - `Resources/TinyBuddyApp/` and `Resources/TinyBuddyWidget/` contain Info.plist, entitlements, and app/widget resources (including `Assets.xcassets` for app icons).
 - `script/build_and_run.sh` is the main local build, launch, install, and verification entry point.
 - `script/update_git_completion_count.sh` performs the launch-time Git refresh and writes shared daily-activity data; `script/benchmark_git_refresh.sh` exercises accuracy, incremental latency, resource use, and cancellation against disposable repositories; `script/verify_resource_stability.sh` is the opt-in macOS lifecycle/resource verifier; `script/regression_gate.sh` is the comprehensive performance, energy & stability regression gate (reuses benchmark and resource scripts, adds cold/warm start, Widget reload, and multi-cycle refresh measurements).
-- `script/build-and-install.sh` is a convenience script for manual codesign build and installation to `/Applications`, intended for environments without Xcode accounts (free Apple ID).
+- `script/tb-install.sh` is the TinyBuddy-specific build-sign-install-launch script, streamlined for local development. Replaces the older multi-project `script/build-and-install.sh`.
 - `script/local_build_env.sh` sets up isolated SwiftPM module cache and scratch paths for repository wrapper builds.
 - `script/process_resource_probe.swift` is a lightweight CLI that samples `proc_pid_rusage(RUSAGE_INFO_V4)` for a given PID and outputs CSV — used by the regression gate.
 - `project.yml` is the XcodeGen source of truth for `TinyBuddy.xcodeproj`; regenerate the project after target, bundle, entitlement, or signing changes.
