@@ -715,6 +715,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func postFocusHistorySynchronization(succeeded: Bool) {
+        if succeeded {
+            // Safety net: reload widget timelines directly so consumers always
+            // see the latest committed focus history, even if the PetViewModel
+            // callback path is not triggered (e.g. early return in the caller).
+            WidgetCenter.shared.reloadAllTimelines()
+        }
         notificationCenter.post(
             name: .focusSessionSnapshotSynchronizationDidFinish,
             object: nil,

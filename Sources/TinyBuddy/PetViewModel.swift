@@ -383,6 +383,20 @@ final class PetViewModel: ObservableObject {
                 self.updateHiddenSnapshotDiagnosticSummary()
             }
         })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .focusSessionSnapshotSynchronizationDidFinish,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                // Safety net: re-read the committed snapshot and reload the
+                // Widget after every focus-history publication. This supplements
+                // the direct focusSessionStatsDidChange() call in the publication
+                // handler, ensuring the Widget always sees the latest data even
+                // if that direct path was bypassed.
+                self?.focusSessionStatsDidChange()
+            }
+        })
     }
 
     func select(_ nextStatus: PetStatus) {

@@ -319,6 +319,242 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         return String(repeating: "0", count: 16 - value.count) + value
     }
 
+    // MARK: - Engine → Combined Snapshot Integration
+
+    func testEngineEditWritesUpdatedFocusHistoryToCombinedSnapshot() throws {
+        let clock = FakeCombinedSnapshotClock(reference: Date(timeIntervalSinceReferenceDate: 1_000_000))
+        let store = MemoryCombinedStore()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let engine = FocusSessionEngine(
+            clock: clock,
+            persisting: store,
+            config: FocusSessionConfiguration(),
+            dayIdentifier: { date in
+                let fmt = DateFormatter()
+                fmt.locale = Locale(identifier: "en_US_POSIX")
+                fmt.timeZone = TimeZone(secondsFromGMT: 0)
+                fmt.dateFormat = "yyyy-MM-dd"
+                return fmt.string(from: date)
+            },
+            nextDayBoundary: { date in
+                calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+            },
+            historyGoalMinutes: { 240 },
+            historyActiveProjectKeys: { _ in nil },
+            projectContextResolver: { $0 },
+            ruleVersionProvider: { FocusSessionRuleVersion.current }
+        )
+
+        // Create an initial ended session
+        let projectA = FocusProjectContext(key: "repo/alpha", displayName: "Project Alpha")
+        XCTAssertEqual(engine.userActivity(in: projectA, at: clock.now), .saved)
+        clock.advance(by: 30)
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        let sessionID = try XCTUnwrap(engine.allSessions.first?.id)
+        let originalEnd = engine.allSessions.first!.endedAt!
+        let sessionDay = engine.allSessions.first!.dayIdentifier
+
+        // Set up combined snapshot store and wire the publication handler
+        let preferences = MemoryPreferences()
+        let combinedStore = makeStore(preferences)
+        let fallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: sessionDay, focusCount: 0, completionCount: 0)
+        )
+
+        // Publish the initial state
+        let revisionBox = SendableBox<Int64?>(nil)
+        engine.committedSnapshotHandler = { _ in
+            // Not used in this test
+        }
+        let storeHandle = StoreHandle(store: combinedStore)
+        engine.committedHistorySnapshotHandler = { [handle = storeHandle, box = revisionBox] publication in
+            box.value = publication.revision
+            handle.update(publication, fallbackSnapshot: fallback)
+        }
+
+        // Trigger a publication to capture the initial session
+        engine.republishFocusHistory()
+        let initialRevision = try XCTUnwrap(revisionBox.value)
+
+        // Verify initial publication shows 1 completed session
+        var storedPublication = combinedStore.load()?.focusHistoryPublication
+        let initialRecentDay = try XCTUnwrap(storedPublication?.snapshot.recentDays.last)
+        XCTAssertEqual(initialRecentDay.completedSessionCount, 1)
+        XCTAssertEqual(initialRecentDay.focusDuration ?? -1, 30, accuracy: 0.001)
+
+        // Edit the session: change project and extend duration
+        // Advance clock close to the new end time so it's within tolerance
+        let projectB = FocusProjectContext(key: "repo/beta", displayName: "Project Beta")
+        clock.set(to: originalEnd.addingTimeInterval(29.5)) // 0.5s before new end
+        let extendedEnd = clock.now.addingTimeInterval(0.5) // Just 0.5s in the future
+        guard case .saved = engine.editSession(id: sessionID, project: projectB, endedAt: extendedEnd) else {
+            return XCTFail("Expected successful edit")
+        }
+
+        // Verify the stored publication was updated via the handler
+        // (editSession calls committedHistorySnapshotHandler internally)
+        let updatedRevision = try XCTUnwrap(revisionBox.value)
+        XCTAssertGreaterThan(updatedRevision, initialRevision, "Edit must advance archive revision")
+
+        storedPublication = combinedStore.load()?.focusHistoryPublication
+        let updatedRecentDay = try XCTUnwrap(storedPublication?.snapshot.recentDays.last)
+        XCTAssertEqual(updatedRecentDay.completedSessionCount, 1, "Still one session after edit")
+        // Duration: original session started at t0 (1,000,000), ended at t0+30.
+        // Edit extends end to t0+60, so active duration = 60 seconds.
+        XCTAssertEqual(updatedRecentDay.focusDuration ?? -1, 60, accuracy: 0.001)
+
+        // Verify project distribution reflects the new project
+        let projectDistribution = try XCTUnwrap(storedPublication?.snapshot.currentWeek.projectDistribution)
+        XCTAssertTrue(projectDistribution.contains { $0.displayName == "Project Beta" },
+                      "Edited project must appear in distribution")
+        XCTAssertFalse(projectDistribution.contains { $0.displayName == "Project Alpha" },
+                       "Original project must not appear after reassignment")
+    }
+
+    func testEngineDeleteRemovesSessionFocusDurationFromCombinedSnapshot() throws {
+        let clock = FakeCombinedSnapshotClock(reference: Date(timeIntervalSinceReferenceDate: 1_000_000))
+        let store = MemoryCombinedStore()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let engine = FocusSessionEngine(
+            clock: clock,
+            persisting: store,
+            config: FocusSessionConfiguration(),
+            dayIdentifier: { date in
+                let fmt = DateFormatter()
+                fmt.locale = Locale(identifier: "en_US_POSIX")
+                fmt.timeZone = TimeZone(secondsFromGMT: 0)
+                fmt.dateFormat = "yyyy-MM-dd"
+                return fmt.string(from: date)
+            },
+            nextDayBoundary: { date in
+                calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+            },
+            historyGoalMinutes: { 240 },
+            historyActiveProjectKeys: { _ in nil }
+        )
+
+        // Create two ended sessions on different days
+        let projectA = FocusProjectContext(key: "repo/alpha", displayName: "Project Alpha")
+        XCTAssertEqual(engine.userActivity(in: projectA, at: clock.now), .saved)
+        clock.advance(by: 30)
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        let session1ID = try XCTUnwrap(engine.allSessions.first?.id)
+
+        // Advance to a new day for the second session
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: clock.now)!
+        clock.set(to: nextDay)
+        // Notify the engine of the day change so currentDay matches the new day
+        let newDayStr = dayID(for: nextDay)
+        _ = engine.timeChanged(at: clock.now, dayIdentifier: newDayStr)
+        XCTAssertEqual(engine.userActivity(in: projectA, at: clock.now), .saved)
+        clock.advance(by: 60)
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        let sessionIDs = engine.allSessions.map(\.id)
+        let session2ID = sessionIDs.first(where: { $0 != session1ID })
+        XCTAssertNotNil(session2ID)
+
+        // Wire the combined snapshot store using the engine's current day
+        let preferences = MemoryPreferences()
+        let combinedStore = makeStore(preferences)
+        let engineDay = engine.currentDayIdentifier
+        let fallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: engineDay, focusCount: 0, completionCount: 0)
+        )
+
+        let handle = StoreHandle(store: combinedStore)
+        engine.committedHistorySnapshotHandler = { [handle] publication in
+            handle.update(publication, fallbackSnapshot: fallback)
+        }
+
+        // Publish initial state with both sessions
+        engine.republishFocusHistory()
+        let beforeDelete = try XCTUnwrap(combinedStore.load()?.focusHistoryPublication)
+        let beforeDay = try XCTUnwrap(beforeDelete.snapshot.recentDays.last)
+        // The most recent day has the second session (60s)
+        XCTAssertEqual(beforeDay.completedSessionCount, 1)
+        XCTAssertEqual(beforeDay.focusDuration ?? -1, 60, accuracy: 0.001)
+
+        // Delete the second session
+        clock.advance(by: 10)
+        guard case .saved = engine.deleteSession(id: try XCTUnwrap(session2ID)) else {
+            return XCTFail("Expected successful delete")
+        }
+
+        // Verify the combined snapshot was updated
+        let afterDelete = try XCTUnwrap(combinedStore.load()?.focusHistoryPublication)
+        let afterDay = try XCTUnwrap(afterDelete.snapshot.recentDays.last)
+        XCTAssertEqual(afterDay.completedSessionCount, 0,
+                       "After delete, most recent day must have zero completed sessions")
+        XCTAssertEqual(afterDay.focusDuration ?? -1, 0, accuracy: 0.001,
+                       "After delete, focus duration must be zero")
+    }
+
+    // MARK: - Helpers for Engine Integration Tests
+
+    /// A clock that advances by a fixed step per call, used instead of
+    /// FakeClock from FocusSessionEngineTests to avoid cross-file dependency.
+    private final class FakeCombinedSnapshotClock: @unchecked Sendable, FocusClock {
+        private var _now: Date
+        var now: Date { _now }
+        let monotonic: TimeInterval
+
+        init(reference: Date) {
+            _now = reference
+            monotonic = reference.timeIntervalSinceReferenceDate
+        }
+
+        func advance(by seconds: TimeInterval) {
+            _now = _now.addingTimeInterval(seconds)
+        }
+
+        func set(to date: Date) {
+            _now = date
+        }
+    }
+
+    /// An in-memory store that also conforms to FocusSessionPersisting for
+    /// use with FocusSessionEngine.
+    private final class MemoryCombinedStore: @unchecked Sendable, FocusSessionPersisting {
+        var stored: [FocusSession]?
+
+        func load() -> [FocusSession]? { stored }
+        @discardableResult
+        func save(_ sessions: [FocusSession]) -> Bool {
+            stored = sessions
+            return true
+        }
+    }
+
+    /// A thread-safe wrapper for capturing values in @Sendable closures.
+    private final class SendableBox<T>: @unchecked Sendable {
+        var value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    /// Returns the UTC day identifier for a given date.
+    private func dayID(for date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = TimeZone(secondsFromGMT: 0)
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: date)
+    }
+
+    /// A @unchecked Sendable handle to the non-Sendable combined snapshot store.
+    /// The engine calls the handler while holding its lock, so access is
+    /// serialised and safe despite the lack of formal Sendable conformance.
+    private final class StoreHandle: @unchecked Sendable {
+        private let store: TinyBuddyCombinedSnapshotStore
+        init(store: TinyBuddyCombinedSnapshotStore) { self.store = store }
+        func update(_ publication: FocusHistoryPublication, fallbackSnapshot: TinyBuddySnapshot) {
+            _ = store.updateFocusHistorySlice(publication, fallbackSnapshot: fallbackSnapshot)
+        }
+    }
+
     private final class MemoryPreferences {
         var values: [String: Any] = [:]
     }

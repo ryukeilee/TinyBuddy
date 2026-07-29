@@ -237,8 +237,10 @@ struct FocusHistoryView: View {
     }
 
     private func refreshHistory() {
-        refresh()
+        // Read current committed publication first so the view never shows
+        // stale data while the async engine republish is in flight.
         publication = publicationProvider()
+        refresh()
     }
 
     private func duration(_ value: TimeInterval?) -> String {
