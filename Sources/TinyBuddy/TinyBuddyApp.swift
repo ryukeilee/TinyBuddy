@@ -468,7 +468,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         focusBridge?.sessionEngine.committedHistorySnapshotHandler = { [weak self] publication in
             DispatchQueue.main.async {
-                self?.synchronizeFocusHistoryPublication(publication)
+                guard let self else { return }
+                let isActivelyFocusing = self.focusSessionEngine?.isFocusSessionActive == true
+                let completedCount = publication.snapshot.recentDays.last?.completedSessionCount ?? 0
+                self.petViewModel.synchronizeFocusSessionStatus(
+                    isActivelyFocusing ? .focusing : (completedCount > 0 ? .completedOnce : .idle)
+                )
+                self.synchronizeFocusHistoryPublication(publication)
             }
         }
         focusBridge?.start()

@@ -85,6 +85,16 @@ public enum FocusHistoryDayState: String, Codable, Equatable, Sendable {
     case unknown
 }
 
+/// Shared, compact wording for a known focus duration. App and Widget use this
+/// instead of independently converting the same authoritative seconds.
+public enum FocusHistoryDurationFormatter {
+    public static func text(for duration: TimeInterval?) -> String {
+        guard let duration else { return "未知" }
+        let minutes = max(0, Int(duration / 60))
+        return "\(minutes / 60) 小时 \(minutes % 60) 分"
+    }
+}
+
 public enum FocusHistoryWeekState: String, Codable, Equatable, Sendable {
     case available
     case partial
@@ -95,15 +105,18 @@ public struct FocusHistoryDay: Codable, Equatable, Sendable {
     public let dayIdentifier: String
     public let state: FocusHistoryDayState
     /// `nil` means the archive cannot establish this value; zero means a
-    /// trusted day with no ended sessions.
+    /// trusted day with no completed or in-progress session contribution.
     public let focusDuration: TimeInterval?
+    /// Ended sessions only. A `.sessions` day may have a zero count while one
+    /// in-progress session contributes its current elapsed duration.
     public let completedSessionCount: Int?
     public let goalMinutes: Int?
     /// Clamped to 0...1. `nil` means an unknown day or no configured goal.
     public let goalCompletionRate: Double?
     public let isGoalMet: Bool?
     /// Stable authority references behind the aggregate. `nil` means the day
-    /// is unknown; an empty array is a trusted zero-session day.
+    /// is unknown; an empty array is a trusted zero-session day. A live row is
+    /// included before it increments `completedSessionCount`.
     public let contributingSessionIDs: [UUID]?
 
     public init(
@@ -243,6 +256,10 @@ public struct FocusHistoryAggregationCache: Sendable {
     }
 
     private var contributions: [UUID: Contribution] = [:]
+    /// Open sessions are retained separately so a publication can include the
+    /// current elapsed duration without persisting a new session row every
+    /// minute. Ended-session aggregates remain incremental and immutable.
+    private var liveSessions: [UUID: FocusSession] = [:]
     private var days: [String: DayAccumulator] = [:]
     private let projectResolver: @Sendable (FocusProjectContext) -> FocusProjectContext
 
@@ -254,7 +271,7 @@ public struct FocusHistoryAggregationCache: Sendable {
     ) {
         self.projectResolver = projectResolver
         for session in sessions {
-            replaceContribution(for: session.id, with: contribution(from: session))
+            replaceSession(session)
         }
     }
 
@@ -265,15 +282,18 @@ public struct FocusHistoryAggregationCache: Sendable {
     public mutating func apply(_ changes: [FocusHistorySessionChange]) -> FocusHistoryIncrementalUpdate {
         var affectedDays = Set<String>()
         for change in changes {
-            if let previous = change.previous,
-               let removed = contributions[previous.id] {
-                affectedDays.insert(removed.dayIdentifier)
-                replaceContribution(for: previous.id, with: nil)
+            if let previous = change.previous {
+                if let removed = contributions[previous.id] {
+                    affectedDays.insert(removed.dayIdentifier)
+                }
+                if let live = liveSessions[previous.id] {
+                    affectedDays.insert(live.dayIdentifier)
+                }
+                replaceSession(nil, id: previous.id)
             }
-            if let current = change.current,
-               let contribution = contribution(from: current) {
-                affectedDays.insert(contribution.dayIdentifier)
-                replaceContribution(for: current.id, with: contribution)
+            if let current = change.current {
+                affectedDays.insert(current.dayIdentifier)
+                replaceSession(current)
             }
         }
         return FocusHistoryIncrementalUpdate(affectedDayIdentifiers: affectedDays)
@@ -287,13 +307,19 @@ public struct FocusHistoryAggregationCache: Sendable {
         apply([FocusHistorySessionChange(previous: previous, current: current)])
     }
 
-    public func snapshot(for query: FocusHistoryQuery) throws -> FocusHistorySnapshot {
+    /// Produces a snapshot at `now`. Supplying `now` includes open sessions at
+    /// that instant without turning elapsed time into repeated journal writes.
+    /// Historical callers that omit it retain ended-session-only semantics.
+    public func snapshot(
+        for query: FocusHistoryQuery,
+        now: Date? = nil
+    ) throws -> FocusHistorySnapshot {
         let referenceDate = try Self.date(for: query.referenceDayIdentifier)
         let recentIdentifiers = Self.dayIdentifiers(endingAt: referenceDate, count: 7)
         let weekIdentifiers = Self.isoWeekDayIdentifiers(through: referenceDate)
-        let recentDays = recentIdentifiers.map { makeDay($0, query: query) }
-        let weekDays = weekIdentifiers.map { makeDay($0, query: query) }
-        let week = makeWeek(weekDays, query: query)
+        let recentDays = recentIdentifiers.map { makeDay($0, query: query, now: now) }
+        let weekDays = weekIdentifiers.map { makeDay($0, query: query, now: now) }
+        let week = makeWeek(weekDays, query: query, now: now)
 
         let state: FocusHistoryState
         switch query.source.health {
@@ -302,7 +328,9 @@ public struct FocusHistoryAggregationCache: Sendable {
         case .partial:
             state = .partial
         case .available:
-            state = contributions.isEmpty ? .noHistory : .available
+            state = contributions.isEmpty && (now == nil || liveSessions.isEmpty)
+                ? .noHistory
+                : .available
         }
 
         return FocusHistorySnapshot(
@@ -310,7 +338,7 @@ public struct FocusHistoryAggregationCache: Sendable {
             sourceHealth: query.source.health,
             recentDays: recentDays,
             currentWeek: week,
-            currentGoalStreakDays: currentGoalStreak(endingAt: referenceDate, query: query)
+            currentGoalStreakDays: currentGoalStreak(endingAt: referenceDate, query: query, now: now)
         )
     }
 
@@ -331,13 +359,34 @@ public struct FocusHistoryAggregationCache: Sendable {
         )
     }
 
-    private mutating func replaceContribution(for id: UUID, with newContribution: Contribution?) {
-        if let oldContribution = contributions.removeValue(forKey: id) {
-            remove(oldContribution, id: id)
+    private mutating func replaceSession(_ session: FocusSession?, id: UUID? = nil) {
+        let identifier = session?.id ?? id
+        guard let identifier else { return }
+        if let oldContribution = contributions.removeValue(forKey: identifier) {
+            remove(oldContribution, id: identifier)
         }
-        guard let newContribution else { return }
-        contributions[id] = newContribution
-        add(newContribution, id: id)
+        liveSessions.removeValue(forKey: identifier)
+        guard let session else { return }
+        if let contribution = contribution(from: session) {
+            contributions[identifier] = contribution
+            add(contribution, id: identifier)
+        } else if session.isOpen {
+            liveSessions[identifier] = session
+        }
+    }
+
+    private func liveContribution(from session: FocusSession, now: Date) -> Contribution? {
+        guard session.isOpen else { return nil }
+        let project = session.decisionAuthority == .manualCorrection
+            ? session.project
+            : projectResolver(session.project)
+        return Contribution(
+            dayIdentifier: session.dayIdentifier,
+            projectKey: project.key,
+            displayName: project.displayName,
+            endedAt: session.lastStateChangeAt,
+            duration: session.activeDuration(now: now)
+        )
     }
 
     private mutating func add(_ contribution: Contribution, id: UUID) {
@@ -377,7 +426,31 @@ public struct FocusHistoryAggregationCache: Sendable {
         }
     }
 
-    private func makeDay(_ identifier: String, query: FocusHistoryQuery) -> FocusHistoryDay {
+    private func accumulator(for identifier: String, now: Date?) -> DayAccumulator? {
+        var result = days[identifier]
+        guard let now else { return result }
+        for session in liveSessions.values where session.dayIdentifier == identifier {
+            guard let contribution = liveContribution(from: session, now: now) else { continue }
+            var day = result ?? DayAccumulator()
+            day.focusDuration += contribution.duration
+            day.sessionIDs.insert(session.id)
+            var project = day.projects[contribution.projectKey] ?? ProjectAccumulator()
+            project.focusDuration += contribution.duration
+            project.displayCandidates[session.id] = DisplayCandidate(
+                displayName: contribution.displayName,
+                endedAt: contribution.endedAt
+            )
+            day.projects[contribution.projectKey] = project
+            result = day
+        }
+        return result
+    }
+
+    private func makeDay(
+        _ identifier: String,
+        query: FocusHistoryQuery,
+        now: Date?
+    ) -> FocusHistoryDay {
         guard query.source.isDayTrusted(identifier) else {
             return FocusHistoryDay(
                 dayIdentifier: identifier,
@@ -391,7 +464,7 @@ public struct FocusHistoryAggregationCache: Sendable {
             )
         }
 
-        let accumulator = days[identifier]
+        let accumulator = accumulator(for: identifier, now: now)
         let duration = accumulator?.focusDuration ?? 0
         let count = accumulator?.completedSessionCount ?? 0
         let goal = query.dailyGoalMinutes[identifier].flatMap { $0 > 0 ? $0 : nil }
@@ -411,7 +484,11 @@ public struct FocusHistoryAggregationCache: Sendable {
         )
     }
 
-    private func makeWeek(_ days: [FocusHistoryDay], query: FocusHistoryQuery) -> FocusHistoryWeek {
+    private func makeWeek(
+        _ days: [FocusHistoryDay],
+        query: FocusHistoryQuery,
+        now: Date?
+    ) -> FocusHistoryWeek {
         precondition(!days.isEmpty)
         let allDaysTrusted = !days.contains { $0.state == .unknown }
         let state: FocusHistoryWeekState
@@ -443,7 +520,12 @@ public struct FocusHistoryAggregationCache: Sendable {
         let totalGoalSeconds = configuredGoals.reduce(0) { $0 + $1 * 60 }
         let goalRate = totalGoalSeconds > 0 ? min(1, duration / TimeInterval(totalGoalSeconds)) : nil
         let metDays = days.compactMap(\.isGoalMet).filter { $0 }.count
-        let distribution = projectDistribution(for: days.map(\.dayIdentifier), totalDuration: duration, activeKeys: query.activeProjectKeys)
+        let distribution = projectDistribution(
+            for: days.map(\.dayIdentifier),
+            totalDuration: duration,
+            activeKeys: query.activeProjectKeys,
+            now: now
+        )
         return FocusHistoryWeek(
             startDayIdentifier: days[0].dayIdentifier,
             endDayIdentifier: days[days.count - 1].dayIdentifier,
@@ -460,11 +542,12 @@ public struct FocusHistoryAggregationCache: Sendable {
     private func projectDistribution(
         for identifiers: [String],
         totalDuration: TimeInterval,
-        activeKeys: Set<String>?
+        activeKeys: Set<String>?,
+        now: Date?
     ) -> [FocusHistoryProject] {
         var buckets: [String: ProjectAccumulator] = [:]
         for identifier in identifiers {
-            guard let day = days[identifier] else { continue }
+            guard let day = accumulator(for: identifier, now: now) else { continue }
             for (key, project) in day.projects {
                 var bucket = buckets[key] ?? ProjectAccumulator()
                 bucket.focusDuration += project.focusDuration
@@ -501,11 +584,15 @@ public struct FocusHistoryAggregationCache: Sendable {
         }?.value.displayName
     }
 
-    private func currentGoalStreak(endingAt referenceDate: Date, query: FocusHistoryQuery) -> Int? {
+    private func currentGoalStreak(
+        endingAt referenceDate: Date,
+        query: FocusHistoryQuery,
+        now: Date?
+    ) -> Int? {
         var streak = 0
         var cursor = referenceDate
         while true {
-            let day = makeDay(Self.dayIdentifier(for: cursor), query: query)
+            let day = makeDay(Self.dayIdentifier(for: cursor), query: query, now: now)
             guard let isGoalMet = day.isGoalMet else { return nil }
             guard isGoalMet else { return streak }
             streak += 1

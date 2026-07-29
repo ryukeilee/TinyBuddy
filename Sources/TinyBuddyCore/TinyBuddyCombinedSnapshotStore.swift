@@ -1725,18 +1725,23 @@ public final class TinyBuddyCombinedSnapshotStore {
                 return false
             }
         case .sessions:
+            // A live automatic session contributes elapsed duration before it
+            // becomes an ended session. Its authority ID is present, while the
+            // completed count correctly remains zero until it ends.
             guard let duration = day.focusDuration,
                   duration.isFinite,
                   duration >= 0,
                   let count = day.completedSessionCount,
-                  count > 0 else {
+                  count >= 0 else {
                 return false
             }
         }
 
         if let ids = day.contributingSessionIDs {
+            // IDs include both completed rows and a possible in-progress row;
+            // the completed count must never exceed that authority set.
             guard Set(ids).count == ids.count,
-                  ids.count == (day.completedSessionCount ?? -1) else {
+                  ids.count >= (day.completedSessionCount ?? -1) else {
                 return false
             }
         }
@@ -1810,8 +1815,10 @@ public final class TinyBuddyCombinedSnapshotStore {
                         && project.focusShare.isFinite
                         && (0 ... 1).contains(project.focusShare)
                         && (project.contributingSessionIDs.map { ids in
+                            // Live rows contribute an authority ID before they
+                            // increment the ended-session count.
                             Set(ids).count == ids.count
-                                && ids.count == project.completedSessionCount
+                                && ids.count >= project.completedSessionCount
                         } ?? true)
                 }
             }

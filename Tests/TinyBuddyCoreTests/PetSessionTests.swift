@@ -36,6 +36,27 @@ final class PetSessionTests: XCTestCase {
         XCTAssertEqual(reloadedSession.stats.completionCount, 1)
     }
 
+    func testSynchronizingAutomaticStatusDoesNotCreateLegacyCounts() {
+        let defaults = makeDefaults()
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: makeCalendar(),
+            dateProvider: { self.makeDate(year: 2026, month: 7, day: 1) }
+        )
+        let session = PetSession(store: store)
+
+        _ = session.synchronizeStatus(.focusing)
+        XCTAssertEqual(session.status, .focusing)
+        XCTAssertEqual(session.stats.focusCount, 0)
+        XCTAssertEqual(session.stats.completionCount, 0)
+
+        _ = session.synchronizeStatus(.completedOnce)
+        XCTAssertEqual(session.status, .completedOnce)
+        XCTAssertEqual(session.stats.focusCount, 0)
+        XCTAssertEqual(session.stats.completionCount, 0)
+        XCTAssertEqual(PetSession(store: store).status, .completedOnce)
+    }
+
     func testRepeatedFocusingIsIdempotent() {
         let defaults = makeDefaults()
         let store = DailyStatsStore(

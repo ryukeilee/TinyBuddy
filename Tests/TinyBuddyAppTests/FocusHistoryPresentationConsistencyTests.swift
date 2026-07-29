@@ -23,17 +23,37 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertFalse(widget.contains("FocusHistoryAggregationCache"))
     }
 
-    func testUnknownHistoryIsNotReemittedOrReplacedByLegacyWidgetNumbers() throws {
+    func testUnknownHistoryNeverFallsBackToLegacyWidgetCounts() throws {
         let report = try source("Sources/TinyBuddy/FocusHistoryView.swift")
+        let hud = try source("Sources/TinyBuddy/PetView.swift")
         let widget = try source("Widget/TinyBuddyWidget/TinyBuddyWidget.swift")
 
         XCTAssertTrue(report.contains("publication = publicationProvider()"))
         XCTAssertFalse(report.contains("} { _ in\n            refreshHistory()"))
-        // Widget 在 publication 不可用时回退到 Git 活动数据而非显示"未知"
-        XCTAssertFalse(widget.contains("guard let focus = entry.focusSessionSnapshot"))
-        XCTAssertTrue(widget.contains("focusMetricIsKnown ? presentation.focusCountText : \"未知\""))
-        // 回退逻辑使用 Git 活动数据中的专注块计数
-        XCTAssertTrue(widget.contains("presentation.focusCount > 0"))
+        XCTAssertTrue(hud.contains("FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)"))
+        XCTAssertTrue(widget.contains("FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)"))
+        XCTAssertFalse(hud.contains("presentation.focusCountText"))
+        XCTAssertFalse(widget.contains("presentation.focusCountText"))
+        XCTAssertFalse(widget.contains("presentation.focusCount > 0"))
+    }
+
+    func testLiveHistoryUsesExistingIdleSamplingAndReloadsWidgetOnDurationChange() throws {
+        let bridge = try source("Sources/TinyBuddy/FocusSessionAppBridge.swift")
+        let viewModel = try source("Sources/TinyBuddy/PetViewModel.swift")
+
+        XCTAssertTrue(bridge.contains("private var wasIdle: Bool = true"))
+        XCTAssertTrue(bridge.contains("private func publishLiveFocusHistoryIfNeeded()"))
+        XCTAssertTrue(bridge.contains("wholeMinutes != lastPublishedFocusMinute"))
+        XCTAssertTrue(bridge.contains("engine.republishFocusHistory()"))
+        XCTAssertTrue(bridge.contains("This adds no timer, disk write, or Widget reload\n    /// while there is no open focus session."))
+        XCTAssertFalse(bridge.contains("Timer("))
+
+        XCTAssertTrue(viewModel.contains("let previousHistory = focusHistoryPublication"))
+        XCTAssertTrue(viewModel.contains("didChange || focusHistoryPublication != previousHistory"))
+        XCTAssertTrue(viewModel.contains("func synchronizeFocusSessionStatus(_ status: PetStatus)"))
+        let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
+        XCTAssertTrue(app.contains("self.petViewModel.synchronizeFocusSessionStatus("))
+        XCTAssertTrue(app.contains("isActivelyFocusing ? .focusing"))
     }
 
     private func source(_ relativePath: String) throws -> String {

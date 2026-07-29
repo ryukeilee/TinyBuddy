@@ -347,27 +347,18 @@ struct TinyBuddyWidgetView: View {
         entry.presentation
     }
 
+    private var focusHistoryDay: FocusHistoryDay? {
+        entry.focusHistoryPublication?.snapshot.recentDays.last
+    }
+
     private var focusSessionSummary: String? {
-        guard let day = entry.focusHistoryPublication?.snapshot.recentDays.last else {
-            // 当专注历史 publication 不可用时，检查 Git 活动数据是否有专注块计数
-            if presentation.focusCount > 0 {
-                return "有 \(presentation.focusCountText) 个专注块（来自 Git 活动）"
-            }
-            return nil
-        }
+        guard let day = focusHistoryDay else { return nil }
         switch day.state {
         case .sessions:
-            let minutes = Int((day.focusDuration ?? 0) / 60)
-            return "已专注 \(minutes / 60) 小时 \(minutes % 60) 分 · \(day.completedSessionCount ?? 0) 段"
+            return "已专注 \(FocusHistoryDurationFormatter.text(for: day.focusDuration)) · \(day.completedSessionCount ?? 0) 段"
         case .noSessions:
-            if presentation.focusCount > 0 {
-                return "有 \(presentation.focusCountText) 个专注块（来自 Git 活动）"
-            }
-            return "今日暂无已结束会话"
+            return "今日暂无专注"
         case .unknown:
-            if presentation.focusCount > 0 {
-                return "有 \(presentation.focusCountText) 个专注块（来自 Git 活动）"
-            }
             return nil
         }
     }
@@ -381,17 +372,14 @@ struct TinyBuddyWidgetView: View {
         return "本周 \(minutes / 60) 小时 \(minutes % 60) 分"
     }
 
-    /// 优先使用权威 publication 判断已知性，并在其不可用时回退到 Git 活动数据
+    /// Today's primary metric is elapsed time from the same authoritative
+    /// publication as the App. Git focus-block counts never substitute for it.
     private var focusMetricText: String {
-        focusMetricIsKnown ? presentation.focusCountText : "未知"
+        FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)
     }
 
     private var focusMetricIsKnown: Bool {
-        if let day = entry.focusHistoryPublication?.snapshot.recentDays.last {
-            return day.state != .unknown && day.completedSessionCount != nil
-        }
-        // 回退：没有 publication 时，检查 Git 活动数据是否有有效计数
-        return presentation.focusCount > 0
+        focusHistoryDay?.focusDuration != nil
     }
 
     private var displayEnvironment: TinyBuddyDisplayEnvironment {
@@ -463,7 +451,7 @@ struct TinyBuddyWidgetView: View {
     private var widgetAccessibilityLabel: String {
         var parts = ["TinyBuddy"]
         parts.append(presentation.statusTitle)
-        if focusMetricIsKnown, presentation.focusCount > 0 {
+        if focusMetricIsKnown {
             parts.append("今日专注 \(focusMetricText)")
         } else if !focusMetricIsKnown {
             parts.append("今日专注未知")

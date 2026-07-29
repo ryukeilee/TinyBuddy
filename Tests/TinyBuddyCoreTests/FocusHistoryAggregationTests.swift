@@ -26,6 +26,35 @@ final class FocusHistoryAggregationTests: XCTestCase {
         XCTAssertEqual(snapshot.recentDays.last?.isGoalMet, true)
     }
 
+    func testLiveSessionContributesOnlyWhenPublicationSuppliesNow() throws {
+        let project = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
+        let start = try date("2026-07-21T09:00:00Z")
+        let active = FocusSession(
+            project: project,
+            dayIdentifier: "2026-07-21",
+            startedAt: start,
+            status: .active,
+            lastUserActivityAt: start,
+            lastStateChangeAt: start
+        )
+        let cache = FocusHistoryAggregationCache(sessions: [active])
+
+        let historical = try cache.snapshot(for: query(reference: "2026-07-21"))
+        XCTAssertEqual(historical.recentDays.last?.state, .noSessions)
+        XCTAssertEqual(historical.recentDays.last?.focusDuration, 0)
+
+        let live = try cache.snapshot(
+            for: query(reference: "2026-07-21"),
+            now: try date("2026-07-21T09:17:30Z")
+        )
+        XCTAssertEqual(live.state, .available)
+        XCTAssertEqual(live.recentDays.last?.state, .sessions)
+        XCTAssertEqual(live.recentDays.last?.focusDuration ?? -1, 1_050, accuracy: 0.001)
+        XCTAssertEqual(live.recentDays.last?.completedSessionCount, 0)
+        XCTAssertEqual(live.currentWeek.projectDistribution?.first?.focusDuration ?? -1, 1_050, accuracy: 0.001)
+        XCTAssertEqual(FocusHistoryDurationFormatter.text(for: live.recentDays.last?.focusDuration), "0 小时 17 分")
+    }
+
     func testTrustedNoSessionsIsZeroButPartialUnknownIsNil() throws {
         let cache = FocusHistoryAggregationCache()
         let available = try cache.snapshot(for: query(reference: "2026-07-21"))

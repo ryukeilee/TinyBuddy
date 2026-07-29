@@ -49,8 +49,9 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private var evidenceBySessionID: [UUID: FocusSessionEvidence] = [:]
     /// Monotonic revision of the evidence archive.
     private var evidenceArchiveRevision: Int64 = 0
-    /// The only in-process history cache. It is updated by session deltas only
-    /// after the matching archive write succeeds.
+    /// The only in-process history cache. Ended-session aggregates are updated
+    /// by durable deltas; open sessions are calculated in memory at publication
+    /// time so elapsed duration never requires repeated archive writes.
     private var historyCache = FocusHistoryAggregationCache()
     /// A corrupt archive remains unknown/partial rather than becoming a false
     /// all-zero history after the next successful live session write.
@@ -502,6 +503,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
         return sessions.first(where: \.isOpen)?.project
     }
 
+    /// Whether an automatically or manually attributed session is actively
+    /// accumulating time. A paused open session deliberately reports false.
+    public var isFocusSessionActive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return sessions.contains { $0.isOpen && $0.status == .active }
+    }
+
     /// Returns the evidence record for a specific session, if available.
     public func evidence(for sessionID: UUID) -> FocusSessionEvidence? {
         lock.lock(); defer { lock.unlock() }
@@ -919,7 +927,7 @@ private extension FocusSessionEngine {
             activeProjectKeys: historyActiveProjectKeysProvider(sessions),
             defaultDailyGoalMinutes: goalMinutes
         )
-        guard let snapshot = try? historyCache.snapshot(for: query) else {
+        guard let snapshot = try? historyCache.snapshot(for: query, now: clock.now) else {
             return nil
         }
         return FocusHistoryPublication(revision: archiveRevision, snapshot: snapshot)

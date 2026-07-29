@@ -13,6 +13,15 @@ public final class PetSession {
         self.stats = snapshot.stats
     }
 
+    /// Synchronizes status derived from an authoritative focus-session state
+    /// without manufacturing a legacy focus/completion counter event.
+    public func synchronizeStatus(_ nextStatus: PetStatus) -> DailyStats {
+        status = nextStatus
+        stats = store.loadToday()
+        store.saveStatus(nextStatus)
+        return stats
+    }
+
     /// Selects a new status and records the associated count change.
     ///
     /// Idempotency guarantees:

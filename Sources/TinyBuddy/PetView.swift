@@ -52,23 +52,23 @@ struct PetView: View {
         }
     }
 
-    /// The legacy daily counter is retained for compatibility, but its value
-    /// is shown only when the shared history publication establishes that the
-    /// current day is known. This prevents a fallback zero from masquerading
-    /// as a confirmed focus result after a journal migration/read failure.
+    /// Today's duration comes only from the revision-bound session-history
+    /// publication shared with the Widget. Git focus-block counts are activity
+    /// metadata, not elapsed focus time, so they never stand in for this value.
+    private var focusHistoryDay: FocusHistoryDay? {
+        viewModel.focusHistoryPublication?.snapshot.recentDays.last
+    }
+
     private var focusMetricText: String {
-        focusMetricIsKnown ? presentation.focusCountText : "未知"
+        FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)
     }
 
     private var focusMetricNumericValue: Int {
-        focusMetricIsKnown ? presentation.focusCount : 0
+        max(0, Int((focusHistoryDay?.focusDuration ?? 0) / 60))
     }
 
     private var focusMetricIsKnown: Bool {
-        guard let day = viewModel.focusHistoryPublication?.snapshot.recentDays.last else {
-            return false
-        }
-        return day.state != .unknown && day.completedSessionCount != nil
+        focusHistoryDay?.focusDuration != nil
     }
 
     private var increasedContrast: Bool {
@@ -298,7 +298,7 @@ struct PetView: View {
         if let projectName = presentation.recentProjectName {
             parts.append("最近项目：\(projectName)")
         }
-        if focusMetricIsKnown, focusMetricNumericValue > 0 {
+        if focusMetricIsKnown {
             parts.append("专注：\(focusMetricText)")
         } else if !focusMetricIsKnown {
             parts.append("今日专注未知")

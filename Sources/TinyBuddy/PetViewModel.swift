@@ -392,6 +392,24 @@ final class PetViewModel: ObservableObject {
         }
     }
 
+    /// Applies an automatic focus-state transition without incrementing the
+    /// compatibility counters used by the manual pet controls. The combined
+    /// snapshot keeps its committed focus-history slice while status changes.
+    func synchronizeFocusSessionStatus(_ status: PetStatus) {
+        guard self.status != status else { return }
+        let synchronizedStats = session.synchronizeStatus(status)
+        let snapshot = TinyBuddySnapshot(status: status, stats: synchronizedStats)
+        let update = combinedSnapshotStore.updatePetSlice(
+            snapshot,
+            fallbackActivitySnapshot: nil
+        )
+        guard update.didPersist || update.outcome == .alreadyCurrent else {
+            return
+        }
+        _ = reloadCommittedHUDState()
+        reloadWidgetIfPossible()
+    }
+
     func requestGitScanAuthorization() {
         notificationCenter.post(name: .gitScanRootAuthorizationRequested, object: nil)
     }
@@ -698,7 +716,12 @@ final class PetViewModel: ObservableObject {
     /// snapshot was already written by the caller; this re-reads without
     /// re-writing to avoid an unnecessary revision increment.
     func focusSessionStatsDidChange() {
-        if reloadCommittedHUDState() {
+        let previousHistory = focusHistoryPublication
+        let didChange = reloadCommittedHUDState()
+        // Elapsed focus duration lives in the history publication rather than
+        // the legacy count-based display presentation. Reload WidgetKit when
+        // that authoritative slice changes even if the status/count UI did not.
+        if didChange || focusHistoryPublication != previousHistory {
             reloadWidgetIfPossible()
         }
     }

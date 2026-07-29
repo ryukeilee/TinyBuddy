@@ -43,8 +43,12 @@ final class FocusSessionAppBridge {
     private let notificationCenter: NotificationCenter
 
     private var idleTimer: DispatchSourceTimer?
-    private var wasIdle: Bool = false
+    // Treat startup as idle until the first observed input. This makes the
+    // next low-frequency sample start automatic attribution for a user who
+    // was already typing when TinyBuddy launched.
+    private var wasIdle: Bool = true
     private var activeCount: Int = 0
+    private var lastPublishedFocusMinute: Int?
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.ryukeili.TinyBuddy",
@@ -198,18 +202,36 @@ final class FocusSessionAppBridge {
 
         if isNowIdle, !wasIdle {
             wasIdle = true
+            lastPublishedFocusMinute = nil
             checkDayChange()
             coordinator.reportIdle()
         } else if !isNowIdle, wasIdle {
             wasIdle = false
             checkDayChange()
             coordinator.reportUserInput()
+            publishLiveFocusHistoryIfNeeded()
         } else if !isNowIdle {
             activeCount += 1
             if activeCount % 6 == 0 {
                 checkDayChange()
             }
+            publishLiveFocusHistoryIfNeeded()
         }
+    }
+
+    /// A live duration changes without a new session-journal fact. Re-publish
+    /// only when its displayed whole minute changes, while an existing 30s idle
+    /// sample is already awake. This adds no timer, disk write, or Widget reload
+    /// while there is no open focus session.
+    private func publishLiveFocusHistoryIfNeeded() {
+        guard engine.currentProject != nil else {
+            lastPublishedFocusMinute = nil
+            return
+        }
+        let wholeMinutes = max(0, Int(engine.focusDurationToday() / 60))
+        guard wholeMinutes != lastPublishedFocusMinute else { return }
+        lastPublishedFocusMinute = wholeMinutes
+        engine.republishFocusHistory()
     }
 
     private func seedForegroundApp() {

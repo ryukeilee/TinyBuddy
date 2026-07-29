@@ -65,6 +65,68 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         XCTAssertEqual(stale.snapshot?.focusHistoryPublication, refreshed)
     }
 
+    func testHistoryUpdatePersistsLiveDurationBeforeAnySessionCompletes() {
+        let preferences = MemoryPreferences()
+        let store = makeStore(preferences)
+        let fallback = makeCombinedSnapshot(publication: nil).snapshot
+        let liveSessionID = UUID()
+        let current = FocusHistoryDay(
+            dayIdentifier: "2026-07-20",
+            state: .sessions,
+            focusDuration: 90,
+            completedSessionCount: 0,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil,
+            contributingSessionIDs: [liveSessionID]
+        )
+        let publication = FocusHistoryPublication(
+            revision: 8,
+            snapshot: FocusHistorySnapshot(
+                state: .available,
+                sourceHealth: .available,
+                recentDays: [
+                    FocusHistoryDay(
+                        dayIdentifier: "2026-07-19",
+                        state: .noSessions,
+                        focusDuration: 0,
+                        completedSessionCount: 0,
+                        goalMinutes: nil,
+                        goalCompletionRate: nil,
+                        isGoalMet: nil
+                    ),
+                    current
+                ],
+                currentWeek: FocusHistoryWeek(
+                    startDayIdentifier: "2026-07-14",
+                    endDayIdentifier: "2026-07-20",
+                    state: .available,
+                    focusDuration: 90,
+                    completedSessionCount: 0,
+                    goalCompletionRate: nil,
+                    goalMetDayCount: nil,
+                    configuredGoalDayCount: nil,
+                    projectDistribution: [
+                        FocusHistoryProject(
+                            displayName: "Alpha",
+                            isHistoricalArchive: false,
+                            focusDuration: 90,
+                            completedSessionCount: 0,
+                            focusShare: 1,
+                            contributingSessionIDs: [liveSessionID]
+                        )
+                    ]
+                ),
+                currentGoalStreakDays: nil
+            )
+        )
+
+        let update = store.updateFocusHistorySlice(publication, fallbackSnapshot: fallback)
+
+        XCTAssertEqual(update.outcome, .saved)
+        XCTAssertEqual(update.snapshot?.focusHistoryPublication?.snapshot.recentDays.last, current)
+    }
+
     func testActivityWriteRetainsHistoryPublication() {
         let preferences = MemoryPreferences()
         let store = makeStore(preferences)

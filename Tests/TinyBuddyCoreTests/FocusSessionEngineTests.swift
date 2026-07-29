@@ -907,19 +907,26 @@ extension FocusSessionEngineTests {
         XCTAssertEqual(recorder.count, 0)
     }
 
-    func test_completed_automatic_session_publishes_cache_backed_history_once() throws {
+    func test_active_and_completed_automatic_sessions_publish_current_history() throws {
         let engine = makeEngine(clock: clock, store: store)
         let recorder = HistoryPublicationRecorder()
         engine.committedHistorySnapshotHandler = { recorder.append($0) }
 
         XCTAssertEqual(engine.userActivity(in: projectA, at: t0), .saved)
-        XCTAssertEqual(recorder.count, 0, "Open sessions are not historical facts yet")
+        XCTAssertEqual(recorder.count, 1, "An open session must publish today's live duration")
+        XCTAssertEqual(recorder.publications.last?.snapshot.recentDays.last?.focusDuration, 0)
+        XCTAssertEqual(recorder.publications.last?.snapshot.recentDays.last?.completedSessionCount, 0)
 
         clock.advance(by: 90)
-        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
-        XCTAssertEqual(recorder.count, 1)
+        engine.republishFocusHistory()
+        XCTAssertEqual(recorder.count, 2)
+        XCTAssertEqual(recorder.publications.last?.revision, 1)
+        XCTAssertEqual(recorder.publications.last?.snapshot.recentDays.last?.focusDuration ?? -1, 90, accuracy: 0.001)
 
-        let publication = try XCTUnwrap(recorder.publications.first)
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        XCTAssertEqual(recorder.count, 3)
+
+        let publication = try XCTUnwrap(recorder.publications.last)
         XCTAssertEqual(publication.revision, 2)
         XCTAssertEqual(publication.snapshot.recentDays.last?.focusDuration ?? -1, 90, accuracy: 0.001)
         XCTAssertEqual(publication.snapshot.recentDays.last?.completedSessionCount, 1)
