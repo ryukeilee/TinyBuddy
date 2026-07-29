@@ -39,9 +39,14 @@ struct FocusHistoryView: View {
         .onReceive(NotificationCenter.default.publisher(
             for: .focusSessionSnapshotSynchronizationDidFinish
         )) { _ in
-            // The publication was already committed by the producer. Re-read
-            // it only; re-emitting here would create a notification loop.
+            // Re-read the committed publication first, then refresh the engine.
+            // Reading first ensures the view always shows the latest committed
+            // data even if the engine republish was already triggered by a prior
+            // caller.  No notification loop: republishHistorySnapshot with an
+            // unchanged cache produces .alreadyCurrent which does NOT call
+            // postFocusHistorySynchronization (the notification is silent).
             publication = publicationProvider()
+            refresh()
         }
     }
 
@@ -237,10 +242,13 @@ struct FocusHistoryView: View {
     }
 
     private func refreshHistory() {
-        // Read current committed publication first so the view never shows
-        // stale data while the async engine republish is in flight.
-        publication = publicationProvider()
+        // Trigger the engine republish first, then read the committed
+        // publication.  The handler is async (dispatched to main) so this
+        // reads the most recent committed snapshot which is the authoritative
+        // source; the async handler will post a notification when it completes
+        // and the onReceive handler re-reads the updated publication.
         refresh()
+        publication = publicationProvider()
     }
 
     private func duration(_ value: TimeInterval?) -> String {

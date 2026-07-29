@@ -544,6 +544,203 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         return fmt.string(from: date)
     }
 
+    // MARK: - Activity + History coexistence
+
+    func testFocusHistoryWritePreservesPreviouslyCommittedActivityData() {
+        let preferences = MemoryPreferences()
+        let store = makeStore(preferences)
+        let today = "2026-07-20"
+        let fallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: today, focusCount: 0, completionCount: 0)
+        )
+
+        // Step 1: Write activity data first (simulates Git refresh at startup)
+        let activity = GitTodayActivitySnapshot(
+            focusBlockCount: 5, commitCount: 3, recentProjectName: "Project A"
+        )
+        XCTAssertEqual(
+            store.updateActivitySlice(activity, activityRevision: 1, fallbackSnapshot: fallback).outcome,
+            .saved
+        )
+
+        // Verify activity data is present
+        var combined = store.load()
+        XCTAssertEqual(combined?.activitySnapshot.focusBlockCount, 5)
+        XCTAssertEqual(combined?.activitySnapshot.commitCount, 3)
+        XCTAssertEqual(combined?.activitySnapshot.recentProjectName, "Project A")
+        XCTAssertNil(combined?.focusHistoryPublication, "No history yet")
+
+        // Step 2: Write focus history (simulates focus session update)
+        let publication = makePublication(revision: 8, completedSessionCount: 2)
+        let historyUpdate = store.updateFocusHistorySlice(publication, fallbackSnapshot: fallback)
+        XCTAssertEqual(historyUpdate.outcome, .saved)
+
+        // Verify BOTH activity data AND focus history persist
+        combined = store.load()
+        XCTAssertEqual(combined?.activitySnapshot.focusBlockCount, 5,
+                       "Activity focusBlockCount must be preserved after history write")
+        XCTAssertEqual(combined?.activitySnapshot.commitCount, 3,
+                       "Activity commitCount must be preserved after history write")
+        XCTAssertEqual(combined?.activitySnapshot.recentProjectName, "Project A",
+                       "Recent project must be preserved after history write")
+        XCTAssertEqual(combined?.focusHistoryPublication, publication,
+                       "Focus history publication must be written")
+
+        // Step 3: Write activity data again (simulates subsequent Git refresh)
+        let activity2 = GitTodayActivitySnapshot(
+            focusBlockCount: 7, commitCount: 4, recentProjectName: "Project B"
+        )
+        XCTAssertEqual(
+            store.updateActivitySlice(activity2, activityRevision: 2, fallbackSnapshot: fallback).outcome,
+            .saved
+        )
+
+        // Verify focus history survives the second activity write
+        combined = store.load()
+        XCTAssertEqual(combined?.activitySnapshot.focusBlockCount, 7)
+        XCTAssertEqual(combined?.activitySnapshot.commitCount, 4)
+        XCTAssertEqual(combined?.focusHistoryPublication, publication,
+                       "Focus history publication must survive subsequent activity write")
+    }
+
+    func testFocusHistoryWritePreservesLiveDurationWithIncompleteSession() {
+        let preferences = MemoryPreferences()
+        let store = makeStore(preferences)
+        let today = "2026-07-20"
+        let fallback = TinyBuddySnapshot(
+            status: .focusing,
+            stats: DailyStats(dayIdentifier: today, focusCount: 0, completionCount: 0)
+        )
+
+        // Simulate an in-progress session (has duration but no completed sessions)
+        let liveSessionID = UUID()
+        let current = FocusHistoryDay(
+            dayIdentifier: today,
+            state: .sessions,
+            focusDuration: 270, // 4 min 30 sec in progress
+            completedSessionCount: 0,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil,
+            contributingSessionIDs: [liveSessionID]
+        )
+        let previous = FocusHistoryDay(
+            dayIdentifier: "2026-07-19",
+            state: .noSessions,
+            focusDuration: 0,
+            completedSessionCount: 0,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let publication = FocusHistoryPublication(
+            revision: 5,
+            snapshot: FocusHistorySnapshot(
+                state: .available,
+                sourceHealth: .available,
+                recentDays: [previous, current],
+                currentWeek: FocusHistoryWeek(
+                    startDayIdentifier: "2026-07-14",
+                    endDayIdentifier: today,
+                    state: .available,
+                    focusDuration: 270,
+                    completedSessionCount: 0,
+                    goalCompletionRate: nil,
+                    goalMetDayCount: nil,
+                    configuredGoalDayCount: nil,
+                    projectDistribution: [
+                        FocusHistoryProject(
+                            displayName: "Live Project",
+                            isHistoricalArchive: false,
+                            focusDuration: 270,
+                            completedSessionCount: 0,
+                            focusShare: 1,
+                            contributingSessionIDs: [liveSessionID]
+                        )
+                    ]
+                ),
+                currentGoalStreakDays: nil
+            )
+        )
+
+        // Write focus history with in-progress session
+        let update = store.updateFocusHistorySlice(publication, fallbackSnapshot: fallback)
+        XCTAssertEqual(update.outcome, .saved)
+        XCTAssertEqual(update.didPersist, true)
+
+        // Verify the stored publication has the live duration
+        let stored = store.load()
+        let storedDay = stored?.focusHistoryPublication?.snapshot.recentDays.last
+        XCTAssertEqual(storedDay?.state, .sessions)
+        XCTAssertEqual(storedDay?.focusDuration ?? -1, 270, accuracy: 0.001)
+        XCTAssertEqual(storedDay?.completedSessionCount, 0,
+                       "In-progress session must not increment completedSessionCount")
+        XCTAssertEqual(storedDay?.contributingSessionIDs, [liveSessionID])
+
+        // Verify the combined snapshot maintains the correct day and status
+        XCTAssertEqual(stored?.dayIdentifier, today)
+        XCTAssertEqual(stored?.snapshot.status, .focusing)
+    }
+
+    func testCrossDayActivityWriteDoesNotCorruptExistingFocusHistory() {
+        let preferences = MemoryPreferences()
+        let store = makeStore(preferences)
+        let today = "2026-07-20"
+        let fallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: today, focusCount: 0, completionCount: 0)
+        )
+
+        // Write activity data for today first (simulates Git refresh)
+        let initialActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 5, commitCount: 3, recentProjectName: "Project A"
+        )
+        XCTAssertEqual(
+            store.updateActivitySlice(initialActivity, activityRevision: 1, fallbackSnapshot: fallback).outcome,
+            .saved
+        )
+
+        // Write focus history for today
+        let publication = makePublication(revision: 8, completedSessionCount: 2)
+        XCTAssertEqual(
+            store.updateFocusHistorySlice(publication, fallbackSnapshot: fallback).outcome,
+            .saved
+        )
+
+        // Now write activity for a DIFFERENT day (simulates Git refresh on a
+        // new day before any focus history was committed for that day)
+        let tomorrow = "2026-07-21"
+        let tomorrowFallback = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: tomorrow, focusCount: 0, completionCount: 0)
+        )
+        let nextActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 3, commitCount: 1, recentProjectName: "Project C"
+        )
+        let activityUpdate = store.updateActivitySlice(
+            nextActivity, activityRevision: 2, fallbackSnapshot: tomorrowFallback
+        )
+        XCTAssertEqual(activityUpdate.outcome, .saved)
+
+        // Verify the NEW day's snapshot has activity but NO history (correct)
+        let tomorrowSnapshot = store.readValidated(expectedDayIdentifier: tomorrow).snapshot
+        XCTAssertEqual(tomorrowSnapshot?.dayIdentifier, tomorrow)
+        XCTAssertEqual(tomorrowSnapshot?.activitySnapshot.focusBlockCount, 3)
+        XCTAssertNil(tomorrowSnapshot?.focusHistoryPublication,
+                     "New day must not inherit previous day's focus history")
+
+        // Verify the ORIGINAL day's data is completely unchanged
+        let todaySnapshot = store.readValidated(expectedDayIdentifier: today).snapshot
+        XCTAssertEqual(todaySnapshot?.dayIdentifier, today)
+        XCTAssertEqual(todaySnapshot?.focusHistoryPublication, publication,
+                       "Today's focus history must survive cross-day activity write")
+        XCTAssertEqual(todaySnapshot?.activitySnapshot.focusBlockCount, 5,
+                       "Today's activity data must survive cross-day activity write")
+        XCTAssertEqual(todaySnapshot?.activitySnapshot.commitCount, 3,
+                       "Today's commit count must survive cross-day activity write")
+    }
+
     /// A @unchecked Sendable handle to the non-Sendable combined snapshot store.
     /// The engine calls the handler while holding its lock, so access is
     /// serialised and safe despite the lack of formal Sendable conformance.

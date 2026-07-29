@@ -1904,6 +1904,9 @@ public final class TinyBuddyCombinedSnapshotStore {
         // Keep the legacy count mirror synchronized as well, otherwise a Git
         // refresh between the combined write and its legacy-mirror update can
         // make HUD regress while Widget still renders the newer focus slice.
+        // Also preserve the activity snapshot from the current combined
+        // snapshot for the same day, so that a focus-history-only write does
+        // not overwrite previously committed Git activity data with nil.
         let synchronizedSnapshot: TinyBuddySnapshot
         if let retainedFocusHistoryPublication,
            let completedSessionCount = Self.completedSessionCount(
