@@ -207,7 +207,32 @@ public enum FocusReminderEngine {
             currentState = currentState.reset(for: dayIdentifier)
         }
 
-        // Skip all reminders during quiet hours or system DND.
+        let goalSeconds = TimeInterval(config.dailyFocusGoalMinutes * 60)
+        let totalFocusDuration = allSessions
+            .filter { $0.dayIdentifier == dayIdentifier }
+            .reduce(0) { $0 + $1.activeDuration(now: now) }
+
+        // A manual edit/delete can move progress back below the goal. Reopen
+        // the one-shot notification gate so crossing the goal again is eligible
+        // without weakening the normal duplicate protection.
+        if currentState.goalCompletedNotified,
+           goalSeconds <= 0 || totalFocusDuration < goalSeconds {
+            currentState.goalCompletedNotified = false
+        }
+
+        // Pausing an open session resets its continuous interval. If the same
+        // session was reminded before the pause, remove its gate while it is
+        // below the threshold so a later uninterrupted interval can qualify.
+        if let activeSession = allSessions.first(where: \.isOpen) {
+            let threshold = TimeInterval(config.continuousFocusThresholdMinutes * 60)
+            if activeSession.currentPauseStartedAt != nil
+                || activeSession.continuousActiveDuration(now: now) < threshold {
+                currentState.triggeredBreakReminderSessionIDs.removeAll { $0 == activeSession.id }
+            }
+        }
+
+        // Skip all reminders during quiet hours or system DND, but persist the
+        // rollback/reset above so a suppressed evaluation cannot lose state.
         if isInQuietHours || isSystemDND {
             return FocusReminderEvaluation(action: .none, updatedState: currentState)
         }
@@ -219,26 +244,22 @@ public enum FocusReminderEngine {
         }
 
         // === Goal Completion Check ===
-        if config.isGoalCompletionEnabled, !currentState.goalCompletedNotified {
-            let totalFocusDuration = allSessions
-                .filter { $0.dayIdentifier == dayIdentifier }
-                .reduce(0) { $0 + $1.activeDuration(now: now) }
-            let goalSeconds = TimeInterval(config.dailyFocusGoalMinutes * 60)
-            if totalFocusDuration >= goalSeconds, goalSeconds > 0 {
-                var newState = currentState
-                newState.goalCompletedNotified = true
-                newState.lastReminderDeliveryDate = now
-                return FocusReminderEvaluation(
-                    action: .goalCompleted(focusDuration: totalFocusDuration, goalMinutes: config.dailyFocusGoalMinutes),
-                    updatedState: newState
-                )
-            }
+        if config.isGoalCompletionEnabled, !currentState.goalCompletedNotified,
+           totalFocusDuration >= goalSeconds, goalSeconds > 0 {
+            var newState = currentState
+            newState.goalCompletedNotified = true
+            newState.lastReminderDeliveryDate = now
+            return FocusReminderEvaluation(
+                action: .goalCompleted(focusDuration: totalFocusDuration, goalMinutes: config.dailyFocusGoalMinutes),
+                updatedState: newState
+            )
         }
 
         // === Break Reminder Check ===
         if config.isBreakReminderEnabled {
             // Find the current active session(s). Only one can be open.
-            guard let activeSession = allSessions.first(where: \.isOpen) else {
+            guard let activeSession = allSessions.first(where: \.isOpen),
+                  activeSession.status == .active else {
                 return FocusReminderEvaluation(action: .none, updatedState: currentState)
             }
 
@@ -253,7 +274,7 @@ public enum FocusReminderEngine {
                 return FocusReminderEvaluation(action: .none, updatedState: currentState)
             }
 
-            let continuousDuration = activeSession.activeDuration(now: now)
+            let continuousDuration = activeSession.continuousActiveDuration(now: now)
             let threshold = TimeInterval(config.continuousFocusThresholdMinutes * 60)
 
             if continuousDuration >= threshold {

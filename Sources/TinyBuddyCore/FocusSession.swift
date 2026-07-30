@@ -240,6 +240,18 @@ public struct FocusSession: Codable, Equatable, Sendable, Identifiable {
         return max(0, gross - excluded)
     }
 
+    /// Duration of the current uninterrupted active segment. Unlike the daily
+    /// aggregate, a pause starts a fresh segment after resume, which is the
+    /// duration a break reminder threshold is meant to measure.
+    public func continuousActiveDuration(now: Date) -> TimeInterval {
+        let segmentStart = decisionEvents?
+            .last(where: { $0.kind == .started || $0.kind == .resumed })?
+            .at ?? startedAt
+        let segmentEnd = currentPauseStartedAt ?? endedAt ?? now
+        guard segmentEnd > segmentStart else { return 0 }
+        return max(0, min(segmentEnd, now).timeIntervalSince(segmentStart))
+    }
+
     public var isOpen: Bool {
         status != .ended && endedAt == nil
     }

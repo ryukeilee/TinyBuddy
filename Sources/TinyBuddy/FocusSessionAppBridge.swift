@@ -43,6 +43,11 @@ final class FocusSessionAppBridge {
     private let notificationCenter: NotificationCenter
 
     private var idleTimer: DispatchSourceTimer?
+    /// Evaluates persisted goal-reminder state from the same primary engine.
+    /// The bridge invokes this on lifecycle wakeups and its bounded heartbeat,
+    /// including when no session mutation occurred.
+    var reminderEvaluationHandler: (() -> Void)?
+
     // Treat startup as idle until the first observed input. This makes the
     // next low-frequency sample start automatic attribution for a user who
     // was already typing when TinyBuddy launched.
@@ -69,11 +74,10 @@ final class FocusSessionAppBridge {
         self.coordinator = coordinator
         self.engine = engine
         self.idleThreshold = idleThreshold
-        // The default 120-second threshold needs no sub-second precision.
-        // Polling at most every 30 seconds avoids a permanent five-second
-        // wake-up while still bounding late idle detection to one quarter of
-        // the configured threshold.
-        self.idlePollInterval = min(30, max(5, idleThreshold / 4))
+        // Keep lifecycle detection responsive enough for goal reminders while
+        // avoiding a permanent sub-second wake-up. Reminder evaluation runs
+        // on this same bounded heartbeat during uninterrupted focus.
+        self.idlePollInterval = min(15, max(5, idleThreshold / 8))
         self.workspaceNC = workspaceNotificationCenter
         self.notificationCenter = notificationCenter
     }
@@ -86,8 +90,9 @@ final class FocusSessionAppBridge {
         startIdleDetection()
         seedForegroundApp()
         // Immediately sample user activity so active users don't wait for
-        // the first idle poll (up to 30s) before the session starts.
+        // the first idle poll (up to 15s) before the session starts.
         sampleInitialActivity()
+        reminderEvaluationHandler?()
         logger.notice("FocusSessionAppBridge started")
     }
 
@@ -232,6 +237,11 @@ final class FocusSessionAppBridge {
             checkDayChange()
             publishLiveFocusHistoryIfNeeded()
         }
+
+        // A live open session accrues time without producing journal writes.
+        // Evaluate on every bounded idle poll so threshold notifications are
+        // delivered even during uninterrupted work.
+        reminderEvaluationHandler?()
     }
 
     /// After wake or unlock, check whether the user is currently active and
@@ -252,6 +262,7 @@ final class FocusSessionAppBridge {
         } else {
             wasIdle = true
         }
+        reminderEvaluationHandler?()
     }
 
     /// Immediately after launch, check whether the user is already active and
@@ -266,6 +277,7 @@ final class FocusSessionAppBridge {
             coordinator.reportActiveAfterIdle()
             publishLiveFocusHistoryIfNeeded()
         }
+        reminderEvaluationHandler?()
     }
 
     /// A live duration changes without a new session-journal fact. Re-publish
@@ -308,15 +320,26 @@ final class FocusSessionAppBridge {
         }
         guard day != last else { return }
         lastCheckedDay = day
+        // Evaluate the outgoing local day before the engine closes its open
+        // session and advances the day. This catches a goal crossed between
+        // the last heartbeat and midnight instead of dropping it at rollover.
+        reminderEvaluationHandler?()
         coordinator.reportTimeChange(dayIdentifier: day, at: now)
+        // Then reset and evaluate the new day's persisted reminder state.
+        reminderEvaluationHandler?()
     }
 
     private func handleTimeChange() {
         guard let context = TinyBuddyTimeEnvironment().capture() else { return }
         let now = context.now
         let day = context.dayIdentifier(for: now) ?? context.dayIdentifier
+        let outgoingDay = engine.currentDayIdentifier
         lastCheckedDay = day
+        if outgoingDay != day {
+            reminderEvaluationHandler?()
+        }
         coordinator.reportTimeChange(dayIdentifier: day, at: now)
+        reminderEvaluationHandler?()
     }
 
     // MARK: - Editor detection

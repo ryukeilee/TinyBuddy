@@ -93,7 +93,10 @@ struct TinyBuddyApp: App {
                     FocusGoalSettingsView(
                         engineProvider: { appDelegate.focusSessionEngine },
                         coordinator: appDelegate.focusGoalCoordinator,
-                        onConfigurationSaved: { appDelegate.refreshFocusHistoryForPresentation() }
+                        onConfigurationSaved: {
+                            appDelegate.refreshFocusHistoryForPresentation()
+                            appDelegate.evaluateFocusRemindersNow()
+                        }
                     )
                         .tabItem { Label("专注目标", systemImage: "target") }
                 }
@@ -461,13 +464,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let focusBridge = FocusSessionAppBridge.createStandard(projectRegistry: projectRegistry)
         focusSessionBridge = focusBridge
-        // Keep the legacy callback solely for existing manual-reminder
-        // behavior. History publication below is the one source for App/HUD/
-        // Widget/weekly presentation and also covers automatic completions.
-        focusBridge?.sessionEngine.committedSnapshotHandler = { [weak self] _ in
+        // Evaluate reminders from every durable session mutation, including
+        // automatic/manual lifecycle transitions. The bridge heartbeat below
+        // covers elapsed time in an unchanged open session.
+        focusBridge?.sessionEngine.committedReminderEvaluationHandler = { [weak self] reminderSnapshot in
             DispatchQueue.main.async {
-                self?.evaluateFocusRemindersAfterManualCorrection()
+                self?.evaluateFocusReminders(
+                    sessions: reminderSnapshot.sessions,
+                    dayIdentifier: reminderSnapshot.dayIdentifier
+                )
             }
+        }
+        focusBridge?.reminderEvaluationHandler = { [weak self, weak focusBridge] in
+            guard let self, let engine = focusBridge?.sessionEngine else { return }
+            self.evaluateFocusReminders(
+                sessions: engine.allSessions,
+                dayIdentifier: engine.currentDayIdentifier
+            )
         }
         focusBridge?.sessionEngine.committedHistorySnapshotHandler = { [weak self] publication in
             DispatchQueue.main.async {
@@ -722,13 +735,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = focusSessionPublicationJournal.clear(expected: derived)
     }
 
-    private func evaluateFocusRemindersAfterManualCorrection() {
-        guard let engine = focusSessionBridge?.sessionEngine else { return }
-        let snapshot = engine.derivedSnapshot()
+    private func evaluateFocusReminders(
+        sessions: [FocusSession],
+        dayIdentifier: String
+    ) {
         focusGoalCoordinator.evaluateReminders(
-            sessions: engine.allSessions,
+            sessions: sessions,
             now: Date(),
-            dayIdentifier: snapshot.dayIdentifier
+            dayIdentifier: dayIdentifier
+        )
+    }
+
+    func evaluateFocusRemindersNow() {
+        guard let engine = focusSessionBridge?.sessionEngine else { return }
+        evaluateFocusReminders(
+            sessions: engine.allSessions,
+            dayIdentifier: engine.currentDayIdentifier
         )
     }
 

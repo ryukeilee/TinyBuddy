@@ -2,6 +2,20 @@ import Foundation
 
 /// A fully recomputed, internally consistent view of recorded focus. The
 /// revision advances only after the corresponding session archive was saved.
+/// A stable session view delivered after a durable session mutation so app-level
+/// consumers can evaluate reminders without racing a second engine read.
+public struct FocusSessionReminderSnapshot: Sendable {
+    public let sessions: [FocusSession]
+    public let dayIdentifier: String
+    public let committedAt: Date
+
+    public init(sessions: [FocusSession], dayIdentifier: String, committedAt: Date) {
+        self.sessions = sessions
+        self.dayIdentifier = dayIdentifier
+        self.committedAt = committedAt
+    }
+}
+
 public struct FocusSessionDerivedSnapshot: Codable, Equatable, Sendable {
     public let revision: Int64
     public let dayIdentifier: String

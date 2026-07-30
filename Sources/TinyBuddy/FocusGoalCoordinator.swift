@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import OSLog
 import TinyBuddyCore
@@ -11,9 +10,6 @@ final class FocusGoalCoordinator {
     private let preferencesStore: FocusGoalPreferencesStore
     private let notificationManager: FocusNotificationManager
     private let logger: Logger
-
-    /// Cached evaluation to avoid redundant work.
-    private var lastEvaluatedState: FocusReminderState?
 
     init(
         preferencesStore: FocusGoalPreferencesStore = FocusGoalPreferencesStore(),
@@ -80,7 +76,6 @@ final class FocusGoalCoordinator {
 
         // Persist updated state regardless of action.
         preferencesStore.saveReminderState(evaluation.updatedState)
-        lastEvaluatedState = evaluation.updatedState
 
         // Deliver based on action.
         switch evaluation.action {
@@ -99,10 +94,10 @@ final class FocusGoalCoordinator {
         return evaluation.action
     }
 
-    /// Resets in-memory cached evaluation state (e.g., after a config change).
-    func resetEvaluationCache() {
-        lastEvaluatedState = nil
-    }
+    /// Kept as a compatibility no-op for settings callers. Reminder state is
+    /// persisted and evaluated from the current session snapshot, so an
+    /// in-memory cache cannot become stale after configuration changes.
+    func resetEvaluationCache() {}
 
     /// Checks user preference quiet hours.
     private func checkQuietHours(config: FocusGoalConfiguration, now: Date) -> Bool {
@@ -112,26 +107,23 @@ final class FocusGoalCoordinator {
         }
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: now)
-        if startHour <= endHour {
-            // e.g., 22:00 – 08:00 (same-day end means through next morning)
+        if startHour < endHour {
+            // Same-day interval, e.g. 08:00–22:00.
+            return hour >= startHour && hour < endHour
+        } else if startHour > endHour {
+            // Overnight interval, e.g. 22:00–08:00.
             return hour >= startHour || hour < endHour
         } else {
-            // endHour is smaller, meaning it wraps to next day
-            return hour >= startHour || hour < endHour
+            // Equal endpoints represent a full-day quiet interval.
+            return true
         }
     }
 
-    /// Checks system-level DND / focus mode status.
+    /// Focus modes are enforced by macOS at notification delivery time. The
+    /// app must not infer DND from its own foreground state: TinyBuddy is
+    /// normally inactive while the user is doing the focused work.
     private func isSystemDND() -> Bool {
-        // On macOS 14+, we can check the focus mode via
-        // NSWorkspace.shared.isActive or DistributedNotificationCenter.
-        // As a conservative fallback, check if the screen is asleep or
-        // the session is not active.
-        if NSWorkspace.shared.frontmostApplication == nil {
-            return true
-        }
-        // Simple heuristic: treat as DND if the app is not active.
-        return !NSApp.isActive
+        false
     }
 }
 

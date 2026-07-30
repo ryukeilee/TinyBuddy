@@ -79,6 +79,21 @@ final class HistoryPublicationRecorder: @unchecked Sendable {
     }
 }
 
+final class ReminderSnapshotRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var snapshots: [FocusSessionReminderSnapshot] = []
+
+    func append(_ snapshot: FocusSessionReminderSnapshot) {
+        lock.lock(); defer { lock.unlock() }
+        snapshots.append(snapshot)
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return snapshots.count
+    }
+}
+
 // MARK: - Helpers
 
 private let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000) // arbitrary reference
@@ -905,6 +920,20 @@ extension FocusSessionEngineTests {
         clock.advance(by: 10)
         XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
         XCTAssertEqual(recorder.count, 0)
+    }
+
+    func test_reminder_evaluation_handler_runs_for_automatic_mutations() {
+        let engine = makeEngine(clock: clock, store: store)
+        let recorder = ReminderSnapshotRecorder()
+        engine.committedReminderEvaluationHandler = { recorder.append($0) }
+
+        XCTAssertEqual(engine.userActivity(in: projectA, at: t0), .saved)
+        clock.advance(by: 10)
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+
+        XCTAssertEqual(recorder.count, 2)
+        XCTAssertEqual(recorder.snapshots.first?.sessions.count, 1)
+        XCTAssertEqual(recorder.snapshots.last?.sessions.first?.status, .ended)
     }
 
     func test_active_and_completed_automatic_sessions_publish_current_history() throws {

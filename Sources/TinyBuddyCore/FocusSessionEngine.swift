@@ -58,6 +58,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private var historySource = FocusHistorySource(health: .available)
     /// Set by the primary app bridge. Called only after a journal commit.
     public var committedSnapshotHandler: (@Sendable (FocusSessionDerivedSnapshot) -> Void)?
+    /// Set by the primary app bridge. Receives every durable session mutation,
+    /// including automatic activity and manual-control transitions, with the
+    /// exact session set that was committed.
+    public var committedReminderEvaluationHandler: (@Sendable (FocusSessionReminderSnapshot) -> Void)?
     /// Set by the primary app bridge. This covers automatic completed sessions
     /// as well as manual edits, while the legacy current-day handler above
     /// remains for compatibility with the review journal tests.
@@ -769,11 +773,18 @@ public final class FocusSessionEngine: @unchecked Sendable {
         committedRevision += 1
         confirmedRevision = nextRevision
         archiveRevision = nextArchiveRevision
-        let snapshot = makeDerivedSnapshot(sessions: restored, now: clock.now)
+        let committedAt = clock.now
+        let snapshot = makeDerivedSnapshot(sessions: restored, now: committedAt)
+        let reminderSnapshot = FocusSessionReminderSnapshot(
+            sessions: restored,
+            dayIdentifier: currentDay,
+            committedAt: committedAt
+        )
         let history = update.affectedDayIdentifiers.isEmpty
             ? nil
             : makeFocusHistoryPublication()
         lock.unlock()
+        committedReminderEvaluationHandler?(reminderSnapshot)
         committedSnapshotHandler?(snapshot)
         if let history {
             committedHistorySnapshotHandler?(history)
@@ -820,10 +831,17 @@ private extension FocusSessionEngine {
         evidenceArchiveRevision = nextEvidenceRevision
         archiveRevision = nextArchiveRevision
         committedRevision += 1
+        let committedAt = clock.now
+        let reminderSnapshot = FocusSessionReminderSnapshot(
+            sessions: working,
+            dayIdentifier: currentDay,
+            committedAt: committedAt
+        )
         let history = update.affectedDayIdentifiers.isEmpty
             ? nil
             : makeFocusHistoryPublication()
         lock.unlock()
+        committedReminderEvaluationHandler?(reminderSnapshot)
         if let history {
             committedHistorySnapshotHandler?(history)
         }
@@ -913,11 +931,18 @@ private extension FocusSessionEngine {
         committedRevision += 1
         confirmedRevision = nextRevision
         archiveRevision = nextArchiveRevision
-        let snapshot = makeDerivedSnapshot(sessions: working, now: clock.now)
+        let committedAt = clock.now
+        let snapshot = makeDerivedSnapshot(sessions: working, now: committedAt)
+        let reminderSnapshot = FocusSessionReminderSnapshot(
+            sessions: working,
+            dayIdentifier: currentDay,
+            committedAt: committedAt
+        )
         let history = update.affectedDayIdentifiers.isEmpty
             ? nil
             : makeFocusHistoryPublication()
         lock.unlock()
+        committedReminderEvaluationHandler?(reminderSnapshot)
         committedSnapshotHandler?(snapshot)
         if let history {
             committedHistorySnapshotHandler?(history)

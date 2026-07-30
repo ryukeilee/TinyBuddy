@@ -301,7 +301,150 @@ final class FocusReminderEngineTests: XCTestCase {
         XCTAssertEqual(result.action, .none)
     }
 
-    // MARK: - Day boundary
+    func test_goal_completion_rollback_reopens_notification_gate() {
+        var config = defaultConfig
+        config.dailyFocusGoalMinutes = 50
+        let session = endedSession(durationSeconds: 40 * 60)
+        var state = FocusReminderState(dayIdentifier: dayID)
+        state.goalCompletedNotified = true
+
+        let result = FocusReminderEngine.evaluate(
+            allSessions: [session],
+            config: config,
+            state: state,
+            now: now,
+            dayIdentifier: dayID
+        )
+
+        XCTAssertEqual(result.action, .none)
+        XCTAssertFalse(result.updatedState.goalCompletedNotified)
+    }
+
+    func test_goal_completion_can_fire_again_after_progress_returns_above_goal() {
+        var config = defaultConfig
+        config.dailyFocusGoalMinutes = 50
+        var state = FocusReminderState(dayIdentifier: dayID)
+        state.goalCompletedNotified = true
+        state.lastReminderDeliveryDate = now.addingTimeInterval(-FocusReminderEngine.minimumCoolingInterval)
+
+        let rollback = FocusReminderEngine.evaluate(
+            allSessions: [endedSession(durationSeconds: 40 * 60)],
+            config: config,
+            state: state,
+            now: now,
+            dayIdentifier: dayID
+        )
+        XCTAssertFalse(rollback.updatedState.goalCompletedNotified)
+
+        let result = FocusReminderEngine.evaluate(
+            allSessions: [endedSession(durationSeconds: 60 * 60)],
+            config: config,
+            state: rollback.updatedState,
+            now: now,
+            dayIdentifier: dayID
+        )
+
+        guard case .goalCompleted = result.action else {
+            XCTFail("Expected goalCompleted after rollback and re-crossing the goal")
+            return
+        }
+        XCTAssertTrue(result.updatedState.goalCompletedNotified)
+    }
+
+    func test_break_reminder_gate_reopens_after_pause_reset() {
+        let sessionID = UUID()
+        var session = activeSession(activeSeconds: 4000, now: now, id: sessionID)
+        session.status = .paused
+        session.currentPauseStartedAt = now.addingTimeInterval(-60)
+        var state = FocusReminderState(dayIdentifier: dayID)
+        state.triggeredBreakReminderSessionIDs = [sessionID]
+
+        let result = FocusReminderEngine.evaluate(
+            allSessions: [session],
+            config: defaultConfig,
+            state: state,
+            now: now,
+            dayIdentifier: dayID
+        )
+
+        XCTAssertEqual(result.action, .none)
+        XCTAssertFalse(result.updatedState.triggeredBreakReminderSessionIDs.contains(sessionID))
+    }
+
+    func test_break_reminder_uses_current_segment_after_resume() {
+        let sessionID = UUID()
+        let started = now.addingTimeInterval(-4000)
+        let resumed = now.addingTimeInterval(-60)
+        let session = FocusSession(
+            id: sessionID,
+            project: projectA,
+            dayIdentifier: dayID,
+            startedAt: started,
+            status: .active,
+            lastUserActivityAt: now,
+            lastStateChangeAt: resumed,
+            decisionEvents: [
+                FocusSessionDecisionEvent(
+                    at: started,
+                    kind: .started,
+                    reason: .userActivity,
+                    source: .automatic
+                ),
+                FocusSessionDecisionEvent(
+                    at: resumed,
+                    kind: .resumed,
+                    reason: .userActivity,
+                    source: .automatic
+                )
+            ]
+        )
+        let state = FocusReminderState(dayIdentifier: dayID)
+
+        let beforeThreshold = FocusReminderEngine.evaluate(
+            allSessions: [session],
+            config: defaultConfig,
+            state: state,
+            now: now,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(beforeThreshold.action, .none)
+
+        let afterThresholdNow = resumed.addingTimeInterval(
+            TimeInterval(defaultConfig.continuousFocusThresholdMinutes * 60)
+        )
+        let afterThreshold = FocusReminderEngine.evaluate(
+            allSessions: [session],
+            config: defaultConfig,
+            state: beforeThreshold.updatedState,
+            now: afterThresholdNow,
+            dayIdentifier: dayID
+        )
+        guard case .breakReminder = afterThreshold.action else {
+            XCTFail("Expected break reminder after the resumed segment crossed the threshold")
+            return
+        }
+    }
+
+    // MARK: - Persistence and day boundary
+
+    func test_reminder_state_survives_store_recreation_without_duplicate_gate_loss() {
+        let suiteName = "TinyBuddy.FocusReminderEngineTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let sessionID = UUID()
+        var saved = FocusReminderState(dayIdentifier: dayID)
+        saved.triggeredBreakReminderSessionIDs = [sessionID]
+        saved.goalCompletedNotified = true
+        saved.lastReminderDeliveryDate = now
+        FocusGoalPreferencesStore(userDefaults: defaults).saveReminderState(saved)
+
+        let restored = FocusGoalPreferencesStore(userDefaults: defaults).loadReminderState(for: dayID)
+        XCTAssertEqual(restored, saved)
+    }
 
     func test_day_boundary_resets_state() {
         let oldDayID = "2026-07-20"
