@@ -419,6 +419,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeEnvironmentChangeMonitor.start()
         _ = timeCalibrator.calibrate()
         configCoordinator.start()
+        // Keep the path projection aligned with bookmarks that followed a
+        // moved directory, without triggering a second refresh at launch.
+        configCoordinator.reconcilePersistedScanRoots()
         gitActivityRefreshCoordinator.start(
             isApplicationActive: NSApp.isActive,
             isInterfaceVisible: isHUDVisible,
@@ -954,7 +957,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
         gitActivityRefreshCoordinator.handleAuthorizationChanged()
-        configCoordinator.proposeScanRootsChange()
+        // Authorization changes already start the replacement refresh above;
+        // update the secondary config projection without scheduling another one.
+        configCoordinator.reconcilePersistedScanRoots()
         restoreHUDWindow(from: NSApp)
     }
 
@@ -962,6 +967,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
         if result.didChangeAuthorization {
             gitActivityRefreshCoordinator.handleAuthorizationChanged()
+            configCoordinator.reconcilePersistedScanRoots()
             restoreHUDWindow(from: NSApp)
             return
         }

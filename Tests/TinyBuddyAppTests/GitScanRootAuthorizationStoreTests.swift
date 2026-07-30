@@ -336,6 +336,107 @@ final class GitScanRootAuthorizationStoreTests: XCTestCase {
         result.roots.forEach { $0.stopAccessing() }
     }
 
+    func testBatchAuthorizationFailureDoesNotDiscardValidSiblingRoots() throws {
+        let defaults = makeDefaults()
+        let failedRoot = URL(fileURLWithPath: "/Authorized/Failed")
+        let liveRoot = URL(fileURLWithPath: "/Authorized/Live")
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: defaults,
+            bookmarkDataCreator: { url in
+                if url == failedRoot {
+                    throw TestError.refreshFailed
+                }
+                return Data(url.path.utf8)
+            },
+            scopedRootResolver: { data in
+                resolution(path: try XCTUnwrap(String(data: data, encoding: .utf8)))
+            },
+            rootUsabilityChecker: { _ in nil }
+        )
+
+        XCTAssertTrue(try store.addAuthorizedRoots([failedRoot, liveRoot]))
+        XCTAssertEqual(persistedRecords(defaults).map { $0["lastKnownPath"] as? String }, [liveRoot.path])
+    }
+
+    func testReplaceBatchFailurePreservesExistingFailedPathAndSavesValidSibling() throws {
+        let defaults = makeDefaults()
+        let existingRoot = URL(fileURLWithPath: "/Authorized/Existing")
+        let liveRoot = URL(fileURLWithPath: "/Authorized/Live")
+        var shouldFailExisting = false
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: defaults,
+            bookmarkDataCreator: { url in
+                if shouldFailExisting && url == existingRoot {
+                    throw TestError.refreshFailed
+                }
+                return Data(url.path.utf8)
+            },
+            scopedRootResolver: { data in
+                resolution(path: try XCTUnwrap(String(data: data, encoding: .utf8)))
+            },
+            rootUsabilityChecker: { _ in nil }
+        )
+        try store.replaceAuthorizedRoots([existingRoot])
+        shouldFailExisting = true
+
+        XCTAssertTrue(try store.replaceAuthorizedRoots([existingRoot, liveRoot]))
+        XCTAssertEqual(
+            persistedRecords(defaults).compactMap { $0["lastKnownPath"] as? String },
+            [existingRoot.path, liveRoot.path]
+        )
+    }
+
+    func testMovedAuthorizedRootIsMatchedWhenAddingItsCurrentPath() throws {
+        let defaults = makeDefaults()
+        let originalRoot = URL(fileURLWithPath: "/Authorized/Original")
+        let movedRoot = URL(fileURLWithPath: "/Authorized/Moved")
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: defaults,
+            bookmarkDataCreator: { Data($0.path.utf8) },
+            scopedRootResolver: { data in
+                let path = try XCTUnwrap(String(data: data, encoding: .utf8))
+                return resolution(path: path == originalRoot.path ? movedRoot.path : path)
+            },
+            rootUsabilityChecker: { _ in nil }
+        )
+        try store.replaceAuthorizedRoots([originalRoot])
+
+        XCTAssertFalse(try store.addAuthorizedRoots([movedRoot]))
+        XCTAssertEqual(persistedRecords(defaults).count, 1)
+        XCTAssertEqual(persistedRecords(defaults).first?["lastKnownPath"] as? String, movedRoot.path)
+    }
+
+    func testResolvedDuplicateBookmarksAreCollapsedWithoutDuplicateScanRoots() throws {
+        let defaults = makeDefaults()
+        defaults.set([
+            [
+                "id": "first",
+                "bookmarkData": Data("first-bookmark".utf8),
+                "displayName": "First",
+                "lastKnownPath": "/Authorized/Old"
+            ],
+            [
+                "id": "second",
+                "bookmarkData": Data("second-bookmark".utf8),
+                "displayName": "Second",
+                "lastKnownPath": "/Authorized/Alias"
+            ]
+        ], forKey: GitScanRootAuthorizationStore.Constants.authorizationRecordsKey)
+        let store = GitScanRootAuthorizationStore(
+            userDefaults: defaults,
+            bookmarkDataCreator: { Data($0.path.utf8) },
+            scopedRootResolver: { _ in resolution(path: "/Authorized/Shared") },
+            rootUsabilityChecker: { _ in nil }
+        )
+
+        let result = store.accessAuthorizedRootResult()
+
+        XCTAssertEqual(result.roots.map(\.url.path), ["/Authorized/Shared"])
+        XCTAssertEqual(result.authorizations.map(\.id), ["first"])
+        XCTAssertEqual(persistedRecords(defaults).map { $0["id"] as? String }, ["first"])
+        result.roots.forEach { $0.stopAccessing() }
+    }
+
     func testSingleRootReauthorizationPreservesOtherAuthorizationsAndID() throws {
         let defaults = makeDefaults()
         let first = URL(fileURLWithPath: "/Authorized/First")

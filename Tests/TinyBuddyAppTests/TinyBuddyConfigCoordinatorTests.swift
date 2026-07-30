@@ -53,6 +53,42 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testStartPreservesLastKnownPathsWhenAuthorizationIsTemporarilyUnavailable() {
+        let storage = InMemoryConfigStorage()
+        let configStore = TinyBuddyConfigStore(
+            directPreferencesProvider: { storage.values },
+            synchronizeReads: {},
+            writeValue: { value, key in
+                storage.values[key] = value
+                return true
+            },
+            synchronizeWrites: { true },
+            readFailureProvider: { nil }
+        )
+        let authorization = GitScanRootAuthorization(
+            id: "offline-root",
+            displayName: "Offline",
+            lastKnownPath: "/Volumes/Offline/Code",
+            state: .unavailable(.directoryUnavailable)
+        )
+        let coordinator = TinyBuddyConfigCoordinator(
+            configStore: configStore,
+            scanRootsProvider: {
+                GitScanRootAccessResult(
+                    roots: [],
+                    issue: .authorizationInvalid,
+                    authorizations: [authorization]
+                )
+            }
+        )
+
+        coordinator.start()
+
+        XCTAssertEqual(coordinator.currentConfig()?.scanRootPaths, ["/Volumes/Offline/Code"])
+        XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
+    }
+
+    @MainActor
     func testStartPublishesInitialConfigWhenNoPersistedConfig() {
         let (coordinator, _, _, _, _) = makeCoordinator()
         coordinator.start()
@@ -133,6 +169,32 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testReconcilePersistedScanRootsUpdatesProjectionWithoutStartingAnotherRefresh() {
+        var rebuildCallCount = 0
+        var rescheduleCallCount = 0
+        let (coordinator, _, store, _, _) = makeCoordinator(
+            rebuildClosure: { rebuildCallCount += 1 },
+            rescheduleClosure: { rescheduleCallCount += 1 }
+        )
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            scanRootPaths: ["/old/path"],
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(store.save(config), .saved)
+        coordinator.start()
+
+        TinyBuddyTestConfigRootsProvider.currentRoots = ["/new/path"]
+        coordinator.reconcilePersistedScanRoots()
+
+        XCTAssertEqual(coordinator.currentConfig()?.scanRootPaths, ["/new/path"])
+        XCTAssertEqual(coordinator.currentConfig()?.configVersion, 2)
+        XCTAssertEqual(rebuildCallCount, 0)
+        XCTAssertEqual(rescheduleCallCount, 0)
+        XCTAssertEqual(store.load()?.scanRootPaths, ["/new/path"])
     }
 
     @MainActor

@@ -165,16 +165,35 @@ final class GitScanRootAuthorizationStore {
             currentRecordsByPath[record.lastKnownPath] = record
         }
 
-        let newRecords = try uniqueURLs.map { url in
+        var newRecords: [AuthorizationRecord] = []
+        for url in uniqueURLs {
             let path = url.path
-            return AuthorizationRecord(
-                id: currentRecordsByPath[path]?.id ?? UUID().uuidString,
-                bookmarkData: try bookmarkDataCreator(url),
-                displayName: Self.displayName(for: url),
-                lastKnownPath: path
-            )
+            do {
+                newRecords.append(AuthorizationRecord(
+                    id: currentRecordsByPath[path]?.id ?? UUID().uuidString,
+                    bookmarkData: try bookmarkDataCreator(url),
+                    displayName: Self.displayName(for: url),
+                    lastKnownPath: path
+                ))
+            } catch {
+                // A failed bookmark must not discard a previously saved record
+                // for the same path, nor prevent other selected roots from
+                // being authorized.
+                if let existing = currentRecordsByPath[path] {
+                    newRecords.append(existing)
+                }
+                NSLog("TinyBuddy: failed to save one Git scan root authorization (details redacted)")
+            }
         }
 
+        // If every newly selected root failed, keep the old set intact. This
+        // is a transient authorization failure, not an implicit remove-all.
+        guard !uniqueURLs.isEmpty || currentRecords.isEmpty else {
+            return false
+        }
+        guard !newRecords.isEmpty || uniqueURLs.isEmpty else {
+            return false
+        }
         guard newRecords != currentRecords else {
             return false
         }
@@ -184,6 +203,12 @@ final class GitScanRootAuthorizationStore {
 
     @discardableResult
     func addAuthorizedRoots(_ urls: [URL]) throws -> Bool {
+        // Resolve existing bookmarks first so a directory that was renamed or
+        // moved is matched by its current canonical path instead of creating
+        // a second authorization for the same physical root.
+        let existingAccess = accessAuthorizedRootResult()
+        existingAccess.roots.forEach { $0.stopAccessing() }
+
         var records = authorizationRecords()
         var knownPaths = Set(records.compactMap { $0.lastKnownPath.isEmpty ? nil : $0.lastKnownPath })
         var knownBookmarkData = Set(records.map(\.bookmarkData))
@@ -194,7 +219,15 @@ final class GitScanRootAuthorizationStore {
                 continue
             }
 
-            let record = try makeAuthorizationRecord(for: url)
+            let record: AuthorizationRecord
+            do {
+                record = try makeAuthorizationRecord(for: url)
+            } catch {
+                // Batch selection is best effort: an unavailable directory
+                // must not prevent valid sibling selections from being saved.
+                NSLog("TinyBuddy: failed to save one Git scan root authorization (details redacted)")
+                continue
+            }
             guard !knownBookmarkData.contains(record.bookmarkData) else {
                 continue
             }
@@ -274,6 +307,8 @@ final class GitScanRootAuthorizationStore {
         var roots: [ScopedGitScanRoot] = []
         var authorizations: [GitScanRootAuthorization] = []
         var recordsChanged = false
+        var duplicateRecordIndices = Set<Int>()
+        var resolvedRootPaths = Set<String>()
 
         for index in records.indices {
             let resolution: ResolvedScopedGitScanRoot
@@ -312,6 +347,19 @@ final class GitScanRootAuthorizationStore {
                 }
             }
 
+            // Two persisted bookmarks can point to the same moved/symlinked
+            // directory even when their old paths and bookmark bytes differ.
+            // Keep the first successfully resolved record and do not scan the
+            // same canonical root twice. We only remove a duplicate after it
+            // has resolved and passed usability checks, so an offline record is
+            // never mistaken for a duplicate and discarded.
+            guard resolvedRootPaths.insert(normalizedURL.path).inserted else {
+                scopedRoot.stopAccessing()
+                duplicateRecordIndices.insert(index)
+                recordsChanged = true
+                continue
+            }
+
             let displayName = Self.displayName(for: normalizedURL)
             if records[index].displayName != displayName || records[index].lastKnownPath != normalizedURL.path {
                 records[index].displayName = displayName
@@ -323,6 +371,11 @@ final class GitScanRootAuthorizationStore {
             authorizations.append(authorization(from: records[index], unavailable: nil))
         }
 
+        if !duplicateRecordIndices.isEmpty {
+            records = records.enumerated()
+                .filter { !duplicateRecordIndices.contains($0.offset) }
+                .map(\.element)
+        }
         if recordsChanged {
             persist(records)
         }

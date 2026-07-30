@@ -80,6 +80,12 @@ final class TinyBuddyConfigCoordinator {
             return
         }
         let accessResult = scanRootsProvider()
+        defer { accessResult.roots.forEach { $0.stopAccessing() } }
+        guard accessResult.issue == nil else {
+            // Do not replace a complete projection with a partial/empty view
+            // while a disk is offline or one bookmark is temporarily invalid.
+            return
+        }
         let newPaths = accessResult.roots.map { $0.url.standardizedFileURL.path }
         let currentRoots = Set(current.scanRootPaths)
         let proposedRoots = Set(newPaths)
@@ -88,6 +94,37 @@ final class TinyBuddyConfigCoordinator {
         }
         let updated = current.withIncrementedVersion(scanRootPaths: newPaths.sorted())
         coalesceConfigUpdate(updated)
+    }
+
+    /// Reconciles the secondary persisted path projection after authorization
+    /// recovery (for example, a bookmark following a moved directory) without
+    /// rebuilding monitors or starting another Git scan. The authorization
+    /// store remains the source of truth; this only prevents stale paths from
+    /// surviving a restart or upgrade in the app configuration.
+    func reconcilePersistedScanRoots() {
+        guard let current = lastPublishedConfig else {
+            return
+        }
+        let accessResult = scanRootsProvider()
+        defer { accessResult.roots.forEach { $0.stopAccessing() } }
+        guard accessResult.issue == nil else {
+            // A missing volume or partial authorization must not look like an
+            // explicit removal in the secondary config projection.
+            return
+        }
+        let newPaths = accessResult.roots.map { $0.url.standardizedFileURL.path }.sorted()
+        guard Set(current.scanRootPaths) != Set(newPaths) else {
+            return
+        }
+
+        let updated = current.withIncrementedVersion(scanRootPaths: newPaths)
+        switch configStore.save(updated) {
+        case .saved, .unchanged:
+            lastPublishedConfig = updated
+            configGeneration &+= 1
+        case .persistenceFailed:
+            Self.logger.error("reconciled scan roots could not be persisted")
+        }
     }
 
     func proposeLaunchAtLoginChange(_ enabled: Bool) {
@@ -226,7 +263,18 @@ final class TinyBuddyConfigCoordinator {
     private func buildCurrentConfig() -> TinyBuddyAppConfig? {
         let loaded = configStore.load()
         let accessResult = scanRootsProvider()
-        let scanRootPaths = accessResult.roots.map { $0.url.standardizedFileURL.path }.sorted()
+        let scanRootPaths: [String]
+        if accessResult.issue == nil {
+            scanRootPaths = accessResult.roots.map { $0.url.standardizedFileURL.path }.sorted()
+        } else {
+            // Preserve last-known paths in the secondary projection while a
+            // volume is offline or authorization is temporarily invalid. The
+            // bookmark records remain authoritative and are never cleared by
+            // an empty resolution result.
+            scanRootPaths = accessResult.authorizations
+                .compactMap { $0.lastKnownPath.isEmpty ? nil : $0.lastKnownPath }
+                .sorted()
+        }
         accessResult.roots.forEach { $0.stopAccessing() }
 
         guard let loaded else {

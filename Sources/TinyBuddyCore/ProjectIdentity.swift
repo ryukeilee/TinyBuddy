@@ -432,6 +432,8 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
                 working.projects[$0].state != .removed
             }
             if !sourceIndices.isEmpty {
+                guard working.revision < Int64.max,
+                      working.generation < Int64.max else { return .rejectedInvalid }
                 var target = working.projects[resolvedIndex]
                 for sourceIndex in sourceIndices.sorted(by: { working.projects[$0].id < working.projects[$1].id }) {
                     let source = working.projects[sourceIndex]
