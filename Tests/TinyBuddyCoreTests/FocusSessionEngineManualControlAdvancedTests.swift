@@ -16,6 +16,23 @@ private let projX = FocusProjectContext(key: "proj.x", displayName: "Project X")
 private let projY = FocusProjectContext(key: "proj.y", displayName: "Project Y")
 private let projZ = FocusProjectContext(key: "proj.z", displayName: "Project Z")
 
+private final class FocusCommandOutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [FocusSessionUpdateOutcome] = []
+
+    func append(_ value: FocusSessionUpdateOutcome) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var allValues: [FocusSessionUpdateOutcome] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
 
     func makeEngine(
@@ -138,6 +155,29 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
         // Second call with same project + different token = no change.
         XCTAssertEqual(r2, .noChange)
         XCTAssertEqual(engine.allSessions.count, 1)
+    }
+
+    func test_same_command_token_is_atomic_across_concurrent_sources() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+        let commandID = UUID()
+        let results = FocusCommandOutcomeBox()
+
+        DispatchQueue.concurrentPerform(iterations: 2) { index in
+            let project = index == 0 ? projX : projY
+            let result = engine.startManualFocus(
+                project: project,
+                at: clock.now,
+                commandToken: commandID
+            )
+            results.append(result)
+        }
+
+        XCTAssertEqual(results.allValues.filter { $0 == .saved }.count, 1)
+        XCTAssertEqual(results.allValues.filter { $0 == .noChange }.count, 1)
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions.filter(\.isOpen).count, 1)
     }
 
     func test_concurrent_pause_and_resume_converge_to_latest_command() {

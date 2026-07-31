@@ -487,6 +487,9 @@ final class PetViewModel: ObservableObject {
         let token = UUID()
         _ = engine.pauseManualFocus(at: Date(), commandToken: token)
         refreshManualControlState()
+        // Pausing changes the authoritative live-duration publication even
+        // though it does not change the legacy pet status.
+        reloadWidgetIfPossible()
     }
 
     /// Resume the current paused manual focus session.

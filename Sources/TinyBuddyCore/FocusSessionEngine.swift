@@ -32,6 +32,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     // MARK: State (protected by lock)
     private var lock: NSLock = .init()
+    /// Serializes token-bearing manual commands across the check, mutation,
+    /// and token commit. Without a second lock, two UI surfaces can observe
+    /// the same unused token before either command records it.
+    private var manualCommandLock: NSLock = .init()
     private var sessions: [FocusSession] = []
     /// Local‑day identifier for *now*.
     private var currentDay: String = ""
@@ -75,8 +79,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// Deduplicates commands by token. The same token can only produce one state change;
     /// repeated calls with the same token return `.noChange`.
-    private var lastManualCommandToken: UUID?
-    private var lastManualCommandOutcome: FocusSessionUpdateOutcome = .noChange
+    private var lastManualCommandID: UUID?
 
     // MARK: Init
 
@@ -184,7 +187,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
                     resumeSession(at: manualIdx, at: when, reason: reason, into: &sessions)
                 }
                 sessions[manualIdx].lastUserActivityAt = when
-                sessions[manualIdx].lastStateChangeAt = when
+                sessions[manualIdx].lastStateChangeAt = max(
+                    sessions[manualIdx].lastStateChangeAt,
+                    when
+                )
                 return
             }
 
@@ -393,12 +399,24 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 if sessions[idx].project == project {
                     // Same project: resume if paused, otherwise no-op.
                     if sessions[idx].status == .paused {
-                        resumeSession(at: idx, at: when, reason: .userActivity, into: &sessions)
+                        resumeSession(
+                            at: idx,
+                            at: when,
+                            reason: .userActivity,
+                            source: .userConfirmed,
+                            into: &sessions
+                        )
                     }
                     return
                 }
                 // Different project manual session: end it first.
-                endSession(at: idx, endedAt: when, reason: .projectSwitch, into: &sessions)
+                endSession(
+                    at: idx,
+                    endedAt: when,
+                    reason: .projectSwitch,
+                    source: .userConfirmed,
+                    into: &sessions
+                )
             }
             // If an automatic session is active, end it so manual takes priority.
             if let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .automatic }) {
@@ -437,7 +455,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
         return applyWithToken(commandToken) { sessions in
             guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }),
                   sessions[idx].status == .active else { return }
-            pauseSession(at: idx, at: when, reason: .userActivity, into: &sessions)
+            pauseSession(
+                at: idx,
+                at: when,
+                reason: .userActivity,
+                source: .userConfirmed,
+                into: &sessions
+            )
         }
     }
 
@@ -451,7 +475,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
         return applyWithToken(commandToken) { sessions in
             guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }),
                   sessions[idx].status == .paused else { return }
-            resumeSession(at: idx, at: when, reason: .userActivity, into: &sessions)
+            resumeSession(
+                at: idx,
+                at: when,
+                reason: .userActivity,
+                source: .userConfirmed,
+                into: &sessions
+            )
         }
     }
 
@@ -465,7 +495,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
         let when = clampToNow(date)
         return applyWithToken(commandToken) { sessions in
             guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) else { return }
-            endSession(at: idx, endedAt: when, reason: .userActivity, into: &sessions)
+            endSession(
+                at: idx,
+                endedAt: when,
+                reason: .userActivity,
+                source: .userConfirmed,
+                into: &sessions
+            )
             // Clear all pending automatic state so auto-detection starts clean.
             pendingSwitch = nil
         }
@@ -798,31 +834,62 @@ public final class FocusSessionEngine: @unchecked Sendable {
 private extension FocusSessionEngine {
     // MARK: Apply / Validate
 
+    private struct ApplyResult {
+        let outcome: FocusSessionUpdateOutcome
+        let reminderSnapshot: FocusSessionReminderSnapshot?
+        let history: FocusHistoryPublication?
+
+        static let noChange = ApplyResult(
+            outcome: .noChange,
+            reminderSnapshot: nil,
+            history: nil
+        )
+    }
+
     @discardableResult
     func apply(_ mutation: (inout [FocusSession]) -> Void) -> FocusSessionUpdateOutcome {
         lock.lock()
+        let result = applyLocked(mutation)
+        lock.unlock()
+        publish(result)
+        return result.outcome
+    }
+
+    /// Applies a mutation while `lock` is held and returns all notifications
+    /// that must be emitted after the lock is released. Keeping notification
+    /// delivery outside both locks prevents a callback from re-entering the
+    /// engine while a command is being committed.
+    private func applyLocked(_ mutation: (inout [FocusSession]) -> Void) -> ApplyResult {
         let previous = sessions
         var working = sessions
         mutation(&working)
         guard validate(working) else {
-            lock.unlock()
-            return .rejectedInvalid
+            return ApplyResult(
+                outcome: .rejectedInvalid,
+                reminderSnapshot: nil,
+                history: nil
+            )
         }
         guard working != previous else {
-            lock.unlock()
             return .noChange
         }
         guard archiveRevision < Int64.max else {
-            lock.unlock()
-            return .persistenceFailed
+            return ApplyResult(
+                outcome: .persistenceFailed,
+                reminderSnapshot: nil,
+                history: nil
+            )
         }
         let nextArchiveRevision = archiveRevision + 1
         let nextEvidenceRevision = evidenceArchiveRevision + 1
         let evidence = generateEvidenceForSessions(working)
         guard saveSessions(working, revision: nextArchiveRevision, evidence: evidence) else {
             // Retain the prior session archive and history cache together.
-            lock.unlock()
-            return .persistenceFailed
+            return ApplyResult(
+                outcome: .persistenceFailed,
+                reminderSnapshot: nil,
+                history: nil
+            )
         }
         let update = historyCache.apply(historyChanges(from: previous, to: working))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
@@ -840,32 +907,44 @@ private extension FocusSessionEngine {
         let history = update.affectedDayIdentifiers.isEmpty
             ? nil
             : makeFocusHistoryPublication()
-        lock.unlock()
-        committedReminderEvaluationHandler?(reminderSnapshot)
-        if let history {
-            committedHistorySnapshotHandler?(history)
-        }
-        return .saved
+        return ApplyResult(
+            outcome: .saved,
+            reminderSnapshot: reminderSnapshot,
+            history: history
+        )
     }
 
-    /// Token-based deduplication wrapper. If a non-nil token matches the last
-    /// executed command, returns `.noChange` without mutating state.
+    private func publish(_ result: ApplyResult) {
+        guard result.outcome == .saved else { return }
+        if let reminderSnapshot = result.reminderSnapshot {
+            committedReminderEvaluationHandler?(reminderSnapshot)
+        }
+        if let history = result.history {
+            committedHistorySnapshotHandler?(history)
+        }
+    }
+
+    /// Token-based deduplication wrapper. The token check and the mutation
+    /// are serialized as one operation, so two UI surfaces cannot both pass
+    /// the check and create competing transitions. Notifications are delivered
+    /// only after both locks are released.
     @discardableResult
     func applyWithToken(_ token: UUID?, _ mutation: (inout [FocusSession]) -> Void) -> FocusSessionUpdateOutcome {
+        manualCommandLock.lock()
         lock.lock()
-        if let token, token == lastManualCommandToken {
+        if let token, token == lastManualCommandID {
             lock.unlock()
+            manualCommandLock.unlock()
             return .noChange
         }
-        lock.unlock()
-        let outcome = apply(mutation)
-        lock.lock()
+        let result = applyLocked(mutation)
         if let token {
-            lastManualCommandToken = token
-            lastManualCommandOutcome = outcome
+            lastManualCommandID = token
         }
         lock.unlock()
-        return outcome
+        manualCommandLock.unlock()
+        publish(result)
+        return result.outcome
     }
 
     func validate(_ list: [FocusSession]) -> Bool {
@@ -882,12 +961,35 @@ private extension FocusSessionEngine {
         for s in list {
             // No future startedAt beyond tolerance.
             if s.startedAt > clock.now + config.dayBoundaryTolerance { return false }
+            guard s.lastUserActivityAt >= s.startedAt,
+                  s.lastStateChangeAt >= s.startedAt else { return false }
             // end >= start.
             if let end = s.endedAt, end < s.startedAt { return false }
             if s.isOpen && s.isManuallyConfirmed { return false }
             if let events = s.decisionEvents,
                events.contains(where: { !$0.at.timeIntervalSinceReferenceDate.isFinite }) {
                 return false
+            }
+            switch s.status {
+            case .active:
+                guard s.endedAt == nil, s.currentPauseStartedAt == nil else {
+                    return false
+                }
+            case .paused:
+                guard s.endedAt == nil,
+                      let pauseStart = s.currentPauseStartedAt,
+                      pauseStart >= s.startedAt,
+                      pauseStart <= clock.now + config.dayBoundaryTolerance else {
+                    return false
+                }
+            case .ended:
+                guard let end = s.endedAt,
+                      s.lastUserActivityAt <= end,
+                      s.lastStateChangeAt <= end,
+                      s.currentPauseStartedAt == nil,
+                      s.pausedTotal <= end.timeIntervalSince(s.startedAt) else {
+                    return false
+                }
             }
             // activeDuration must be non‑negative.
             if s.activeDuration(now: clock.now) < 0 { return false }
@@ -1199,6 +1301,14 @@ private extension FocusSessionEngine {
         min(date, clock.now)
     }
 
+    /// Lifecycle notifications can arrive out of order (for example, wake
+    /// and session-activation notifications). A late timestamp must never
+    /// move the durable session boundary backwards and lose already-counted
+    /// time during the next restart or sleep transition.
+    func transitionTime(for session: FocusSession, requested: Date) -> Date {
+        max(requested, max(session.startedAt, session.lastStateChangeAt))
+    }
+
     func startSession(
         in project: FocusProjectContext,
         at when: Date,
@@ -1229,23 +1339,34 @@ private extension FocusSessionEngine {
         at index: Int,
         endedAt: Date,
         reason: FocusSessionDecisionReason,
+        source: FocusSessionDecisionSource = .automatic,
         into sessions: inout [FocusSession]
     ) {
         guard index < sessions.count else { return }
+        // Preserve the rejection of an out-of-order close. Treating an old
+        // lifecycle timestamp as a new end would silently shorten the
+        // session; validation below rejects it without mutating state.
+        let previousStateChangeAt = sessions[index].lastStateChangeAt
+        let isOutOfOrder = endedAt < previousStateChangeAt
+        let closedAt = isOutOfOrder
+            ? endedAt
+            : transitionTime(for: sessions[index], requested: endedAt)
         // Close any open pause first.
         if let pause = sessions[index].currentPauseStartedAt {
-            sessions[index].pausedTotal += max(0, endedAt.timeIntervalSince(pause))
+            sessions[index].pausedTotal += max(0, closedAt.timeIntervalSince(pause))
             sessions[index].currentPauseStartedAt = nil
         }
-        sessions[index].endedAt = endedAt
+        sessions[index].endedAt = closedAt
         sessions[index].status = .ended
-        sessions[index].lastStateChangeAt = endedAt
+        sessions[index].lastStateChangeAt = isOutOfOrder
+            ? previousStateChangeAt
+            : closedAt
         appendDecision(
             to: &sessions[index],
-            at: endedAt,
+            at: closedAt,
             kind: .ended,
             reason: reason,
-            source: .automatic
+            source: source
         )
     }
 
@@ -1253,19 +1374,21 @@ private extension FocusSessionEngine {
         at index: Int,
         at when: Date,
         reason: FocusSessionDecisionReason,
+        source: FocusSessionDecisionSource = .automatic,
         into sessions: inout [FocusSession]
     ) {
         guard index < sessions.count,
               sessions[index].currentPauseStartedAt == nil else { return }
-        sessions[index].currentPauseStartedAt = when
+        let pausedAt = transitionTime(for: sessions[index], requested: when)
+        sessions[index].currentPauseStartedAt = pausedAt
         sessions[index].status = .paused
-        sessions[index].lastStateChangeAt = when
+        sessions[index].lastStateChangeAt = pausedAt
         appendDecision(
             to: &sessions[index],
-            at: when,
+            at: pausedAt,
             kind: .paused,
             reason: reason,
-            source: .automatic
+            source: source
         )
     }
 
@@ -1273,23 +1396,25 @@ private extension FocusSessionEngine {
         at index: Int,
         at when: Date,
         reason: FocusSessionDecisionReason,
+        source: FocusSessionDecisionSource = .automatic,
         into sessions: inout [FocusSession]
     ) {
         guard index < sessions.count else { return }
+        let resumedAt = transitionTime(for: sessions[index], requested: when)
         let wasPaused = sessions[index].currentPauseStartedAt != nil
         if let pause = sessions[index].currentPauseStartedAt {
-            sessions[index].pausedTotal += max(0, when.timeIntervalSince(pause))
+            sessions[index].pausedTotal += max(0, resumedAt.timeIntervalSince(pause))
             sessions[index].currentPauseStartedAt = nil
         }
         sessions[index].status = .active
-        sessions[index].lastStateChangeAt = when
+        sessions[index].lastStateChangeAt = resumedAt
         if wasPaused {
             appendDecision(
                 to: &sessions[index],
-                at: when,
+                at: resumedAt,
                 kind: .resumed,
                 reason: reason,
-                source: .automatic
+                source: source
             )
         }
     }
@@ -1332,6 +1457,9 @@ private extension FocusSessionEngine {
         guard let idx = sessions.firstIndex(where: \.isOpen) else { return }
         sessions[idx].lastUserActivityAt = when
         resumeSession(at: idx, at: when, reason: reason, into: &sessions)
+        // An unattributed input confirms the user returned to the current
+        // session, so a foreground-only switch candidate is no longer valid.
+        pendingSwitch = nil
     }
 
     func sameProjectActivity(
@@ -1342,7 +1470,10 @@ private extension FocusSessionEngine {
     ) {
         resumeSession(at: idx, at: when, reason: reason, into: &sessions)
         sessions[idx].lastUserActivityAt = when
-        sessions[idx].lastStateChangeAt = when
+        sessions[idx].lastStateChangeAt = max(
+            sessions[idx].lastStateChangeAt,
+            when
+        )
         // User returned to the original project — brief interruption merge.
         pendingSwitch = nil
     }
@@ -1358,13 +1489,14 @@ private extension FocusSessionEngine {
         // focus switch — end the current session and start the new one immediately.
         // If a pending switch exists, use its away timestamp as the boundary
         // so the away gap is never double-counted nor overlapped.
-        let startAt: Date
+        let requestedStart: Date
         if let pending = pendingSwitch {
-            startAt = pending.awayStartedAt
+            requestedStart = pending.awayStartedAt
             pendingSwitch = nil
         } else {
-            startAt = when
+            requestedStart = when
         }
+        let startAt = transitionTime(for: sessions[idx], requested: requestedStart)
         endSession(at: idx, endedAt: startAt, reason: .projectSwitch, into: &sessions)
         startSession(in: candidate, at: startAt, reason: reason, into: &sessions)
     }
@@ -1377,20 +1509,22 @@ private extension FocusSessionEngine {
         let cur = sessions[idx]
         guard cur.project != candidate else { return }
 
+        let arrivalAt = transitionTime(for: cur, requested: when)
         pendingSwitch = PendingSwitch(
             fromSessionId: cur.id,
-            awayStartedAt: when,
+            awayStartedAt: arrivalAt,
             candidate: candidate
         )
-        pauseSession(at: idx, at: when, reason: .projectSwitch, into: &sessions)
+        pauseSession(at: idx, at: arrivalAt, reason: .projectSwitch, into: &sessions)
     }
 
     func commitPendingSwitch(sessions: inout [FocusSession], when: Date) {
         guard let pending = pendingSwitch else { return }
         if let idx = sessions.firstIndex(where: { $0.id == pending.fromSessionId && $0.isOpen }) {
-            endSession(at: idx, endedAt: pending.awayStartedAt, reason: .projectSwitch, into: &sessions)
+            let boundary = transitionTime(for: sessions[idx], requested: pending.awayStartedAt)
+            endSession(at: idx, endedAt: boundary, reason: .projectSwitch, into: &sessions)
+            startSession(in: pending.candidate, at: boundary, reason: .projectSwitch, into: &sessions)
         }
-        startSession(in: pending.candidate, at: pending.awayStartedAt, reason: .projectSwitch, into: &sessions)
         pendingSwitch = nil
     }
 

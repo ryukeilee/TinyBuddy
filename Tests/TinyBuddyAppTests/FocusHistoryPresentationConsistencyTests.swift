@@ -37,6 +37,17 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertFalse(widget.contains("presentation.focusCount > 0"))
     }
 
+    func testCommittedSessionStateRefreshesHUDAndMenuBarFromTheSameEngine() throws {
+        let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
+        let menu = try source("Sources/TinyBuddy/ManualFocusMenuBarController.swift")
+
+        XCTAssertTrue(app.contains("committedReminderEvaluationHandler"))
+        XCTAssertTrue(app.contains("self.petViewModel.refreshManualControlState()"))
+        XCTAssertTrue(app.contains("self.manualFocusMenuBarController.refresh()"))
+        XCTAssertTrue(menu.contains("func refresh()"))
+        XCTAssertTrue(menu.contains("let state = engine.manualControlState"))
+    }
+
     func testLiveHistoryUsesExistingIdleSamplingAndReloadsWidgetOnDurationChange() throws {
         let bridge = try source("Sources/TinyBuddy/FocusSessionAppBridge.swift")
         let viewModel = try source("Sources/TinyBuddy/PetViewModel.swift")

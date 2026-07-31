@@ -469,7 +469,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // covers elapsed time in an unchanged open session.
         focusBridge?.sessionEngine.committedReminderEvaluationHandler = { [weak self] reminderSnapshot in
             DispatchQueue.main.async {
-                self?.evaluateFocusReminders(
+                guard let self else { return }
+                // The engine is the single lifecycle authority. Refresh both
+                // in-process control projections from that committed state so
+                // a command issued by the menu bar, HUD, or a lifecycle event
+                // cannot leave the other surface showing a stale session.
+                self.petViewModel.refreshManualControlState()
+                self.manualFocusMenuBarController.refresh()
+                self.evaluateFocusReminders(
                     sessions: reminderSnapshot.sessions,
                     dayIdentifier: reminderSnapshot.dayIdentifier
                 )

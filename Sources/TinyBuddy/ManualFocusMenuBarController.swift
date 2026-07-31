@@ -12,6 +12,7 @@ import TinyBuddyCore
 final class ManualFocusMenuBarController: NSObject {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var popoverHostingController: NSHostingController<MenuBarFocusView>?
     private var refreshTimer: Timer?
     private var engine: FocusSessionEngine?
     private var registeredProjectsProvider: () -> [TinyBuddyProject]
@@ -55,10 +56,10 @@ final class ManualFocusMenuBarController: NSObject {
 
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.refreshStatusDisplay()
+                self?.refresh()
             }
         }
-        refreshStatusDisplay()
+        refresh()
     }
 
     func stop() {
@@ -79,7 +80,7 @@ final class ManualFocusMenuBarController: NSObject {
         } else if statusItem == nil {
             start(with: engine!)
         } else {
-            refreshStatusDisplay()
+            refresh()
         }
     }
 
@@ -96,7 +97,18 @@ final class ManualFocusMenuBarController: NSObject {
     }
 
     private func showPopover(relativeTo view: NSView) {
-        let contentView = MenuBarFocusView(
+        let hosting = NSHostingController(rootView: makePopoverContent())
+        let popover = NSPopover()
+        popover.contentSize = NSSize(width: 280, height: 320)
+        popover.behavior = .transient
+        popover.contentViewController = hosting
+        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        self.popover = popover
+        popoverHostingController = hosting
+    }
+
+    private func makePopoverContent() -> MenuBarFocusView {
+        MenuBarFocusView(
             recentProjectName: recentProjectNameProvider(),
             registeredProjects: registeredProjectsProvider(),
             manualControlState: engine?.manualControlState ?? .idle,
@@ -113,22 +125,28 @@ final class ManualFocusMenuBarController: NSObject {
                 self?.endManualFocus()
             }
         )
+    }
 
-        let hosting = NSHostingController(rootView: contentView)
-        let popover = NSPopover()
-        popover.contentSize = NSSize(width: 280, height: 320)
-        popover.behavior = .transient
-        popover.contentViewController = hosting
-        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
-        self.popover = popover
+    private func refreshPopoverContent() {
+        guard popoverHostingController != nil else { return }
+        popoverHostingController?.rootView = makePopoverContent()
     }
 
     private func dismissPopover() {
         popover?.close()
         popover = nil
+        popoverHostingController = nil
     }
 
     // MARK: - Status Display
+
+    /// Refreshes the menu-bar projection from the shared engine immediately.
+    /// App lifecycle and HUD commands use this hook so the menu bar does not
+    /// wait for its polling timer to converge.
+    func refresh() {
+        refreshStatusDisplay()
+        refreshPopoverContent()
+    }
 
     private func refreshStatusDisplay() {
         guard let engine, let button = statusItem?.button else { return }
@@ -184,7 +202,7 @@ final class ManualFocusMenuBarController: NSObject {
         let token = UUID()
         lastCommandToken = token
         _ = engine.startManualFocus(project: project, at: Date(), commandToken: token)
-        refreshStatusDisplay()
+        refresh()
         dismissPopover()
     }
 
@@ -193,7 +211,7 @@ final class ManualFocusMenuBarController: NSObject {
         let token = UUID()
         lastCommandToken = token
         _ = engine.pauseManualFocus(at: Date(), commandToken: token)
-        refreshStatusDisplay()
+        refresh()
         dismissPopover()
     }
 
@@ -202,7 +220,7 @@ final class ManualFocusMenuBarController: NSObject {
         let token = UUID()
         lastCommandToken = token
         _ = engine.resumeManualFocus(at: Date(), commandToken: token)
-        refreshStatusDisplay()
+        refresh()
         dismissPopover()
     }
 
@@ -211,7 +229,7 @@ final class ManualFocusMenuBarController: NSObject {
         let token = UUID()
         lastCommandToken = token
         _ = engine.endManualFocus(at: Date(), commandToken: token)
-        refreshStatusDisplay()
+        refresh()
         dismissPopover()
     }
 }
