@@ -170,8 +170,9 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// User explicitly interacted with a project (keyboard / mouse / git activity).
     /// - `project == nil` means generic user input not attributable to any project.
-    /// - During a manual session, automatic activity cannot switch projects or end
-    ///   the session. Only un-pause (resume) of the same project is allowed.
+    /// - During a manual session, automatic activity cannot switch projects, end,
+    ///   pause, or resume the session. Explicit manual controls own those
+    ///   transitions so a lock/unlock or wake sample cannot bypass Pause.
     @discardableResult
     public func userActivity(
         in project: FocusProjectContext?,
@@ -180,16 +181,20 @@ public final class FocusSessionEngine: @unchecked Sendable {
     ) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
-            // If a manual session is active, auto activity must not switch projects
-            // or create parallel records. Only resume-if-paused is permitted.
+            // A manual session is an explicit override. Automatic activity must
+            // never switch its project, create a parallel record, or revive an
+            // intentionally paused session. While it is active, retain only a
+            // monotonic activity checkpoint for crash recovery.
             if let manualIdx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) {
-                if sessions[manualIdx].status == .paused {
-                    resumeSession(at: manualIdx, at: when, reason: reason, into: &sessions)
-                }
-                sessions[manualIdx].lastUserActivityAt = when
+                guard sessions[manualIdx].status == .active else { return }
+                let checkpoint = transitionTime(for: sessions[manualIdx], requested: when)
+                sessions[manualIdx].lastUserActivityAt = max(
+                    sessions[manualIdx].lastUserActivityAt,
+                    checkpoint
+                )
                 sessions[manualIdx].lastStateChangeAt = max(
                     sessions[manualIdx].lastStateChangeAt,
-                    when
+                    checkpoint
                 )
                 return
             }
@@ -255,14 +260,16 @@ public final class FocusSessionEngine: @unchecked Sendable {
         }
     }
 
-    /// Called when idle has persisted beyond `longAbsenceThreshold` while a
-    /// session was already paused by a foreground‑project change (not by idle).
-    /// The session is ended at the pause start so the idle gap is never counted.
+    /// Called when idle has persisted beyond `longAbsenceThreshold` while an
+    /// automatic session was already paused by a foreground-project change.
+    /// Manual pauses remain under explicit user control. An automatic session
+    /// is ended at the pause start so the idle gap is never counted.
     @discardableResult
     public func endPausedSessionAfterLongAbsence(at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
             guard let idx = sessions.firstIndex(where: \.isOpen),
+                  sessions[idx].mode != .manual,
                   let pauseStart = sessions[idx].currentPauseStartedAt else { return }
             let pauseDuration = when.timeIntervalSince(pauseStart)
             guard pauseDuration >= config.longAbsenceThreshold else { return }
@@ -1080,7 +1087,13 @@ private extension FocusSessionEngine {
         guard let snapshot = try? historyCache.snapshot(for: query, now: clock.now) else {
             return nil
         }
-        return FocusHistoryPublication(revision: archiveRevision, snapshot: snapshot)
+        return FocusHistoryPublication(
+            revision: archiveRevision,
+            snapshot: snapshot,
+            isFocusSessionActive: sessions.contains {
+                $0.isOpen && $0.status == .active
+            }
+        )
     }
 
     static func loadInitialArchive(

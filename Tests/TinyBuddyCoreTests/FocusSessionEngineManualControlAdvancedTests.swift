@@ -457,6 +457,61 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
         XCTAssertEqual(engine.manualControlState, .idle)
     }
 
+    func test_sleep_wake_and_new_activity_keep_one_open_session() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+
+        _ = engine.startManualFocus(project: projX, at: clock.now)
+        clock.advance(by: 30)
+        XCTAssertEqual(engine.systemSleep(at: clock.now), .saved)
+
+        clock.advance(by: 30)
+        XCTAssertEqual(engine.systemWake(at: clock.now), .noChange)
+        XCTAssertEqual(engine.userActivity(in: projY, at: clock.now), .saved)
+
+        let sessions = engine.allSessions.sorted { $0.startedAt < $1.startedAt }
+        XCTAssertEqual(sessions.count, 2)
+        XCTAssertEqual(sessions[0].status, .ended)
+        XCTAssertEqual(sessions[0].endedAt, Date(timeIntervalSinceReferenceDate: 1_030))
+        XCTAssertEqual(sessions[1].mode, .automatic)
+        XCTAssertEqual(sessions[1].project, projY)
+        XCTAssertEqual(sessions[1].startedAt, Date(timeIntervalSinceReferenceDate: 1_060))
+        XCTAssertEqual(sessions.filter(\.isOpen).count, 1)
+        XCTAssertLessThanOrEqual(sessions[0].endedAt!, sessions[1].startedAt)
+    }
+
+    func test_restart_after_manual_pause_closes_old_session_before_new_auto_activity() {
+        let store = MemoryStore()
+        let firstClock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let firstEngine = makeEngine(firstClock, store)
+
+        _ = firstEngine.startManualFocus(project: projX, at: firstClock.now)
+        firstClock.advance(by: 10)
+        XCTAssertEqual(firstEngine.pauseManualFocus(at: firstClock.now), .saved)
+        firstClock.advance(by: 10)
+        XCTAssertEqual(firstEngine.userActivity(in: projY, at: firstClock.now), .noChange)
+
+        let restartClock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_100))
+        let restartedEngine = makeEngine(restartClock, store)
+        XCTAssertEqual(restartedEngine.allSessions.filter(\.isOpen).count, 0)
+        XCTAssertEqual(restartedEngine.allSessions.count, 1)
+        XCTAssertEqual(restartedEngine.allSessions[0].project, projX)
+        XCTAssertEqual(restartedEngine.allSessions[0].endedAt, Date(timeIntervalSinceReferenceDate: 1_010))
+        XCTAssertEqual(
+            restartedEngine.allSessions[0].activeDuration(now: restartClock.now),
+            10,
+            accuracy: 0.01
+        )
+
+        XCTAssertEqual(restartedEngine.userActivity(in: projY, at: restartClock.now), .saved)
+        let sessions = restartedEngine.allSessions.sorted { $0.startedAt < $1.startedAt }
+        XCTAssertEqual(sessions.count, 2)
+        XCTAssertEqual(sessions[1].project, projY)
+        XCTAssertEqual(sessions.filter(\.isOpen).count, 1)
+        XCTAssertLessThanOrEqual(sessions[0].endedAt!, sessions[1].startedAt)
+    }
+
     func test_idle_during_manual_does_not_auto_pause() {
         let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
         let store = MemoryStore()
@@ -491,7 +546,7 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
         XCTAssertEqual(p, projX)
     }
 
-    func test_auto_activity_resumes_paused_manual() {
+    func test_auto_activity_does_not_end_or_resume_paused_manual() {
         let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
         let store = MemoryStore()
         let engine = makeEngine(clock, store)
@@ -501,10 +556,48 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
         _ = engine.pauseManualFocus(at: clock.now)
 
         clock.advance(by: 20)
-        // Any user activity resumes paused manual.
-        _ = engine.userActivity(in: nil, at: clock.now, reason: .userActivity)
+        // Automatic input cannot revive a deliberately paused manual session.
+        XCTAssertEqual(
+            engine.userActivity(in: nil, at: clock.now, reason: .userActivity),
+            .noChange
+        )
+        XCTAssertEqual(
+            engine.endPausedSessionAfterLongAbsence(at: clock.now.addingTimeInterval(1_000)),
+            .noChange
+        )
 
-        XCTAssertEqual(engine.manualControlState.isManualSessionActive, true)
+        XCTAssertEqual(engine.manualControlState.isManualSessionPaused, true)
+        XCTAssertEqual(engine.allSessions.filter(\.isOpen).count, 1)
+    }
+
+    @MainActor
+    func test_unlock_active_sample_keeps_manual_pause_and_project() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+        let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
+
+        _ = engine.startManualFocus(project: projX, at: clock.now)
+        clock.advance(by: 10)
+        coordinator.reportLock(at: clock.now)
+        XCTAssertEqual(engine.manualControlState.isManualSessionPaused, true)
+
+        clock.advance(by: 10)
+        coordinator.reportForegroundApp(
+            bundleID: "com.example.ProjectY",
+            displayName: "Project Y",
+            isCodeEditor: false,
+            at: clock.now
+        )
+        coordinator.reportUnlock(at: clock.now)
+        coordinator.reportActiveAfterIdle(at: clock.now)
+
+        guard case .paused(let project, _, _, let duration) = engine.manualControlState else {
+            return XCTFail("Unlock activity must not resume manual focus")
+        }
+        XCTAssertEqual(project, projX)
+        XCTAssertEqual(duration, 10, accuracy: 0.01)
+        XCTAssertEqual(engine.allSessions.filter(\.isOpen).count, 1)
     }
 
     // MARK: - Only One Open Session
@@ -571,6 +664,27 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
 
         _ = engine.endManualFocus(at: clock.now)
         XCTAssertEqual(engine.manualControlState, .idle)
+    }
+
+    func test_history_publication_carries_exact_active_state() throws {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let store = MemoryStore()
+        let engine = makeEngine(clock, store)
+
+        _ = engine.startManualFocus(project: projX, at: clock.now)
+        XCTAssertTrue(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+
+        clock.advance(by: 10)
+        _ = engine.pauseManualFocus(at: clock.now)
+        XCTAssertFalse(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+
+        clock.advance(by: 10)
+        _ = engine.resumeManualFocus(at: clock.now)
+        XCTAssertTrue(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+
+        clock.advance(by: 10)
+        _ = engine.endManualFocus(at: clock.now)
+        XCTAssertFalse(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
     }
 
     func test_project_durations_today_excludes_paused_time() {

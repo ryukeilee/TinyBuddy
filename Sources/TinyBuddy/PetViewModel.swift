@@ -461,6 +461,10 @@ final class PetViewModel: ObservableObject {
 
     // MARK: - Manual Focus Control
 
+    // Manual commands update the control projection immediately. WidgetKit is
+    // intentionally reloaded only by the committed history-publication path,
+    // after the same transition reaches the combined shared snapshot.
+
     /// Called by AppDelegate to set the engine reference after bridge creation.
     /// The timer starts only when an active manual session exists.
     func setFocusSessionEngine(_ engine: FocusSessionEngine?) {
@@ -478,7 +482,6 @@ final class PetViewModel: ObservableObject {
         _ = engine.startManualFocus(project: project, at: Date(), commandToken: token)
         startManualControlRefreshIfNeeded()
         refreshManualControlState()
-        reloadWidgetIfPossible()
     }
 
     /// Pause the current manual focus session.
@@ -487,9 +490,6 @@ final class PetViewModel: ObservableObject {
         let token = UUID()
         _ = engine.pauseManualFocus(at: Date(), commandToken: token)
         refreshManualControlState()
-        // Pausing changes the authoritative live-duration publication even
-        // though it does not change the legacy pet status.
-        reloadWidgetIfPossible()
     }
 
     /// Resume the current paused manual focus session.
@@ -499,7 +499,6 @@ final class PetViewModel: ObservableObject {
         _ = engine.resumeManualFocus(at: Date(), commandToken: token)
         startManualControlRefreshIfNeeded()
         refreshManualControlState()
-        reloadWidgetIfPossible()
     }
 
     /// End the current manual focus session.
@@ -508,7 +507,6 @@ final class PetViewModel: ObservableObject {
         let token = UUID()
         _ = engine.endManualFocus(at: Date(), commandToken: token)
         refreshManualControlState()
-        reloadWidgetIfPossible()
     }
 
     /// Refresh the published manual control state from the engine.

@@ -413,9 +413,9 @@ final class FocusSessionEngineManualControlTests: XCTestCase {
         XCTAssertEqual(result, .rejectedInvalid)
     }
 
-    // MARK: - Auto resume during manual pause
+    // MARK: - Automatic activity during manual pause
 
-    func test_auto_activity_resumes_paused_manual_session() {
+    func test_auto_activity_does_not_resume_paused_manual_session() {
         let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
         let store = MemoryStore()
         let engine = makeEngine(clock, store)
@@ -424,16 +424,18 @@ final class FocusSessionEngineManualControlTests: XCTestCase {
         clock.advance(by: 10)
         _ = engine.pauseManualFocus(at: clock.now)
 
-        // Auto user activity resumes the paused manual session.
+        // Activity for another project must not bypass the user's Pause.
         clock.advance(by: 10)
         let result = engine.userActivity(in: projectB, at: clock.now, reason: .userActivity)
-        XCTAssertEqual(result, .saved)
+        XCTAssertEqual(result, .noChange)
 
-        guard case .focusing(let p, _, _) = engine.manualControlState else {
-            return XCTFail("Expected focusing after auto resume")
+        guard case .paused(let p, _, _, let duration) = engine.manualControlState else {
+            return XCTFail("Expected manual session to remain paused")
         }
-        // Project should remain projectA.
         XCTAssertEqual(p, projectA)
+        XCTAssertEqual(duration, 10, accuracy: 0.01)
+        XCTAssertEqual(engine.allSessions.filter(\.isOpen).count, 1)
+        XCTAssertEqual(engine.allSessions.first?.project, projectA)
     }
 
     // MARK: - State queries

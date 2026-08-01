@@ -40,16 +40,32 @@ struct FocusHistoryListView: View {
             content
         }
         .task {
-            await controller.refresh()
+            // Replay this view's own toolbar filters on every appearance so
+            // the shared controller's query (e.g. the review view's default
+            // `.ended` filter) cannot leak into this list.
+            await controller.updateQuery(makeQuery(), debounceSeconds: 0)
             await loadProjectOptions()
         }
-        .onChange(of: searchText) { _, newValue in
-            let trimmed = newValue.trimmingCharacters(in: .whitespaces)
+        .onChange(of: searchText) { _, _ in
             Task {
-                var q = controller.query
-                q.keyword = trimmed.isEmpty ? nil : trimmed
-                await controller.updateQuery(q)
+                await controller.updateQuery(makeQuery(), debounceSeconds: 0.3)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .focusSessionSnapshotSynchronizationDidFinish
+        )) { _ in
+            // Cross-day rolls, session start/end, edits and coordinator
+            // transitions republish the history snapshot. Reload so the list
+            // never keeps stale rows, duplicates, or missing items.
+            Task {
+                await controller.reload()
+                await loadProjectOptions()
+            }
+        }
+        .onChange(of: controller.allSessions.count) { _, _ in
+            // Project options derive from loaded sessions; refresh them as
+            // pagination and edits bring new projects in or remove old ones.
+            Task { await loadProjectOptions() }
         }
     }
 
@@ -331,6 +347,7 @@ struct FocusHistoryListView: View {
         .listStyle(.inset)
         .refreshable {
             await controller.refresh()
+            await loadProjectOptions()
         }
     }
 
@@ -353,6 +370,13 @@ struct FocusHistoryListView: View {
     }
 
     private func applyFilters() {
+        Task {
+            await controller.updateQuery(makeQuery(), debounceSeconds: 0)
+        }
+    }
+
+    /// Builds the query from the current toolbar filter state.
+    private func makeQuery() -> FocusSessionQuery {
         var q = FocusSessionQuery()
         q.dayStart = dayStart
         q.dayEnd = dayEnd
@@ -360,9 +384,7 @@ struct FocusHistoryListView: View {
         q.status = selectedStatus
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         q.keyword = trimmed.isEmpty ? nil : trimmed
-        Task {
-            await controller.updateQuery(q, debounceSeconds: 0)
-        }
+        return q
     }
 
     private func loadProjectOptions() async {

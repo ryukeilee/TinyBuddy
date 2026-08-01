@@ -1457,6 +1457,7 @@ final class PetViewModelTests: XCTestCase {
         // Timer should NOT start because there's no active session yet
         // (we can't directly observe the timer but we can observe behavior)
         XCTAssertEqual(viewModel.manualControlState, .idle)
+        widgetReloadCount = 0
 
         // Start a manual session - timer should start ticking
         let project = FocusProjectContext(key: "com.test.Editor", displayName: "Test Editor")
@@ -1466,15 +1467,14 @@ final class PetViewModelTests: XCTestCase {
         } else {
             XCTFail("Expected focusing state, got \(viewModel.manualControlState)")
         }
-        // Widget reload should happen when session starts
-        XCTAssertGreaterThan(widgetReloadCount, 0)
+        // Widget reload waits for AppDelegate's committed combined-snapshot
+        // publication; the control surface never reloads an old snapshot.
+        XCTAssertEqual(widgetReloadCount, 0)
 
         // End the session - timer should stop
-        widgetReloadCount = 0
         viewModel.endManualFocus()
         XCTAssertEqual(viewModel.manualControlState, .idle)
-        // Widget reload should happen when session ends
-        XCTAssertGreaterThan(widgetReloadCount, 0)
+        XCTAssertEqual(widgetReloadCount, 0)
     }
 
     private func makeDefaults() -> UserDefaults {

@@ -68,7 +68,8 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         // instead of a separate combined-snapshot-write in synchronizeFocusSessionStatus.
         XCTAssertTrue(app.contains("self.petViewModel.applyFocusStatusForPublication(status)"))
         XCTAssertTrue(app.contains("self.synchronizeFocusHistoryPublication(publication, status: status)"))
-        XCTAssertTrue(app.contains("isActivelyFocusing ? .focusing"))
+        XCTAssertTrue(app.contains("FocusHistoryPublicationStatus.status(for: publication)"))
+        XCTAssertTrue(app.contains("status: FocusHistoryPublicationStatus.status(for: history)"))
         XCTAssertFalse(app.contains("petViewModel.synchronizeFocusSessionStatus("))
     }
 

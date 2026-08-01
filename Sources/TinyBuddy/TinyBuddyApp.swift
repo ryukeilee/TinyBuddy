@@ -7,6 +7,20 @@ import WidgetKit
 
 private let tinyBuddyHUDWindowIdentifier = NSUserInterfaceItemIdentifier("TinyBuddy.HUDWindow")
 private let tinyBuddyHUDLogger = Logger(subsystem: "local.tinybuddy", category: "HUD")
+
+/// Derives the presentation status from the same revision-bound payload that
+/// is written to the combined snapshot. This is shared by the live callback
+/// and startup journal replay so a crash cannot restore history from one
+/// transition while retaining the pet state from an older one.
+enum FocusHistoryPublicationStatus {
+    static func status(for publication: FocusHistoryPublication) -> PetStatus {
+        if publication.isFocusSessionActive {
+            return .focusing
+        }
+        let completedCount = publication.snapshot.recentDays.last?.completedSessionCount ?? 0
+        return completedCount > 0 ? .completedOnce : .idle
+    }
+}
 private let tinyBuddyStartupLogger = Logger(subsystem: "local.tinybuddy", category: "Startup")
 
 private let appColdStartTime = CFAbsoluteTimeGetCurrent()
@@ -57,7 +71,10 @@ struct TinyBuddyApp: App {
             if let recoveryError = appDelegate.startupRecoveryError {
                 TinyBuddyResetRecoveryBlockedView(error: recoveryError)
             } else {
-                PetView(viewModel: appDelegate.petViewModel)
+                PetView(
+                    viewModel: appDelegate.petViewModel,
+                    registeredProjectsProvider: { appDelegate.activeManualFocusProjects }
+                )
             }
         }
         .commands {
@@ -225,10 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.petViewModel.displayPresentation.recentProjectName
         },
         registeredProjectsProvider: { [weak self] in
-            self?.projectRegistry?.currentSnapshot.projects
-                .filter { $0.state == .active }
-                .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-                ?? []
+            self?.activeManualFocusProjects ?? []
         }
     )
     private var pendingCommittedGitActivity: (
@@ -345,6 +359,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var projectIdentityRegistry: TinyBuddyProjectRegistry? {
         projectRegistry
+    }
+
+    /// Both manual-control surfaces receive this exact registry projection so
+    /// choosing the same named project never creates divergent manual keys.
+    var activeManualFocusProjects: [TinyBuddyProject] {
+        projectRegistry?.currentSnapshot.projects
+            .filter { $0.state == .active }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            ?? []
     }
 
     lazy var focusGoalCoordinator = FocusGoalCoordinator()
@@ -492,14 +515,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focusBridge?.sessionEngine.committedHistorySnapshotHandler = { [weak self] publication in
             DispatchQueue.main.async {
                 guard let self else { return }
-                let isActivelyFocusing = self.focusSessionEngine?.isFocusSessionActive == true
-                let completedCount = publication.snapshot.recentDays.last?.completedSessionCount ?? 0
-                let status: PetStatus = isActivelyFocusing ? .focusing : (completedCount > 0 ? .completedOnce : .idle)
-                // Apply the status to the legacy store and pet-view-model state
-                // without a separate combined-snapshot write.  The history
-                // publication below atomically commits both the focus history
-                // and the updated status in one combined snapshot write.
-                self.petViewModel.applyFocusStatusForPublication(status)
+                // A fast start/pause/end sequence can enqueue more than one
+                // publication before the main queue drains. Do not make an
+                // already-superseded transition visible in the shared snapshot
+                // (and therefore WidgetKit) just because its callback arrived
+                // first.
+                if let latestRevision = self.focusSessionEngine?.focusHistoryPublication()?.revision,
+                   publication.revision < latestRevision {
+                    return
+                }
+                // The callback can be delayed behind a later engine mutation.
+                // Derive status from the revision-bound publication itself so
+                // this combined-snapshot write never mixes history from one
+                // transition with live state from another.
+                let status = FocusHistoryPublicationStatus.status(for: publication)
+                // The publication path atomically commits both the history and
+                // status slices, then updates HUD and Widget from that durable
+                // combined snapshot.
                 self.synchronizeFocusHistoryPublication(publication, status: status)
             }
         }
@@ -677,6 +709,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 forDayIdentifier: current.stats.dayIdentifier
             )
         }
+        // Update the legacy compatibility store only after this publication is
+        // known to be the current combined snapshot. A stale asynchronous
+        // callback must not alter HUD state ahead of the durable authority.
+        if let status {
+            self.petViewModel.applyFocusStatusForPublication(status)
+        }
         petViewModel.focusSessionStatsDidChange()
         guard focusSessionPublicationJournal.clear(expected: publication) else {
             postFocusHistorySynchronization(succeeded: false)
@@ -707,7 +745,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             synchronizeLegacyFocusSessionPublication(legacy)
         }
         if let history = focusSessionPublicationJournal.pendingHistory {
-            synchronizeFocusHistoryPublication(history)
+            synchronizeFocusHistoryPublication(
+                history,
+                status: FocusHistoryPublicationStatus.status(for: history)
+            )
         }
     }
 

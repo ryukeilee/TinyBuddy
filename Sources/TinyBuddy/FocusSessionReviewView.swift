@@ -82,6 +82,10 @@ struct FocusSessionReviewView: View {
                 ? "统计与 HUD、Widget 展示已同步。"
                 : "记录已保存，但展示快照未写入；下次启动会自动恢复同步。"
             refreshID = UUID()
+            // Reload the shared list so cross-day rolls, session end and
+            // edits made outside this editor (manual/automatic control) are
+            // reflected here too, and stale selected rows are dropped.
+            Task { await historyController.reload() }
         }
     }
 

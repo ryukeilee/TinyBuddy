@@ -15,6 +15,7 @@ struct PetView: View {
     @StateObject private var viewModel: PetViewModel
     @State private var lowPowerModeEnabled: Bool
     @State private var showProjectPicker = false
+    private let registeredProjectsProvider: () -> [TinyBuddyProject]
 
     private let fixedWidth: CGFloat = 284
     private let hudHeight: CGFloat = 520
@@ -25,11 +26,15 @@ struct PetView: View {
         case actionButton
     }
 
-    init(viewModel: PetViewModel? = nil) {
+    init(
+        viewModel: PetViewModel? = nil,
+        registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] }
+    ) {
         _viewModel = StateObject(wrappedValue: viewModel ?? PetViewModel())
         _lowPowerModeEnabled = State(
             initialValue: ProcessInfo.processInfo.isLowPowerModeEnabled
         )
+        self.registeredProjectsProvider = registeredProjectsProvider
     }
 
     private var presentation: TinyBuddyDisplayPresentation {
@@ -427,7 +432,7 @@ struct PetView: View {
                 .popover(isPresented: $showProjectPicker) {
                     ManualFocusProjectPicker(
                         recentProjectName: presentation.recentProjectName,
-                        registeredProjects: [],
+                        registeredProjects: registeredProjectsProvider(),
                         onSubmit: { project in
                             viewModel.startManualFocus(project: project)
                             showProjectPicker = false

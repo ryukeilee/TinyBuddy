@@ -198,10 +198,46 @@ public struct FocusHistorySnapshot: Codable, Equatable, Sendable {
 public struct FocusHistoryPublication: Codable, Equatable, Sendable {
     public let revision: Int64
     public let snapshot: FocusHistorySnapshot
+    /// Whether the exact authoritative-session state represented by this
+    /// publication has a running session. Keeping this fact on the same
+    /// revision as history lets HUD and Widget status update atomically rather
+    /// than reading a newer in-memory engine state from a delayed callback.
+    public let isFocusSessionActive: Bool
 
-    public init(revision: Int64, snapshot: FocusHistorySnapshot) {
+    public init(
+        revision: Int64,
+        snapshot: FocusHistorySnapshot,
+        isFocusSessionActive: Bool = false
+    ) {
         self.revision = max(0, revision)
         self.snapshot = snapshot
+        self.isFocusSessionActive = isFocusSessionActive
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case revision
+        case snapshot
+        case isFocusSessionActive
+    }
+
+    /// Older shared snapshots did not encode the live-state bit. They remain
+    /// readable as non-running until the primary engine publishes a fresh,
+    /// revision-bound snapshot.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try container.decode(Int64.self, forKey: .revision)
+        snapshot = try container.decode(FocusHistorySnapshot.self, forKey: .snapshot)
+        isFocusSessionActive = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isFocusSessionActive
+        ) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(revision, forKey: .revision)
+        try container.encode(snapshot, forKey: .snapshot)
+        try container.encode(isFocusSessionActive, forKey: .isFocusSessionActive)
     }
 }
 

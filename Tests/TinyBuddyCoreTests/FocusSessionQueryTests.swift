@@ -224,6 +224,48 @@ final class FocusSessionQueryTests: XCTestCase {
         XCTAssertEqual(allIDs.count, 25)
     }
 
+    func testCursorMissReturnsNilInsteadOfTruncating() async throws {
+        let base = try date("2026-07-20T12:00:00Z")
+        let sessions = makeOrderedSessions(count: 25, project: alpha, base: base)
+        let box = SessionBox(sessions)
+        let service = FocusSessionQueryService(sessionProvider: { box.value })
+
+        let r1 = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 10,
+            version: 0
+        )
+        let page1 = try XCTUnwrap(r1)
+        XCTAssertEqual(page1.sessions.count, 10)
+        XCTAssertNotNil(page1.nextCursor)
+
+        // Delete every session between pages without a version bump: the
+        // cursor key no longer exists, so continuation is impossible.
+        box.value.removeAll()
+
+        // A cursor miss must signal a restart (nil) instead of returning an
+        // empty page that silently truncates the remaining sessions.
+        let r2 = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: page1.nextCursor,
+            limit: 10,
+            version: 0
+        )
+        XCTAssertNil(r2)
+
+        // A nil cursor still yields an empty page for an empty result set.
+        let r3 = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 10,
+            version: 0
+        )
+        let empty = try XCTUnwrap(r3)
+        XCTAssertTrue(empty.sessions.isEmpty)
+        XCTAssertFalse(empty.hasMore)
+    }
+
     func testSingleSession() async throws {
         let start = try date("2026-07-20T10:00:00Z")
         let s = session(project: alpha, day: "2026-07-20", start: start)

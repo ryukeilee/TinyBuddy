@@ -2,6 +2,11 @@ import Foundation
 import XCTest
 @testable import TinyBuddyCore
 
+private struct LegacyFocusHistoryPublication: Codable {
+    let revision: Int64
+    let snapshot: FocusHistorySnapshot
+}
+
 final class FocusHistoryCombinedSnapshotTests: XCTestCase {
     func testV3RoundTripKeepsHistoryPublication() throws {
         let publication = makePublication(revision: 8, completedSessionCount: 3)
@@ -44,6 +49,25 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         ))
 
         XCTAssertNil(TinyBuddyCombinedSnapshotStore.decodeV3(encoded)?.focusHistoryPublication)
+    }
+
+    func testLegacyHistoryPublicationDefaultsToInactiveState() throws {
+        let current = makePublication(revision: 8, completedSessionCount: 3)
+        let legacyData = try PropertyListEncoder().encode(
+            LegacyFocusHistoryPublication(
+                revision: current.revision,
+                snapshot: current.snapshot
+            )
+        )
+
+        let decoded = try PropertyListDecoder().decode(
+            FocusHistoryPublication.self,
+            from: legacyData
+        )
+
+        XCTAssertEqual(decoded.revision, current.revision)
+        XCTAssertEqual(decoded.snapshot, current.snapshot)
+        XCTAssertFalse(decoded.isFocusSessionActive)
     }
 
     func testHistoryUpdateRejectsOlderArchiveRevisionButAcceptsEqualRevisionConfigurationRefresh() {

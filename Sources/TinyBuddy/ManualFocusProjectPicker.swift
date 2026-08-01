@@ -1,6 +1,31 @@
 import SwiftUI
 import TinyBuddyCore
 
+/// Resolves a picker label to the stable project identity shared by automatic
+/// attribution. A recent-project label is only upgraded when it maps to one
+/// active registered project; ambiguity deliberately keeps an isolated manual
+/// key instead of guessing the wrong project.
+enum ManualFocusProjectIdentityResolver {
+    static func recentProject(
+        named displayName: String,
+        registeredProjects: [TinyBuddyProject]
+    ) -> FocusProjectContext {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matches = registeredProjects.filter { project in
+            project.state == .active
+                && project.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .compare(trimmed, options: .caseInsensitive) == .orderedSame
+        }
+        if matches.count == 1, let project = matches.first {
+            return FocusProjectContext(
+                key: project.id.rawValue,
+                displayName: project.displayName
+            )
+        }
+        return FocusProjectContext(key: "manual.recent.\(trimmed)", displayName: trimmed)
+    }
+}
+
 /// A reusable project picker used by both the HUD and menu bar.
 /// It surfaces recent Git projects, registered projects from the identity
 /// registry, and allows entering a custom project name.
@@ -206,7 +231,10 @@ struct ManualFocusProjectPicker: View {
         if let source = selectedSource {
             switch source {
             case .recent:
-                context = FocusProjectContext(key: "manual.recent.\(trimmed)", displayName: trimmed)
+                context = ManualFocusProjectIdentityResolver.recentProject(
+                    named: trimmed,
+                    registeredProjects: registeredProjects
+                )
             case .registered(let id):
                 if let project = registeredProjects.first(where: { $0.id == id }) {
                     context = FocusProjectContext(key: project.id.rawValue, displayName: project.displayName)

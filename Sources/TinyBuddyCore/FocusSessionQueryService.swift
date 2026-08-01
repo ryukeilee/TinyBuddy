@@ -40,17 +40,31 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
 
         // Determine the start index based on the cursor.
         let startIndex: Int
+        var cursorMissed = false
         if let cursor = cursor {
-            startIndex = sorted.firstIndex { session in
+            if let index = sorted.firstIndex { session in
                 session.startedAt < cursor.lastStartedAt
                     || (session.startedAt == cursor.lastStartedAt
                         && session.id.uuidString > cursor.lastID.uuidString)
-            } ?? totalCount
+            } {
+                startIndex = index
+            } else {
+                // The cursor key no longer matches the current result set
+                // (sessions were deleted or reordered between pages).
+                // Continuity is broken.
+                startIndex = totalCount
+                cursorMissed = true
+            }
         } else {
             startIndex = 0
         }
 
         guard startIndex < totalCount else {
+            if cursorMissed {
+                // Signal the caller to restart pagination from the first page
+                // instead of silently truncating the remaining sessions.
+                return nil
+            }
             return FocusSessionQueryPage.empty
         }
 
