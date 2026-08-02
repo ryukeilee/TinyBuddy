@@ -17,8 +17,13 @@ final class FocusSessionSnapshotPublicationJournal {
         case persistenceFailed
     }
 
-    private static let key = "tinybuddy.focusSession.snapshotPublication.v1"
-    private static let historyKey = "tinybuddy.focusSession.historyPublication.v1"
+    enum Key {
+        static let snapshotPublication = "tinybuddy.focusSession.snapshotPublication.v1"
+        static let historyPublication = "tinybuddy.focusSession.historyPublication.v1"
+    }
+
+    private static let key = Key.snapshotPublication
+    private static let historyKey = Key.historyPublication
     private let defaults: UserDefaults
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()

@@ -60,14 +60,15 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         populateRuntimeState()
         standardDefaults.set("bookmark", forKey: GitScanRootAuthorizationStore.Constants.bookmarkDataKey)
         sharedDefaults.set("config", forKey: TinyBuddyConfigStore.Key.configPayload)
+        sharedDefaults.set(Data("goalConfig".utf8), forKey: FocusGoalPreferencesStore.Key.configuration)
         try makeOwnedCacheFiles()
 
         let result = makeService().perform(level: .runtimeState)
 
         XCTAssertEqual(result, .success(TinyBuddyResetResult(
             level: .runtimeState,
-            removedPreferenceKeyCount: 5,
-            removedFileCount: 5
+            removedPreferenceKeyCount: 12,
+            removedFileCount: 7
         )))
         XCTAssertNil(sharedDefaults.object(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot))
         XCTAssertNil(sharedDefaults.object(forKey: "tinybuddy.dailyStats.dayIdentifier"))
@@ -79,6 +80,20 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: buildLogsDirectory.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: releaseEvidenceDirectory.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: regressionEvidenceDirectory.path))
+        // Focus sessions, reminder runtime state, publication hand-offs, and
+        // cross-process runtime observations are all part of runtime state.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusSessionsDirectory.path))
+        XCTAssertNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.reminderState))
+        XCTAssertNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.dayIdentifier))
+        XCTAssertNil(sharedDefaults.object(forKey: FocusSessionSnapshotPublicationJournal.Key.snapshotPublication))
+        XCTAssertNil(sharedDefaults.object(forKey: FocusSessionSnapshotPublicationJournal.Key.historyPublication))
+        XCTAssertNil(sharedDefaults.object(forKey: TinyBuddyTimeContinuityRecord.Key.continuityRecord))
+        XCTAssertNil(sharedDefaults.object(forKey: TinyBuddyTimelineGenerationTracker.Key.timelineGeneration))
+        // The daily goal configuration is a user setting and must survive.
+        XCTAssertEqual(
+            sharedDefaults.data(forKey: FocusGoalPreferencesStore.Key.configuration),
+            Data("goalConfig".utf8)
+        )
     }
 
     @MainActor
@@ -225,6 +240,53 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         XCTAssertEqual(standardDefaults.string(forKey: "tinybuddy.reset.journal.v1"), "unknown-reset-level")
     }
 
+    @MainActor
+    func testSettingsResetPreservesFocusSessionsButClearsGoalConfiguration() throws {
+        populateRuntimeState()
+        sharedDefaults.set(Data("goalConfig".utf8), forKey: FocusGoalPreferencesStore.Key.configuration)
+        try makeOwnedCacheFiles()
+
+        XCTAssertEqual(makeService().perform(level: .settings).map(\.level), .success(.settings))
+
+        // Runtime state (session journal, reminder state) survives a settings reset.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: focusSessionsDirectory.path))
+        XCTAssertNotNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.reminderState))
+        XCTAssertNotNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.dayIdentifier))
+        XCTAssertNotNil(sharedDefaults.object(forKey: FocusSessionSnapshotPublicationJournal.Key.historyPublication))
+        XCTAssertNotNil(sharedDefaults.object(forKey: TinyBuddyTimeContinuityRecord.Key.continuityRecord))
+        // The daily goal configuration is a user preference and is cleared.
+        XCTAssertNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.configuration))
+    }
+
+    @MainActor
+    func testRuntimeResetRemovesPendingNotificationsButSettingsResetDoesNot() {
+        populateRuntimeState()
+        var notificationsRemoved = 0
+        let service = makeService(removePendingNotifications: { notificationsRemoved += 1 })
+
+        XCTAssertEqual(service.perform(level: .runtimeState).map(\.level), .success(.runtimeState))
+        XCTAssertEqual(notificationsRemoved, 1)
+
+        populateRuntimeState()
+        XCTAssertEqual(service.perform(level: .settings).map(\.level), .success(.settings))
+        XCTAssertEqual(
+            notificationsRemoved, 1,
+            "a settings reset keeps the session journal, so its reminders remain valid"
+        )
+    }
+
+    @MainActor
+    func testClearAllRemovesFocusSessionsAndGoalConfiguration() throws {
+        populateRuntimeState()
+        sharedDefaults.set(Data("goalConfig".utf8), forKey: FocusGoalPreferencesStore.Key.configuration)
+        try makeOwnedCacheFiles()
+
+        XCTAssertEqual(makeService().perform(level: .allAppData).map(\.level), .success(.allAppData))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusSessionsDirectory.path))
+        XCTAssertNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.configuration))
+        XCTAssertNil(sharedDefaults.object(forKey: FocusGoalPreferencesStore.Key.reminderState))
+    }
+
     private enum TestError: Error {
         case denied
     }
@@ -242,7 +304,8 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         removeOwnedItem: @escaping (URL) throws -> Void = {
             try FileManager.default.removeItem(at: $0)
         },
-        unregisterLoginItem: @escaping () throws -> Void = {}
+        unregisterLoginItem: @escaping () throws -> Void = {},
+        removePendingNotifications: @escaping () -> Void = {}
     ) -> TinyBuddyResetService {
         TinyBuddyResetService(
             standardDefaults: standardDefaults,
@@ -250,7 +313,8 @@ final class TinyBuddyResetServiceTests: XCTestCase {
             appGroupContainerProvider: { self.containerURL },
             temporaryDirectoryProvider: { self.temporaryURL },
             removeOwnedItem: removeOwnedItem,
-            unregisterLoginItem: unregisterLoginItem
+            unregisterLoginItem: unregisterLoginItem,
+            removePendingNotifications: removePendingNotifications
         )
     }
 
@@ -260,6 +324,18 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         sharedDefaults.set(3, forKey: "tinybuddy.dailyStats.focusCount")
         standardDefaults.set("2026-07-20", forKey: GitTodayCommitCountStore.Key.dayIdentifier)
         standardDefaults.set(4, forKey: GitTodayCommitCountStore.Key.count)
+        // Focus reminder runtime state, publication hand-offs, and
+        // cross-process runtime observations.
+        sharedDefaults.set(Data("reminderState".utf8), forKey: FocusGoalPreferencesStore.Key.reminderState)
+        sharedDefaults.set("2026-07-20", forKey: FocusGoalPreferencesStore.Key.dayIdentifier)
+        sharedDefaults.set(Data("derived".utf8), forKey: FocusSessionSnapshotPublicationJournal.Key.snapshotPublication)
+        sharedDefaults.set(Data("history".utf8), forKey: FocusSessionSnapshotPublicationJournal.Key.historyPublication)
+        sharedDefaults.set(Data("continuity".utf8), forKey: TinyBuddyTimeContinuityRecord.Key.continuityRecord)
+        sharedDefaults.set(42, forKey: TinyBuddyTimelineGenerationTracker.Key.timelineGeneration)
+        sharedDefaults.set(
+            Date.timeIntervalSinceReferenceDate,
+            forKey: TinyBuddyTimelineGenerationTracker.Key.timelineGenerationTimestamp
+        )
     }
 
     private var cacheDirectory: URL {
@@ -284,6 +360,10 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         temporaryURL.appendingPathComponent("TinyBuddyRegressionEvidence", isDirectory: true)
     }
 
+    private var focusSessionsDirectory: URL {
+        containerURL.appendingPathComponent("focus-sessions", isDirectory: true)
+    }
+
     private func makeOwnedCacheFiles() throws {
         try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: repositoryCacheDirectory, withIntermediateDirectories: true)
@@ -295,5 +375,10 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         try Data("build".utf8).write(to: buildLogsDirectory.appendingPathComponent("build.log"))
         try Data("release".utf8).write(to: releaseEvidenceDirectory.appendingPathComponent("stage.status"))
         try Data("regression".utf8).write(to: regressionEvidenceDirectory.appendingPathComponent("baseline.status"))
+        // The session journal and its atomic-replacement backup are runtime
+        // state and must be removed together.
+        try FileManager.default.createDirectory(at: focusSessionsDirectory, withIntermediateDirectories: true)
+        try Data("sessions".utf8).write(to: focusSessionsDirectory.appendingPathComponent("sessions.json"))
+        try Data("backup".utf8).write(to: focusSessionsDirectory.appendingPathComponent("sessions.json.bak"))
     }
 }

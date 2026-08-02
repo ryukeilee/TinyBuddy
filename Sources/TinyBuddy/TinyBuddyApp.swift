@@ -848,7 +848,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
-        focusSessionBridge?.handleTerminate()
+        // During a reset the session journal has already been removed and the
+        // engine must not finalize (and thereby recreate) pre-reset sessions.
+        // Normal termination still finalizes the open session as usual.
+        if !isPerformingReset {
+            focusSessionBridge?.handleTerminate()
+        }
         focusSessionBridge?.stop()
         manualFocusMenuBarController.stop()
         HUDWindowPositionController.shared.stop()
@@ -960,6 +965,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
+        petViewModel.stopManualControlRefresh()
         focusSessionBridge?.stop()
         manualFocusMenuBarController.stop()
         HUDWindowPositionController.shared.stop()

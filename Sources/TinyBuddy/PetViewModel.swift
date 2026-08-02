@@ -541,7 +541,7 @@ final class PetViewModel: ObservableObject {
         }
     }
 
-    private func stopManualControlRefresh() {
+    func stopManualControlRefresh() {
         manualControlTimer?.invalidate()
         manualControlTimer = nil
     }

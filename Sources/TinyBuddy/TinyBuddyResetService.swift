@@ -86,6 +86,7 @@ final class TinyBuddyResetService {
     private let temporaryDirectoryProvider: () -> URL
     private let removeOwnedItem: (URL) throws -> Void
     private let unregisterLoginItem: (() throws -> Void)?
+    private let removePendingNotifications: () -> Void
 
     init(
         standardDefaults: UserDefaults = .standard,
@@ -102,7 +103,10 @@ final class TinyBuddyResetService {
         removeOwnedItem: @escaping (URL) throws -> Void = {
             try FileManager.default.removeItem(at: $0)
         },
-        unregisterLoginItem: (() throws -> Void)? = nil
+        unregisterLoginItem: (() throws -> Void)? = nil,
+        removePendingNotifications: @escaping () -> Void = {
+            FocusNotificationManager().removeAllPending()
+        }
     ) {
         self.standardDefaults = standardDefaults
         self.sharedDefaults = sharedDefaults
@@ -111,6 +115,7 @@ final class TinyBuddyResetService {
         self.temporaryDirectoryProvider = temporaryDirectoryProvider
         self.removeOwnedItem = removeOwnedItem
         self.unregisterLoginItem = unregisterLoginItem
+        self.removePendingNotifications = removePendingNotifications
     }
 
     /// Completes an interrupted reset, if one exists. It never starts a new
@@ -171,6 +176,13 @@ final class TinyBuddyResetService {
             } catch {
                 return .failure(.launchItemUnregisterFailed)
             }
+        }
+
+        // Focus reminders for cleared sessions must not remain visible in
+        // Notification Center after a runtime-state reset. Best-effort: the
+        // reset must not fail because the OS notification API is unavailable.
+        if level.clearsRuntimeState {
+            removePendingNotifications()
         }
 
         var removedPreferenceKeyCount = 0
@@ -258,6 +270,10 @@ final class TinyBuddyResetService {
             if level == .allAppData {
                 ownedURLs.append(containerURL.appendingPathComponent("projects", isDirectory: true))
             }
+            // The focus-session archive is runtime state: clearing it must
+            // remove both the primary journal and its atomic-replacement
+            // backup so a relaunch cannot replay pre-reset history.
+            ownedURLs.append(containerURL.appendingPathComponent("focus-sessions", isDirectory: true))
         }
 
         var removedFileCount = 0
@@ -328,7 +344,20 @@ final class TinyBuddyResetService {
         GitActivityRefreshStatusStore.Key.sharedDataWritten,
         GitActivityRefreshStatusStore.Key.widgetContentChanged,
         GitActivityRefreshStatusStore.Key.widgetReloaded,
-        GitActivityRefreshStatusStore.Key.metricsReason
+        GitActivityRefreshStatusStore.Key.metricsReason,
+        // Focus reminder/notification runtime state: a stale reminder day or
+        // triggered-session set must not suppress or duplicate notifications
+        // after a reset.
+        FocusGoalPreferencesStore.Key.reminderState,
+        FocusGoalPreferencesStore.Key.dayIdentifier,
+        // Durable focus-history hand-offs: replaying a pre-reset publication
+        // into the rebuilt current-day snapshot would reintroduce old history.
+        FocusSessionSnapshotPublicationJournal.Key.snapshotPublication,
+        FocusSessionSnapshotPublicationJournal.Key.historyPublication,
+        // Cross-process runtime observations that must not outlive a reset.
+        TinyBuddyTimeContinuityRecord.Key.continuityRecord,
+        TinyBuddyTimelineGenerationTracker.Key.timelineGeneration,
+        TinyBuddyTimelineGenerationTracker.Key.timelineGenerationTimestamp
     ]
 
     private let runtimeStandardKeys = [
@@ -343,7 +372,11 @@ final class TinyBuddyResetService {
 
     private let settingsSharedKeys = [
         TinyBuddyConfigStore.Key.configPayload,
-        TinyBuddyConfigStore.Key.configCommittedVersion
+        TinyBuddyConfigStore.Key.configCommittedVersion,
+        // Daily focus-goal configuration is a user preference: a settings
+        // reset clears it while the runtime reminder state below survives
+        // (it belongs to the retained session journal).
+        FocusGoalPreferencesStore.Key.configuration
     ]
 
     private let settingsStandardKeys = [

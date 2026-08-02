@@ -48,6 +48,12 @@ final class FocusSessionAppBridge {
     /// including when no session mutation occurred.
     var reminderEvaluationHandler: (() -> Void)?
 
+    // Once stopped (reset quiesce or termination), reports that were already
+    // enqueued on the main queue before observer removal must become no-ops:
+    // a delayed sleep/lock callback must not persist a session after the reset
+    // removed the journal.
+    private(set) var isStopped = false
+
     // Treat startup as idle until the first observed input. This makes the
     // next low-frequency sample start automatic attribution for a user who
     // was already typing when TinyBuddy launched.
@@ -86,6 +92,7 @@ final class FocusSessionAppBridge {
 
     func start() {
         guard idleTimer == nil else { return }
+        isStopped = false
         registerWorkspaceObservers()
         startIdleDetection()
         seedForegroundApp()
@@ -97,10 +104,20 @@ final class FocusSessionAppBridge {
     }
 
     func stop() {
+        isStopped = true
         idleTimer?.cancel()
         idleTimer = nil
         removeObservers()
         logger.notice("FocusSessionAppBridge stopped")
+    }
+
+    /// Serializes every coordinator report through the stopped gate. Already-
+    /// queued workspace/notification callbacks and a quiesced reset must never
+    /// mutate or persist session state after `stop()`.
+    @MainActor
+    func reportToCoordinator(_ report: (FocusSessionCoordinator) -> Void) {
+        guard !isStopped else { return }
+        report(coordinator)
     }
 
     /// Must be called from `applicationWillTerminate` to finalise open sessions.
@@ -130,14 +147,14 @@ final class FocusSessionAppBridge {
         observers.append(
             workspaceNC.addObserver(forName: NSWorkspace.willSleepNotification, object: nil,
                                     queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.coordinator.reportSleep() }
+                MainActor.assumeIsolated { self?.reportToCoordinator { $0.reportSleep() } }
             }
         )
         observers.append(
             workspaceNC.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
                                     queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.coordinator.reportWake()
+                    self?.reportToCoordinator { $0.reportWake() }
                     self?.reportCurrentStateAfterIdle()
                 }
             }
@@ -146,14 +163,14 @@ final class FocusSessionAppBridge {
         observers.append(
             workspaceNC.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification,
                                     object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.coordinator.reportLock() }
+                MainActor.assumeIsolated { self?.reportToCoordinator { $0.reportLock() } }
             }
         )
         observers.append(
             workspaceNC.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification,
                                     object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.coordinator.reportUnlock()
+                    self?.reportToCoordinator { $0.reportUnlock() }
                     self?.reportCurrentStateAfterIdle()
                 }
             }
@@ -168,11 +185,13 @@ final class FocusSessionAppBridge {
                 let displayName = app?.localizedName ?? bundleID
                 guard !bundleID.isEmpty else { return }
                 MainActor.assumeIsolated {
-                    self?.coordinator.reportForegroundApp(
-                        bundleID: bundleID,
-                        displayName: displayName,
-                        isCodeEditor: Self.isCodeEditor(bundleID)
-                    )
+                    self?.reportToCoordinator { coordinator in
+                        coordinator.reportForegroundApp(
+                            bundleID: bundleID,
+                            displayName: displayName,
+                            isCodeEditor: Self.isCodeEditor(bundleID)
+                        )
+                    }
                     self?.checkDayChange()
                 }
             }
@@ -210,6 +229,7 @@ final class FocusSessionAppBridge {
     }
 
     private func checkIdleState() {
+        guard !isStopped else { return }
         let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
         let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
         let idleSeconds = min(idleKey, idleMouse)
@@ -247,6 +267,7 @@ final class FocusSessionAppBridge {
     /// After wake or unlock, check whether the user is currently active and
     /// immediately start a session instead of waiting for the next idle poll.
     private func reportCurrentStateAfterIdle() {
+        guard !isStopped else { return }
         let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
         let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
         let idleSeconds = min(idleKey, idleMouse)
@@ -268,6 +289,7 @@ final class FocusSessionAppBridge {
     /// Immediately after launch, check whether the user is already active and
     /// start a session directly instead of waiting for the first idle poll.
     private func sampleInitialActivity() {
+        guard !isStopped else { return }
         let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
         let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
         let idleSeconds = min(idleKey, idleMouse)
@@ -285,7 +307,7 @@ final class FocusSessionAppBridge {
     /// sample is already awake. This adds no timer, disk write, or Widget reload
     /// while there is no open focus session.
     private func publishLiveFocusHistoryIfNeeded() {
-        guard engine.currentProject != nil else {
+        guard !isStopped, engine.currentProject != nil else {
             lastPublishedFocusMinute = nil
             return
         }
@@ -296,6 +318,7 @@ final class FocusSessionAppBridge {
     }
 
     private func seedForegroundApp() {
+        guard !isStopped else { return }
         guard let frontApp = NSWorkspace.shared.frontmostApplication,
               let bundleID = frontApp.bundleIdentifier else { return }
         coordinator.reportForegroundApp(
@@ -311,6 +334,7 @@ final class FocusSessionAppBridge {
     private var lastCheckedDay: String?
 
     private func checkDayChange() {
+        guard !isStopped else { return }
         guard let context = TinyBuddyTimeEnvironment().capture() else { return }
         let now = context.now
         let day = context.dayIdentifier(for: now) ?? context.dayIdentifier
@@ -330,6 +354,7 @@ final class FocusSessionAppBridge {
     }
 
     private func handleTimeChange() {
+        guard !isStopped else { return }
         guard let context = TinyBuddyTimeEnvironment().capture() else { return }
         let now = context.now
         let day = context.dayIdentifier(for: now) ?? context.dayIdentifier

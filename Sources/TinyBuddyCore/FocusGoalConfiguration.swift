@@ -90,10 +90,10 @@ public struct FocusReminderState: Codable, Equatable, Sendable {
 public final class FocusGoalPreferencesStore {
     private let defaults: UserDefaults
 
-    private enum Key {
-        static let configuration = "tinybuddy.focusGoal.configuration.v1"
-        static let reminderState = "tinybuddy.focusGoal.reminderState.v1"
-        static let dayIdentifier = "tinybuddy.focusGoal.dayIdentifier.v1"
+    public enum Key {
+        public static let configuration = "tinybuddy.focusGoal.configuration.v1"
+        public static let reminderState = "tinybuddy.focusGoal.reminderState.v1"
+        public static let dayIdentifier = "tinybuddy.focusGoal.dayIdentifier.v1"
     }
 
     public init(userDefaults: UserDefaults = TinyBuddySharedData.makeUserDefaults()) {
