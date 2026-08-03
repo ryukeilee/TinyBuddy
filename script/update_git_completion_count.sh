@@ -44,6 +44,8 @@ CACHE_DIR="${TINYBUDDY_GIT_REPOSITORY_CACHE_DIR:-$APP_GROUP_PREFERENCES_DIR/.tin
 CACHE_REPO_LIST_FILE="$CACHE_DIR/repositories.txt"
 CACHE_REPO_STATS_FILE="$CACHE_DIR/repository-stats.tsv"
 CACHE_REPO_STATS_CHECKSUM_FILE="$CACHE_DIR/repository-stats.cksum"
+CACHE_REPO_FINGERPRINTS_FILE="$CACHE_DIR/repository-fingerprints.tsv"
+CACHE_REPO_FINGERPRINTS_CHECKSUM_FILE="$CACHE_DIR/repository-fingerprints.cksum"
 CACHE_SCAN_ROOTS_FILE="$CACHE_DIR/authorized-roots.txt"
 CACHE_SCAN_ROOTS_SIGNATURE_FILE="$CACHE_DIR/authorized-roots.signature"
 CACHE_EXCLUDED_PATHS_FILE="$CACHE_DIR/excluded-paths.txt"
@@ -112,6 +114,8 @@ repo_reflog_file="$(mktemp)"
 repo_git_paths_file="$(mktemp)"
 repo_stats_cache_file="$(mktemp)"
 new_repo_stats_file="$(mktemp)"
+repo_fingerprints_cache_file="$(mktemp)"
+new_repo_fingerprints_file="$(mktemp)"
 validated_repo_list_file="$(mktemp)"
 repository_identity_file="$(mktemp)"
 repository_records_file="$(mktemp)"
@@ -121,6 +125,8 @@ repository_fingerprint_roots_file="$(mktemp)"
 raw_activity_events_file="$(mktemp)"
 normalized_activity_events_file="$(mktemp)"
 repo_activity_events_file="$(mktemp)"
+automated_oids_file="$(mktemp)"
+automated_identities_file="$(mktemp)"
 rewrite_log_file="$(mktemp)"
 rewrite_candidates_file="$(mktemp)"
 find_stderr_file="$(mktemp)"
@@ -129,6 +135,7 @@ diagnostics_emitted=0
 shared_data_rewritten=0
 repository_count=0
 cache_hit_count=0
+fingerprint_cache_hit_count=0
 reflog_unchanged_skip_count=0
 recomputed_repository_count=0
 retained_repository_count=0
@@ -211,7 +218,7 @@ cleanup() {
     rmdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null || true
     rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
   fi
-  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$project_discovery_records_file" "$repository_fingerprint_roots_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
+  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$repo_fingerprints_cache_file" "$new_repo_fingerprints_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$project_discovery_records_file" "$repository_fingerprint_roots_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$automated_oids_file" "$automated_identities_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
 }
 
 emit_runtime_diagnostics_once() {
@@ -553,37 +560,6 @@ identity_looks_automated() {
   return 1
 }
 
-git_commit_is_automated() {
-  local git_dir="$1"
-  local object_id="$2"
-  local commit_identity
-  local git_identity_exit_code
-
-  case "$object_id" in
-    ""|*[!0-9a-fA-F]*)
-      return 1
-      ;;
-  esac
-  [ "${#object_id}" -eq 40 ] || [ "${#object_id}" -eq 64 ] || return 1
-
-  trap - ERR
-  if commit_identity="$(
-      GIT_CONFIG_NOSYSTEM=1 \
-      GIT_CONFIG_GLOBAL=/dev/null \
-      GIT_OPTIONAL_LOCKS=0 \
-      GIT_NO_LAZY_FETCH=1 \
-      "$GIT_BIN" --git-dir="$git_dir" show -s --format='%an <%ae> %cn <%ce>' "$object_id" 2>/dev/null
-    )"; then
-    git_identity_exit_code=0
-  else
-    git_identity_exit_code="$?"
-  fi
-  enable_error_trap
-  [ "$git_identity_exit_code" -eq 0 ] || return 1
-
-  identity_looks_automated "$commit_identity"
-}
-
 parse_reflog_events() {
   local reflog_path="$1"
   local metadata
@@ -718,10 +694,10 @@ append_reflog_events_for_today() {
   local focus_block
   local message_fingerprint
   local activity_subject
-  local object_is_automated
   local parse_deadline=$((SECONDS + REPOSITORY_PARSE_TIMEOUT_SECONDS))
 
   : > "$repo_activity_events_file"
+  : > "$automated_oids_file"
   parse_reflog_events "$4" || return 1
 
   while IFS=$'\t' read -r kind old_object_id new_object_id epoch actor_is_automated message; do
@@ -744,16 +720,84 @@ append_reflog_events_for_today() {
     message_fingerprint="$(printf '%s' "$activity_subject" | /usr/bin/cksum)"
     message_fingerprint="${message_fingerprint%% *}"
 
-    object_is_automated=0
-    git_commit_is_automated "$git_dir" "$new_object_id" && object_is_automated=1
-    if [ "$actor_is_automated" -eq 1 ] || [ "$object_is_automated" -eq 1 ]; then
-      actor_is_automated=1
-    fi
-
+    printf '%s\n' "$new_object_id" >> "$automated_oids_file"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$epoch" "$old_object_id" "$new_object_id" "$kind" "$message_fingerprint" "$focus_block" "$actor_is_automated" >> "$repo_activity_events_file"
-
   done < "$repo_reflog_file"
+
+  # Resolve the author/committer identities of today's objects in one bounded
+  # cat-file pass instead of spawning a git process per event. A missing or
+  # unreadable object simply contributes no identity, matching the previous
+  # per-object lookup semantics, and a timeout leaves those events counted
+  # rather than blocking the rest of the refresh.
+  if [ -s "$automated_oids_file" ]; then
+    LC_ALL=C sort -u "$automated_oids_file" -o "$automated_oids_file"
+    run_command_with_timeout "$REPOSITORY_PARSE_TIMEOUT_SECONDS" env \
+       GIT_CONFIG_NOSYSTEM=1 \
+       GIT_CONFIG_GLOBAL=/dev/null \
+       GIT_OPTIONAL_LOCKS=0 \
+       GIT_NO_LAZY_FETCH=1 \
+       "$GIT_BIN" --git-dir="$git_dir" cat-file --batch \
+       < "$automated_oids_file" > "$automated_identities_file" 2>/dev/null || true
+
+    # An empty identity pass means every object was unavailable; the events
+    # already carry the reflog-actor automation flag, so keep them unchanged.
+    if [ -s "$automated_identities_file" ]; then
+      : > "$repo_reflog_file"
+      awk -F '\t' '
+        function automated_identity(value) {
+          value = tolower(value)
+          return index(value, "[bot]") != 0 ||
+                 index(value, "dependabot") != 0 ||
+                 index(value, "renovate-bot") != 0 ||
+                 index(value, "renovate bot") != 0 ||
+                 index(value, "github-actions") != 0 ||
+                 index(value, "copilot-swe-agent") != 0 ||
+                 index(value, "automation@") != 0 ||
+                 index(value, "bot@") != 0 ||
+                 index(value, " bot <") != 0 ||
+                 index(value, " robot <") != 0
+        }
+        NR == FNR {
+          if (in_headers) {
+            if ($0 == "") {
+              in_headers = 0
+              automated[oid] = author_automated || committer_automated ? 1 : 0
+              oid = ""
+              author_automated = 0
+              committer_automated = 0
+              next
+            }
+            if (substr($0, 1, 7) == "author ") {
+              line = $0
+              sub(/^author /, "", line)
+              sub(/ [0-9]+ [+-][0-9]{4}$/, "", line)
+              if (automated_identity(line)) { author_automated = 1 }
+            } else if (substr($0, 1, 10) == "committer ") {
+              line = $0
+              sub(/^committer /, "", line)
+              sub(/ [0-9]+ [+-][0-9]{4}$/, "", line)
+              if (automated_identity(line)) { committer_automated = 1 }
+            }
+            next
+          }
+          split($0, parts, " ")
+          if (parts[2] == "commit") {
+            oid = parts[1]
+            author_automated = 0
+            committer_automated = 0
+            in_headers = 1
+          }
+          next
+        }
+        {
+          object_is_automated = (($3 in automated) && automated[$3]) ? 1 : 0
+          print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" (($7 == "1" || object_is_automated) ? "1" : "0")
+        }
+      ' "$automated_identities_file" "$repo_activity_events_file" > "$repo_reflog_file"
+      cp "$repo_reflog_file" "$repo_activity_events_file"
+    fi
+  fi
 }
 
 build_rewrite_candidates() {
@@ -966,6 +1010,7 @@ reset_activity_snapshot() {
   failed_reflog_repo_count=0
   repository_count=0
   cache_hit_count=0
+  fingerprint_cache_hit_count=0
   reflog_unchanged_skip_count=0
   recomputed_repository_count=0
   retained_repository_count=0
@@ -974,6 +1019,7 @@ reset_activity_snapshot() {
   activity_event_sequence=0
   : > "$focus_block_list_file"
   : > "$new_repo_stats_file"
+  : > "$new_repo_fingerprints_file"
   : > "$validated_repo_list_file"
   : > "$repository_identity_file"
   : > "$repository_records_file"
@@ -991,12 +1037,13 @@ emit_refresh_metrics() {
     refresh_outcome="partial"
   fi
 
-  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tretained_repository_count=%s\tshared_data_written=%s\n' \
+  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\tfingerprint_cache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tretained_repository_count=%s\tshared_data_written=%s\n' \
     "$authorized_root_count" \
     "$repository_count" \
     "$invalid_repository_count" \
     "$refresh_outcome" \
     "$cache_hit_count" \
+    "$fingerprint_cache_hit_count" \
     "$reflog_unchanged_skip_count" \
     "$recomputed_repository_count" \
     "$retained_repository_count" \
@@ -1291,6 +1338,59 @@ write_repository_stats_cache() {
   mv "$cache_checksum_file" "$CACHE_REPO_STATS_CHECKSUM_FILE"
 }
 
+load_cached_repository_fingerprints() {
+  local expected_checksum
+  local actual_checksum
+
+  : > "$repo_fingerprints_cache_file"
+  [ -f "$CACHE_REPO_FINGERPRINTS_FILE" ] || return 0
+  [ -f "$CACHE_REPO_FINGERPRINTS_CHECKSUM_FILE" ] || return 0
+
+  expected_checksum="$(sed -n '1p' "$CACHE_REPO_FINGERPRINTS_CHECKSUM_FILE")" || return 0
+  [ -n "$expected_checksum" ] || return 0
+  if ! cp "$CACHE_REPO_FINGERPRINTS_FILE" "$repo_fingerprints_cache_file"; then
+    : > "$repo_fingerprints_cache_file"
+    return 0
+  fi
+  actual_checksum="$(/usr/bin/cksum < "$repo_fingerprints_cache_file")" || {
+    : > "$repo_fingerprints_cache_file"
+    return 0
+  }
+  if [ "$actual_checksum" != "$expected_checksum" ]; then
+    : > "$repo_fingerprints_cache_file"
+  fi
+}
+
+write_repository_fingerprints_cache() {
+  local cache_fingerprints_file
+  local cache_checksum_file
+  local cache_checksum
+  /bin/mkdir -p "$CACHE_DIR"
+  cache_fingerprints_file="$(mktemp "$CACHE_REPO_FINGERPRINTS_FILE.XXXXXX")"
+  cache_checksum_file="$(mktemp "$CACHE_REPO_FINGERPRINTS_CHECKSUM_FILE.XXXXXX")"
+  # A repository identity is the canonical common Git directory, so linked
+  # worktrees of the same repository all write the same fingerprint row.
+  # Collapse those duplicates to keep the on-disk cache proportional to the
+  # number of distinct repositories rather than the number of worktrees.
+  LC_ALL=C sort -u "$new_repo_fingerprints_file" > "$cache_fingerprints_file"
+  cache_checksum="$(/usr/bin/cksum < "$cache_fingerprints_file")"
+  printf '%s\n' "$cache_checksum" > "$cache_checksum_file"
+  mv "$cache_fingerprints_file" "$CACHE_REPO_FINGERPRINTS_FILE"
+  mv "$cache_checksum_file" "$CACHE_REPO_FINGERPRINTS_CHECKSUM_FILE"
+}
+
+cached_repository_fingerprint() {
+  local repository_identity="$1"
+  local cached_fingerprint
+
+  cached_fingerprint="$(awk -F '\t' \
+    -v repository_identity="$repository_identity" \
+    '$1 == "v1" && $2 == repository_identity && NF == 3 && length($3) > 0 { print $3; exit }' \
+    "$repo_fingerprints_cache_file")" || return 1
+  [ -n "$cached_fingerprint" ] || return 1
+  printf '%s\n' "$cached_fingerprint"
+}
+
 read_reflog_signature() {
   local reflog_path="$1"
   local stat_signature
@@ -1574,6 +1674,7 @@ process_repository_list() {
   local recent_repository_identity=""
 
   reset_activity_snapshot
+  load_cached_repository_fingerprints
   : > "$validated_repo_list_file"
   : > "$project_discovery_records_file"
 
@@ -1664,16 +1765,7 @@ process_repository_list() {
 
     repository_identity="$common_dir"
     display_name="$(repository_display_name "$repo_root" "$common_dir")"
-    if ! repository_fingerprint="$(repository_stable_fingerprint "$repo_root" "$common_dir")"; then
-      if [ "$using_cached_repo_list" -eq 1 ]; then
-        log_error "cached repository identity evidence is no longer available; rebuilding repository cache"
-        return 2
-      fi
-      record_invalid_repository "repository-fingerprint-failed"
-      continue
-    fi
     if ! record_field_is_supported "$repository_identity" ||
-       ! record_field_is_supported "$repository_fingerprint" ||
        ! record_field_is_supported "$display_name" ||
        ! record_field_is_supported "$repo_root" ||
        ! record_field_is_supported "$git_dir"; then
@@ -1681,8 +1773,10 @@ process_repository_list() {
       continue
     fi
     printf '%s\n' "$repository_identity" >> "$repository_identity_file"
-    printf '%s\t%s\t%s\n' \
-      "$repository_fingerprint" "$repository_identity" "$display_name" >> "$project_discovery_records_file"
+    # Structural validation passed, so this repository belongs in the cached
+    # list even when its reflog is not readable yet; a freshly initialized
+    # repository stays discoverable across refreshes without a rescan.
+    printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
 
     trap - ERR
     if reflog_path="$(resolve_repository_reflog_path "$git_dir")"; then
@@ -1693,8 +1787,13 @@ process_repository_list() {
     enable_error_trap
     if [ "$resolve_reflog_exit_code" -ne 0 ]; then
       if [ "$using_cached_repo_list" -eq 1 ]; then
-        log_error "cached repository reflog is no longer available; rebuilding repository cache"
-        return 2
+        # A missing reflog is normal for a freshly initialized repository and
+        # must not discard the cached repository list nor force a full rescan
+        # of every authorized root. The repository stays in the cache and is
+        # revalidated on each refresh until its reflog appears.
+        record_invalid_repository "reflog-missing"
+        recovery_has_missing_reflog=1
+        continue
       fi
       record_invalid_repository "reflog-missing"
       recovery_has_missing_reflog=1
@@ -1712,22 +1811,8 @@ process_repository_list() {
       log_error "git reflog path is not a regular file for one repository; preserving previous shared data"
       continue
     fi
-
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$repository_identity" "$display_name" "$repo_root" "$git_dir" "$reflog_path" >> "$repository_records_file"
-    printf '%s\n' "$repo_root" >> "$validated_repo_list_file"
-  done < "$repo_list_file"
-
-  LC_ALL=C sort -u "$repository_identity_file" > "$repo_reflog_file"
-  repository_count="$(awk 'END { print NR + 0 }' "$repo_reflog_file")"
-  LC_ALL=C sort -t $'\t' -k1,1 -k5,5 -k3,3 "$repository_records_file" |
-    awk -F '\t' '!seen[$1 SUBSEP $5]++' > "$unique_repository_records_file"
-  LC_ALL=C sort -u "$validated_repo_list_file" > "$repo_reflog_file"
-  cp "$repo_reflog_file" "$validated_repo_list_file"
-
-  while IFS=$'\t' read -r repository_identity display_name repo_root git_dir reflog_path; do
-    current_repository_candidate="$repo_root"
     readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
+
     trap - ERR
     if reflog_mtime="$(read_reflog_signature "$reflog_path")"; then
       read_reflog_signature_exit_code=0
@@ -1745,6 +1830,60 @@ process_repository_list() {
       fi
       continue
     fi
+
+    # Reuse the cached fingerprint only when the reflog signature proves the
+    # repository is unchanged since both caches were written. A changed
+    # reflog recomputes the fingerprint so a first commit upgrades filesystem
+    # identity evidence to root-object evidence, and an unchanged repository
+    # avoids a per-repository git process on every refresh.
+    repository_fingerprint=""
+    if cached_reflog_events_match "$repository_identity" "$git_dir" "$reflog_path" "$reflog_mtime"; then
+      repository_fingerprint="$(cached_repository_fingerprint "$repository_identity")" || repository_fingerprint=""
+      if [ -n "$repository_fingerprint" ]; then
+        fingerprint_cache_hit_count=$((fingerprint_cache_hit_count + 1))
+      fi
+    fi
+    if [ -z "$repository_fingerprint" ]; then
+      trap - ERR
+      if repository_fingerprint="$(repository_stable_fingerprint "$repo_root" "$common_dir")"; then
+        resolve_fingerprint_exit_code=0
+      else
+        resolve_fingerprint_exit_code="$?"
+      fi
+      enable_error_trap
+      if [ "$resolve_fingerprint_exit_code" -ne 0 ]; then
+        # A transient identity failure (a locked, packing, or overloaded
+        # repository) must not block the refresh nor drop this repository's
+        # events. Keep processing its reflog so counts stay accurate; only the
+        # fingerprint and discovery rows are skipped for this run and heal on
+        # a later refresh.
+        log_error "failed to read git identity evidence for one repository; continuing with its reflog"
+        repository_fingerprint=""
+      fi
+    fi
+    if [ -n "$repository_fingerprint" ]; then
+      if ! record_field_is_supported "$repository_fingerprint"; then
+        record_invalid_repository "unsupported-repository-path-characters"
+        continue
+      fi
+      printf '%s\t%s\t%s\n' \
+        "$repository_fingerprint" "$repository_identity" "$display_name" >> "$project_discovery_records_file"
+      printf 'v1\t%s\t%s\n' "$repository_identity" "$repository_fingerprint" >> "$new_repo_fingerprints_file"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$repository_identity" "$display_name" "$repo_root" "$git_dir" "$reflog_path" "$reflog_mtime" >> "$repository_records_file"
+  done < "$repo_list_file"
+
+  LC_ALL=C sort -u "$repository_identity_file" > "$repo_reflog_file"
+  repository_count="$(awk 'END { print NR + 0 }' "$repo_reflog_file")"
+  LC_ALL=C sort -t $'\t' -k1,1 -k5,5 -k3,3 "$repository_records_file" |
+    awk -F '\t' '!seen[$1 SUBSEP $5]++' > "$unique_repository_records_file"
+  LC_ALL=C sort -u "$validated_repo_list_file" > "$repo_reflog_file"
+  cp "$repo_reflog_file" "$validated_repo_list_file"
+
+  while IFS=$'\t' read -r repository_identity display_name repo_root git_dir reflog_path reflog_mtime; do
+    current_repository_candidate="$repo_root"
 
     if cached_reflog_entry_exists "$repository_identity" "$git_dir" "$reflog_path"; then
       cache_hit_count=$((cache_hit_count + 1))
@@ -2415,13 +2554,24 @@ if [ "$trusted_snapshot_stale" -eq 0 ]; then
   write_plist_string_if_changed "$RECENT_PROJECT_FINGERPRINT_KEY" "$recent_project_fingerprint"
   write_plist_string_if_changed "$PROJECT_DISCOVERY_KEY" "$(project_discovery_payload)"
 fi
-if [ "$invalid_repository_count" -eq 0 ]; then
+# The repository list cache is structural: it may be written even when some
+# repositories are individually invalid (for example a freshly initialized
+# repository whose reflog does not exist yet), so a large workspace with a few
+# such repositories keeps reusing the cached list instead of rescanning every
+# root on each refresh. A failed scan, or a discovery that found repositories
+# but validated none of them, must not overwrite a good cached list.
+if [ "$repository_scan_failure_count" -eq 0 ] &&
+   { [ -s "$validated_repo_list_file" ] ||
+     { [ ! -s "$repo_list_file" ] && [ "$invalid_repository_count" -eq 0 ]; }; }; then
   if [ "$cache_was_reused" -eq 0 ]; then
     write_repository_cache
   fi
+fi
+if [ "$invalid_repository_count" -eq 0 ]; then
   write_repository_stats_cache
+  write_repository_fingerprints_cache
 else
-  log_error "partial refresh: retaining previous repository caches"
+  log_error "partial refresh: retaining previous repository statistics caches"
 fi
 
 if [ "$shared_data_rewritten" -eq 0 ]; then

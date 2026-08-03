@@ -30,13 +30,12 @@ fi
 # 自动查找 entitlements
 ENTITLEMENTS_APP=""
 ENTITLEMENTS_WIDGET=""
-for f in "$ROOT"/*.entitlements "$ROOT"/*/*.entitlements; do
-  [ -f "$f" ] || continue
+while IFS= read -r f; do
   case "$(basename "$f")" in
     *Widget*|*widget*) ENTITLEMENTS_WIDGET="$f" ;;
     *) ENTITLEMENTS_APP="$f" ;;
   esac
-done
+done < <(find "$ROOT" -name "*.entitlements" -not -path "*/.git/*" 2>/dev/null)
 
 # ── 1. 构建 ───────────────────────────────────────────────────
 info "构建 $APP_NAME ..."

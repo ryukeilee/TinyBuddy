@@ -305,7 +305,7 @@ final class TinyBuddyResetServiceTests: XCTestCase {
             try FileManager.default.removeItem(at: $0)
         },
         unregisterLoginItem: @escaping () throws -> Void = {},
-        removePendingNotifications: @escaping () -> Void = {}
+        removePendingNotifications: @escaping @MainActor () -> Void = {}
     ) -> TinyBuddyResetService {
         TinyBuddyResetService(
             standardDefaults: standardDefaults,

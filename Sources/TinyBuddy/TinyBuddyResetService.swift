@@ -86,7 +86,7 @@ final class TinyBuddyResetService {
     private let temporaryDirectoryProvider: () -> URL
     private let removeOwnedItem: (URL) throws -> Void
     private let unregisterLoginItem: (() throws -> Void)?
-    private let removePendingNotifications: () -> Void
+    private let removePendingNotifications: @MainActor () -> Void
 
     init(
         standardDefaults: UserDefaults = .standard,
@@ -104,7 +104,7 @@ final class TinyBuddyResetService {
             try FileManager.default.removeItem(at: $0)
         },
         unregisterLoginItem: (() throws -> Void)? = nil,
-        removePendingNotifications: @escaping () -> Void = {
+        removePendingNotifications: @escaping @MainActor () -> Void = {
             FocusNotificationManager().removeAllPending()
         }
     ) {

@@ -547,6 +547,213 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, repositoryCount)
     }
 
+    func testScriptDeduplicatesFingerprintsAcrossSharedCommonDirWorktrees() throws {
+        let harness = try ScriptHarness()
+        let mainRepoURL = try harness.makeRepository(named: "MainRepo")
+        let worktreeAURL = try harness.makeRepositoryWithExternalGitDir(
+            named: "WorktreeA",
+            commonDirRelativePath: "../../MainRepo/.git"
+        )
+        let worktreeBURL = try harness.makeRepositoryWithExternalGitDir(
+            named: "WorktreeB",
+            commonDirRelativePath: "../../MainRepo/.git"
+        )
+        try harness.writeHeadReflog(
+            for: mainRepoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 5, message: "commit: main")
+                    .replacingOccurrences(
+                        of: "1111111111111111111111111111111111111111",
+                        with: String(format: "%040x", 1)
+                    )
+            ]
+        )
+        try harness.writeHeadReflog(
+            for: worktreeAURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 35, message: "commit: worktree-a")
+                    .replacingOccurrences(
+                        of: "1111111111111111111111111111111111111111",
+                        with: String(format: "%040x", 2)
+                    )
+            ]
+        )
+        try harness.writeHeadReflog(
+            for: worktreeBURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 5, message: "commit: worktree-b")
+                    .replacingOccurrences(
+                        of: "1111111111111111111111111111111111111111",
+                        with: String(format: "%040x", 3)
+                    )
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        // All three repositories resolve to the same canonical common Git
+        // directory, so they are one logical repository whose events are
+        // grouped and deduplicated by object identity.
+        XCTAssertEqual(metrics["repository_count"], "1")
+        XCTAssertEqual(metrics["invalid_repository_count"], "0")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 3)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "MainRepo")
+
+        // The fingerprint cache is keyed by the canonical common directory, so
+        // the shared worktree rows must collapse to a single on-disk entry.
+        let fingerprintsCache = try String(
+            contentsOf: harness.cacheDirectoryURL.appendingPathComponent("repository-fingerprints.tsv"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(fingerprintsCache.split(separator: "\n").count, 1)
+    }
+
+    func testScriptReusesCachedFingerprintsWithoutGitInvocationOnUnchangedRepositories() throws {
+        let harness = try ScriptHarness()
+        let repositoryCount = 20
+        for index in 0..<repositoryCount {
+            let repoURL = try harness.makeRepository(named: String(format: "Project-%03d", index))
+            try harness.writeHeadReflog(
+                for: repoURL,
+                lines: [
+                    harness.reflogLine(
+                        daysOffset: 0,
+                        hour: 9 + index / 6,
+                        minute: (index % 6) * 10,
+                        message: "commit: repository-\(index)"
+                    )
+                ]
+            )
+        }
+        let gitProbe = try harness.makeGitProbe()
+        let environment = ["TINYBUDDY_GIT_BIN": gitProbe.scriptURL.path]
+
+        let firstResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: environment)
+        let firstMetrics = try XCTUnwrap(harness.metrics(from: firstResult.standardOutput))
+        XCTAssertEqual(firstResult.exitCode, 0, firstResult.standardError)
+        XCTAssertEqual(firstMetrics["recomputed_repository_count"], "20")
+        let firstInvocationCount = try harness.gitInvocationCount(from: gitProbe.logURL)
+        XCTAssertGreaterThanOrEqual(firstInvocationCount, repositoryCount)
+
+        let incrementalResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: environment)
+        let incrementalMetrics = try XCTUnwrap(harness.metrics(from: incrementalResult.standardOutput))
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(incrementalResult.exitCode, 0, incrementalResult.standardError)
+        XCTAssertEqual(incrementalMetrics["recomputed_repository_count"], "0")
+        XCTAssertEqual(incrementalMetrics["fingerprint_cache_hit_count"], "20")
+        XCTAssertEqual(try harness.gitInvocationCount(from: gitProbe.logURL), firstInvocationCount)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, repositoryCount)
+
+        let fingerprintsCache = try String(
+            contentsOf: harness.cacheDirectoryURL.appendingPathComponent("repository-fingerprints.tsv"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(fingerprintsCache.split(separator: "\n").count, repositoryCount)
+    }
+
+    func testScriptBatchesAutomationIdentityLookupIntoOneGitInvocation() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectWithEvents")
+        let eventCount = 30
+        let lines = (0..<eventCount).map { index in
+            harness.reflogLine(
+                daysOffset: 0,
+                hour: 9 + index / 6,
+                minute: (index % 6) * 10,
+                message: "commit: event-\(index)"
+            )
+            .replacingOccurrences(
+                of: "1111111111111111111111111111111111111111",
+                with: String(format: "%040x", index + 1)
+            )
+        }
+        try harness.writeHeadReflog(for: repoURL, lines: lines)
+        let gitProbe = try harness.makeGitProbe()
+        let environment = ["TINYBUDDY_GIT_BIN": gitProbe.scriptURL.path]
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: environment)
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, eventCount)
+        // The 30 events span hours 9-13, and each hour crosses two 30-minute
+        // focus blocks (minutes 0-20 and 30-50), yielding 5 hours * 2 blocks.
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 10)
+        XCTAssertEqual(metrics["recomputed_repository_count"], "1")
+        // One fingerprint resolution plus one bounded cat-file identity pass,
+        // instead of one git process per event.
+        XCTAssertEqual(try harness.gitInvocationCount(from: gitProbe.logURL), 2)
+    }
+
+    func testScriptKeepsCountsAccurateWhenRepositoryIdentityReadFailsTransiently() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha")]
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+
+        // A locked or overloaded repository can make identity resolution fail
+        // transiently; its reflog must still be processed so counts stay
+        // accurate and no rescan of every root is forced.
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha"),
+                harness.reflogLine(daysOffset: 0, hour: 10, minute: 20, message: "commit: beta")
+            ]
+        )
+        try harness.setReflogModificationDate(for: repoURL, to: Date().addingTimeInterval(60))
+        let failingProbe = try harness.makeFailingIdentityGitProbe()
+        // Identity resolution falls back to a filesystem fingerprint through
+        // `stat` when the git root-object lookup fails, so both probes must
+        // fail together to simulate a repository whose metadata directory is
+        // temporarily unavailable.
+        let failingStatProbe = try harness.makeFailingIdentityStatProbe(for: repoURL)
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_GIT_BIN": failingProbe.path,
+            "TINYBUDDY_STAT_BIN": failingStatProbe.path,
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertTrue(result.standardError.contains("continuing with its reflog"), result.standardError)
+        XCTAssertEqual(metrics["refresh_outcome"], "success")
+        XCTAssertEqual(metrics["invalid_repository_count"], "0")
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+
+        // A later refresh recomputes the missing fingerprint and keeps the
+        // cached counts.
+        let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let recoveredPlist = try harness.readPreferencesPlist()
+        XCTAssertEqual(recoveredResult.exitCode, 0, recoveredResult.standardError)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        let fingerprintsCache = try String(
+            contentsOf: harness.cacheDirectoryURL.appendingPathComponent("repository-fingerprints.tsv"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(fingerprintsCache.split(separator: "\n").count, 1)
+    }
+
     func testScriptProcessesLargeReflogHistoryWithoutLosingEvents() throws {
         let harness = try ScriptHarness()
         let repoURL = try harness.makeRepository(named: "ProjectWithLargeHistory")
@@ -1386,11 +1593,83 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 1)
         XCTAssertEqual(metrics["refresh_outcome"], "failed")
         XCTAssertTrue(result.standardError.contains("preserving previous shared data"))
-        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 2)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 1)
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+    }
 
+    func testScriptKeepsMissingReflogCachedRepositoryPartialWithoutRescan() throws {
+        let harness = try ScriptHarness()
+        let alphaURL = try harness.makeRepository(named: "ProjectAlpha")
+        let betaURL = try harness.makeRepository(named: "ProjectBeta")
+        // A freshly initialized repository has no reflog until its first commit.
+        let freshRepoURL = try harness.makeRepository(named: "ProjectFresh")
+        let findProbe = try harness.makeFindProbe()
+        try harness.writeHeadReflog(
+            for: alphaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha")]
+        )
+        try harness.writeHeadReflog(
+            for: betaURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: beta")]
+        )
+
+        let initialResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let initialMetrics = try XCTUnwrap(harness.metrics(from: initialResult.standardOutput))
+        XCTAssertEqual(initialResult.exitCode, 0, initialResult.standardError)
+        XCTAssertEqual(initialMetrics["refresh_outcome"], "partial")
+        XCTAssertEqual(initialMetrics["invalid_repository_count"], "1")
+
+        // A cached list containing the fresh repository must not force a full
+        // rescan of every authorized root on each refresh.
+        let partialResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let partialPlist = try harness.readPreferencesPlist()
+        let partialMetrics = try XCTUnwrap(harness.metrics(from: partialResult.standardOutput))
+
+        XCTAssertEqual(partialResult.exitCode, 0, partialResult.standardError)
+        XCTAssertTrue(partialResult.standardError.contains("partial refresh"))
+        XCTAssertEqual(partialMetrics["refresh_outcome"], "partial")
+        XCTAssertEqual(partialMetrics["repository_count"], "3")
+        XCTAssertEqual(partialMetrics["invalid_repository_count"], "1")
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 1)
+        XCTAssertEqual(partialPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(partialPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(partialPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectBeta")
+
+        // A second unchanged refresh stays on the cached list and stays
+        // partial without any additional scan.
+        let repeatedResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        XCTAssertEqual(repeatedResult.exitCode, 0, repeatedResult.standardError)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 1)
+
+        // Once the fresh repository receives its first commit, its events
+        // appear without any scan either.
+        try harness.writeHeadReflog(
+            for: freshRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 11, minute: 20, message: "commit: fresh")]
+        )
+        try harness.setReflogModificationDate(
+            for: freshRepoURL,
+            to: Date().addingTimeInterval(60)
+        )
+        let recoveredResult = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_FIND_BIN": findProbe.scriptURL.path
+        ])
+        let recoveredPlist = try harness.readPreferencesPlist()
+        let recoveredMetrics = try XCTUnwrap(harness.metrics(from: recoveredResult.standardOutput))
+
+        XCTAssertEqual(recoveredResult.exitCode, 0, recoveredResult.standardError)
+        XCTAssertEqual(try harness.recursiveScanInvocationCount(from: findProbe.logURL), 1)
+        XCTAssertEqual(recoveredMetrics["invalid_repository_count"], "0")
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
+        XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 3)
     }
 
     func testScriptPartiallyRebuildsBadCachedRepositoryListThenRecoversOnNextInvocation() throws {
@@ -2159,6 +2438,61 @@ private final class ScriptHarness {
         return FindProbe(scriptURL: scriptURL, logURL: logURL)
     }
 
+    func makeGitProbe() throws -> GitProbe {
+        let scriptURL = rootURL.appendingPathComponent("git-probe.sh")
+        let logURL = rootURL.appendingPathComponent("git-probe.log")
+        let script = """
+        #!/bin/bash
+        printf 'git\\n' >> "\(logURL.path)"
+        exec /usr/bin/git "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return GitProbe(scriptURL: scriptURL, logURL: logURL)
+    }
+
+    func makeFailingIdentityGitProbe() throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("failing-identity-git-probe.sh")
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          case "$argument" in
+            rev-list) exit 1 ;;
+          esac
+        done
+        exec /usr/bin/git "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    func makeFailingIdentityStatProbe(for repoURL: URL) throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("failing-identity-stat-probe.sh")
+        let repositoryName = repoURL.lastPathComponent
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          case "$argument" in
+            */\(repositoryName)/.git) exit 1 ;;
+          esac
+        done
+        exec /usr/bin/stat "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    func gitInvocationCount(from logURL: URL) throws -> Int {
+        guard fileManager.fileExists(atPath: logURL.path) else {
+            return 0
+        }
+
+        let content = try String(contentsOf: logURL, encoding: .utf8)
+        return content.split(separator: "\n").count
+    }
+
     func makeFailingRecursiveFindProbe() throws -> URL {
         let scriptURL = rootURL.appendingPathComponent("failing-find-probe.sh")
         let script = """
@@ -2389,6 +2723,11 @@ private struct ScriptRunResult {
 }
 
 private struct FindProbe {
+    let scriptURL: URL
+    let logURL: URL
+}
+
+private struct GitProbe {
     let scriptURL: URL
     let logURL: URL
 }
