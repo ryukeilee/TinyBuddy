@@ -18,6 +18,7 @@ struct FocusGoalSettingsView: View {
     @State private var quietModeEndHour: Double
     @State private var notificationStatus: NotificationStatus = .unknown
     @State private var hasPendingChanges = false
+    @State private var saveErrorMessage: String?
 
     private enum NotificationStatus: Equatable {
         case unknown
@@ -177,6 +178,11 @@ struct FocusGoalSettingsView: View {
             // MARK: Save
             if hasPendingChanges {
                 Section {
+                    if let saveErrorMessage {
+                        Text(saveErrorMessage)
+                            .foregroundColor(.red)
+                            .font(.callout)
+                    }
                     HStack {
                         Spacer()
                         Button("保存设置") {
@@ -191,6 +197,9 @@ struct FocusGoalSettingsView: View {
         .formStyle(.grouped)
         .task {
             await refreshNotificationStatus()
+        }
+        .onAppear {
+            reloadConfigurationIfIdle()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await refreshNotificationStatus() }
@@ -220,6 +229,21 @@ struct FocusGoalSettingsView: View {
 
     private func markChanged() {
         hasPendingChanges = true
+    }
+
+    /// Re-syncs the form fields from the persisted configuration when the view
+    /// reappears (for example the Settings window is reopened). Skipped while
+    /// the user has unsaved edits so in-progress changes are never clobbered.
+    private func reloadConfigurationIfIdle() {
+        guard !hasPendingChanges else { return }
+        let config = coordinator.configuration
+        dailyGoalMinutes = Double(config.dailyFocusGoalMinutes)
+        continuousThresholdMinutes = Double(config.continuousFocusThresholdMinutes)
+        breakDurationMinutes = Double(config.breakDurationMinutes)
+        isBreakReminderEnabled = config.isBreakReminderEnabled
+        isGoalCompletionEnabled = config.isGoalCompletionEnabled
+        quietModeStartHour = Double(config.quietModeStartHour ?? 22)
+        quietModeEndHour = Double(config.quietModeEndHour ?? 8)
     }
 
     private func refreshNotificationStatus() async {
@@ -256,8 +280,14 @@ struct FocusGoalSettingsView: View {
             quietModeStartHour: Int(quietModeStartHour),
             quietModeEndHour: Int(quietModeEndHour)
         )
-        coordinator.saveConfiguration(config)
+        let saved = coordinator.saveConfiguration(config)
         coordinator.resetEvaluationCache()
+        guard saved else {
+            // Keep the edits and surface the failure so the user can retry.
+            saveErrorMessage = "保存失败：设置未能写入，请重试。"
+            return
+        }
+        saveErrorMessage = nil
         // Reuse the session-derived cache to re-evaluate historical goal
         // progress; this does not rescan sessions or schedule background work.
         onConfigurationSaved()

@@ -46,8 +46,11 @@ public struct FocusGoalConfiguration: Codable, Equatable, Sendable {
         self.breakDurationMinutes = max(1, breakDurationMinutes)
         self.isBreakReminderEnabled = isBreakReminderEnabled
         self.isGoalCompletionEnabled = isGoalCompletionEnabled
-        self.quietModeStartHour = quietModeStartHour
-        self.quietModeEndHour = quietModeEndHour
+        // Clamp quiet-hour endpoints into 0–23; a persisted out-of-range value
+        // must fall back to a valid interval instead of silently producing an
+        // unbounded quiet period. nil stays nil (quiet mode disabled).
+        self.quietModeStartHour = quietModeStartHour.map { min(max($0, 0), 23) }
+        self.quietModeEndHour = quietModeEndHour.map { min(max($0, 0), 23) }
     }
 }
 

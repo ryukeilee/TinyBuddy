@@ -69,13 +69,56 @@ final class TinyBuddyConfigCoordinator {
     }
 
     func reloadPersistedConfig() {
-        guard let persisted = configStore.load(), persisted != lastPublishedConfig else {
+        guard let persisted = configStore.load() else {
+            return
+        }
+
+        // A coalesced proposal may still be queued (not yet flushed) when a
+        // direct-store write such as an exclusion-rule change lands. Merge the
+        // queued intent on top of the freshly loaded config so neither the
+        // direct write nor the pending proposal is silently lost.
+        if let pending = pendingConfig, pending != lastPublishedConfig {
+            let merged = mergingPendingIntent(pending, into: persisted)
+            if merged != persisted {
+                coalesceConfigUpdate(merged)
+                return
+            }
+        }
+
+        guard persisted != lastPublishedConfig else {
             return
         }
         pendingConfig = nil
         coalesceWorkItem?.cancel()
         coalesceWorkItem = nil
         publishConfig(persisted)
+    }
+
+    /// Applies the fields a queued proposal actually changed (relative to what
+    /// was last published) onto the freshly loaded persisted config. Exclusion
+    /// rules are intentionally not carried over: the direct settings-view write
+    /// that triggered this reload is the source of truth for exclusions.
+    private func mergingPendingIntent(
+        _ pending: TinyBuddyAppConfig,
+        into persisted: TinyBuddyAppConfig
+    ) -> TinyBuddyAppConfig {
+        guard let last = lastPublishedConfig else {
+            return persisted
+        }
+        var merged = persisted
+        if pending.scanRootPaths != last.scanRootPaths {
+            merged = merged.withIncrementedVersion(scanRootPaths: pending.scanRootPaths)
+        }
+        if pending.launchAtLoginEnabled != last.launchAtLoginEnabled {
+            merged = merged.withIncrementedVersion(launchAtLoginEnabled: pending.launchAtLoginEnabled)
+        }
+        if pending.hudEnabled != last.hudEnabled {
+            merged = merged.withIncrementedVersion(hudEnabled: pending.hudEnabled)
+        }
+        if pending.refreshStrategy != last.refreshStrategy {
+            merged = merged.withIncrementedVersion(refreshStrategy: pending.refreshStrategy)
+        }
+        return merged
     }
 
     func proposeScanRootsChange() {

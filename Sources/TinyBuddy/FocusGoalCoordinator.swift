@@ -26,10 +26,17 @@ final class FocusGoalCoordinator {
         preferencesStore.loadConfiguration()
     }
 
-    /// Updates and persists the configuration.
-    func saveConfiguration(_ config: FocusGoalConfiguration) {
-        preferencesStore.saveConfiguration(config)
-        logger.notice("Focus goal configuration saved")
+    /// Updates and persists the configuration. Returns whether the write
+    /// succeeded so callers can surface a failure instead of discarding edits.
+    @discardableResult
+    func saveConfiguration(_ config: FocusGoalConfiguration) -> Bool {
+        let saved = preferencesStore.saveConfiguration(config)
+        if saved {
+            logger.notice("Focus goal configuration saved")
+        } else {
+            logger.error("Focus goal configuration could not be persisted")
+        }
+        return saved
     }
 
     /// Returns goal progress info for display.

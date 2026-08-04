@@ -471,6 +471,49 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testReloadPersistedExclusionsPreservesQueuedLaunchAtLoginIntent() throws {
+        var rebuildCallCount = 0
+        let (coordinator, storage, store, _) = makeCoordinator(
+            rebuildClosure: { rebuildCallCount += 1 }
+        )
+
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: false,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(store.save(config), .saved)
+        coordinator.start()
+
+        // Queue a launch-at-login change via the coalesced path. The intent is
+        // not yet persisted when the next external write lands.
+        try coordinator.proposeLaunchAtLoginChange(true)
+
+        // Within the coalesce window a direct exclusion-rule write lands, which
+        // triggers reloadPersistedConfig through the settings-change notification.
+        let base = store.load()!
+        let withExclusions = base.withIncrementedVersion(exclusionRules: [
+            TinyBuddyExclusionRule(id: "private", pattern: "Teams/Private")
+        ])
+        XCTAssertEqual(store.save(withExclusions), .saved)
+        coordinator.reloadPersistedConfig()
+
+        // The queued launch-at-login intent must survive alongside the exclusions
+        // instead of being cancelled and silently lost.
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let current = coordinator.currentConfig()
+            XCTAssertEqual(current?.launchAtLoginEnabled, true)
+            XCTAssertEqual(current?.exclusionRules.first?.pattern, "Teams/Private")
+            XCTAssertEqual(current?.configVersion, 3)
+            // Exclusions changed, so the monitor rebuild is required and happens.
+            XCTAssertEqual(rebuildCallCount, 1)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
     func testRapidChangesCoalesce() {
         var rebuildCallCount = 0
         let (coordinator, storage, _, _) = makeCoordinator(
