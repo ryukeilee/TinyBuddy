@@ -18,6 +18,7 @@ final class TinyBuddyConfigCoordinator {
     private let scanRootsProvider: ScanRootsProvider
     private let rebuildRepositoryChangeMonitor: RepositoryChangeMonitorRebuilder
     private let rescheduleTimer: TimerRescheduler
+    private let loginItemManager: TinyBuddyLoginItemManager
     private let notificationCenter: NotificationCenter
 
     private var lastPublishedConfig: TinyBuddyAppConfig?
@@ -40,12 +41,14 @@ final class TinyBuddyConfigCoordinator {
         scanRootsProvider: @escaping ScanRootsProvider,
         rebuildRepositoryChangeMonitor: @escaping RepositoryChangeMonitorRebuilder = {},
         rescheduleTimer: @escaping TimerRescheduler = {},
+        loginItemManager: TinyBuddyLoginItemManager = .shared,
         notificationCenter: NotificationCenter = .default
     ) {
         self.configStore = configStore
         self.scanRootsProvider = scanRootsProvider
         self.rebuildRepositoryChangeMonitor = rebuildRepositoryChangeMonitor
         self.rescheduleTimer = rescheduleTimer
+        self.loginItemManager = loginItemManager
         self.notificationCenter = notificationCenter
     }
 
@@ -127,15 +130,53 @@ final class TinyBuddyConfigCoordinator {
         }
     }
 
-    func proposeLaunchAtLoginChange(_ enabled: Bool) {
+    /// Drives the real SMAppService state first so the persisted intent only
+    /// moves when the actual registration/removal succeeded. The idempotent
+    /// manager call makes repeated proposes harmless.
+    func proposeLaunchAtLoginChange(_ enabled: Bool) throws {
         guard let current = lastPublishedConfig ?? buildCurrentConfig() else {
             return
         }
         guard current.launchAtLoginEnabled != enabled else {
             return
         }
+        try loginItemManager.setEnabled(enabled)
         let updated = current.withIncrementedVersion(launchAtLoginEnabled: enabled)
         coalesceConfigUpdate(updated)
+    }
+
+    /// Rewrites the persisted intent to match the actual SMAppService state
+    /// when that state is unambiguous. Ambiguous states (`.notFound`/`.error`)
+    /// are left to the bounded launch recovery and never erase user intent.
+    /// Uses the same coalesced persistence path; no second persistence lane.
+    func reconcileLaunchAtLoginIntent() {
+        guard let current = lastPublishedConfig else {
+            return
+        }
+        let target: Bool?
+        switch loginItemManager.cachedStatus {
+        case .enabled:
+            target = true
+        case .notRegistered:
+            target = false
+        case .requiresApproval:
+            // A pending approval still expresses the user's enable intent.
+            target = true
+        case .notFound, .error:
+            target = nil
+        }
+        guard let target else {
+            return
+        }
+        guard current.launchAtLoginEnabled != target else {
+            return
+        }
+        // A propose() may already have queued the identical intent; do not
+        // write the same value through a second coalesce slot.
+        if pendingConfig?.launchAtLoginEnabled == target {
+            return
+        }
+        coalesceConfigUpdate(current.withIncrementedVersion(launchAtLoginEnabled: target))
     }
 
     func proposeHUDEnabledChange(_ enabled: Bool) {
@@ -278,10 +319,12 @@ final class TinyBuddyConfigCoordinator {
         accessResult.roots.forEach { $0.stopAccessing() }
 
         guard let loaded else {
+            // No persisted config yet: seed the intent from the live login-item
+            // state once so the first persisted config matches reality.
             return TinyBuddyAppConfig(
                 configVersion: 1,
                 scanRootPaths: scanRootPaths,
-                launchAtLoginEnabled: TinyBuddyLoginItemManager.shared.isEnabled,
+                launchAtLoginEnabled: loginItemManager.isEnabled,
                 hudEnabled: true,
                 refreshStrategy: .automatic,
                 dayIdentifier: dayIdentifier()
@@ -290,9 +333,11 @@ final class TinyBuddyConfigCoordinator {
 
         let currentRoots = Set(loaded.scanRootPaths)
         let liveRoots = Set(scanRootPaths)
+        // A persisted intent is authoritative and must never be clobbered by
+        // the live status; external changes are folded back in by
+        // reconcileLaunchAtLoginIntent() instead.
         let updated = loaded.withIncrementedVersion(
             scanRootPaths: currentRoots != liveRoots ? scanRootPaths : nil,
-            launchAtLoginEnabled: TinyBuddyLoginItemManager.shared.isEnabled,
             dayIdentifier: dayIdentifier()
         )
         return updated

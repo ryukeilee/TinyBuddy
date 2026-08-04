@@ -5,9 +5,62 @@ import XCTest
 final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     private let dayID = "2026-07-20"
 
+    private enum TestError: Error {
+        case denied
+    }
+
+    /// Stateful fake login-item provider: register/unregister mutate the
+    /// status so the manager's refresh path observes real transitions. No
+    /// test ever calls the real SMAppService register/unregister.
+    private final class FakeLoginItemState {
+        var status: TinyBuddyLoginItemManager.Status
+        var registerCallCount = 0
+        var unregisterCallCount = 0
+        var registerError: TestError?
+
+        init(status: TinyBuddyLoginItemManager.Status = .notRegistered) {
+            self.status = status
+        }
+
+        func register() throws {
+            registerCallCount += 1
+            if let registerError { throw registerError }
+            status = .enabled
+        }
+
+        func unregister() {
+            unregisterCallCount += 1
+            status = .notRegistered
+        }
+    }
+
+    @MainActor
+    private func makeLoginItemManager(state: FakeLoginItemState) -> TinyBuddyLoginItemManager {
+        TinyBuddyLoginItemManager(
+            statusProvider: { state.status },
+            register: { try state.register() },
+            unregister: { state.unregister() },
+            notificationCenter: NotificationCenter()
+        )
+    }
+
+    @MainActor
+    private func makeStore(storage: InMemoryConfigStorage) -> TinyBuddyConfigStore {
+        TinyBuddyConfigStore(
+            directPreferencesProvider: { storage.values },
+            synchronizeReads: {},
+            writeValue: { value, key in
+                storage.values[key] = value
+                return true
+            },
+            synchronizeWrites: { true },
+            readFailureProvider: { nil }
+        )
+    }
+
     @MainActor
     func testStartLoadsPersistedConfig() {
-        let (coordinator, storage, _, _, _) = makeCoordinator()
+        let (coordinator, storage, _, _) = makeCoordinator()
         let config = TinyBuddyAppConfig(
             configVersion: 1,
             scanRootPaths: ["/Users/test/Code"],
@@ -33,7 +86,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     func testReloadPersistedExclusionsRebuildsMonitoringAndPublishesConfig() {
         var rebuildCount = 0
         var rescheduleCount = 0
-        let (coordinator, _, store, _, _) = makeCoordinator(
+        let (coordinator, _, store, _) = makeCoordinator(
             rebuildClosure: { rebuildCount += 1 },
             rescheduleClosure: { rescheduleCount += 1 }
         )
@@ -79,7 +132,8 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
                     issue: .authorizationInvalid,
                     authorizations: [authorization]
                 )
-            }
+            },
+            loginItemManager: makeLoginItemManager(state: FakeLoginItemState())
         )
 
         coordinator.start()
@@ -90,7 +144,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
 
     @MainActor
     func testStartPublishesInitialConfigWhenNoPersistedConfig() {
-        let (coordinator, _, _, _, _) = makeCoordinator()
+        let (coordinator, _, _, _) = makeCoordinator()
         coordinator.start()
         XCTAssertNotNil(coordinator.currentConfig())
         XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
@@ -100,7 +154,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     func testProposeScanRootsChangeTriggersRebuild() {
         var rebuildCallCount = 0
         var rescheduleCallCount = 0
-        let (coordinator, storage, _, _, _) = makeCoordinator(
+        let (coordinator, storage, _, _) = makeCoordinator(
             rebuildClosure: { rebuildCallCount += 1 },
             rescheduleClosure: { rescheduleCallCount += 1 }
         )
@@ -138,7 +192,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     @MainActor
     func testProposeUnchangedRootsDoesNotTriggerRebuild() {
         var rebuildCallCount = 0
-        let (coordinator, storage, _, _, _) = makeCoordinator(
+        let (coordinator, storage, _, _) = makeCoordinator(
             rebuildClosure: { rebuildCallCount += 1 }
         )
 
@@ -175,7 +229,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     func testReconcilePersistedScanRootsUpdatesProjectionWithoutStartingAnotherRefresh() {
         var rebuildCallCount = 0
         var rescheduleCallCount = 0
-        let (coordinator, _, store, _, _) = makeCoordinator(
+        let (coordinator, _, store, _) = makeCoordinator(
             rebuildClosure: { rebuildCallCount += 1 },
             rescheduleClosure: { rescheduleCallCount += 1 }
         )
@@ -198,10 +252,12 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testProposeLaunchAtLoginChange() {
+    func testProposeLaunchAtLoginChangeDrivesManagerAndPersistsIntent() throws {
         var rebuildCallCount = 0
-        let (coordinator, storage, _, _, _) = makeCoordinator(
-            rebuildClosure: { rebuildCallCount += 1 }
+        let loginItemState = FakeLoginItemState()
+        let (coordinator, storage, _, _) = makeCoordinator(
+            rebuildClosure: { rebuildCallCount += 1 },
+            loginItemState: loginItemState
         )
 
         let config = TinyBuddyAppConfig(
@@ -222,7 +278,9 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
         XCTAssertEqual(store.save(config), .saved)
         coordinator.start()
 
-        coordinator.proposeLaunchAtLoginChange(true)
+        try coordinator.proposeLaunchAtLoginChange(true)
+        XCTAssertEqual(loginItemState.registerCallCount, 1)
+        XCTAssertEqual(loginItemState.unregisterCallCount, 0)
 
         let expectation = expectation(description: "coalesce")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -235,9 +293,187 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testProposeLaunchAtLoginChangeSkipsWhenIntentAlreadyMatches() throws {
+        let loginItemState = FakeLoginItemState()
+        let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: true,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+        coordinator.start()
+
+        try coordinator.proposeLaunchAtLoginChange(true)
+
+        XCTAssertEqual(loginItemState.registerCallCount, 0)
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, true)
+            XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testProposeLaunchAtLoginChangeFailureDoesNotPersist() {
+        let loginItemState = FakeLoginItemState()
+        loginItemState.registerError = .denied
+        let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: false,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+        coordinator.start()
+
+        XCTAssertThrowsError(try coordinator.proposeLaunchAtLoginChange(true)) { error in
+            XCTAssertEqual(error as? TinyBuddyLoginItemError, .registrationFailed)
+        }
+        XCTAssertEqual(loginItemState.registerCallCount, 1)
+
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, false)
+            XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testBuildCurrentConfigSeedsLaunchAtLoginFromManagerWhenNoPersistedConfig() {
+        let loginItemState = FakeLoginItemState(status: .enabled)
+        let (coordinator, _, _, _) = makeCoordinator(loginItemState: loginItemState)
+        coordinator.start()
+        XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, true)
+        XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
+    }
+
+    @MainActor
+    func testBuildCurrentConfigDoesNotClobberPersistedLaunchAtLoginWithLiveStatus() throws {
+        let loginItemState = FakeLoginItemState(status: .notRegistered)
+        let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: true,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+
+        // Without start() the propose path falls back to buildCurrentConfig(),
+        // which must keep the persisted intent instead of the live status.
+        try coordinator.proposeHUDEnabledChange(false)
+
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, true)
+            XCTAssertEqual(coordinator.currentConfig()?.hudEnabled, false)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testReconcileLaunchAtLoginIntentRewritesIntentFromActualState() {
+        let loginItemState = FakeLoginItemState(status: .enabled)
+        let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: false,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+        coordinator.start()
+
+        coordinator.reconcileLaunchAtLoginIntent()
+
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, true)
+            XCTAssertEqual(coordinator.currentConfig()?.configVersion, 2)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testReconcileLaunchAtLoginIntentTurnsOffWhenSystemRemovedItem() {
+        let loginItemState = FakeLoginItemState(status: .notRegistered)
+        let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: true,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+        coordinator.start()
+
+        coordinator.reconcileLaunchAtLoginIntent()
+
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, false)
+            XCTAssertEqual(coordinator.currentConfig()?.configVersion, 2)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testReconcileLaunchAtLoginIntentTreatsRequiresApprovalAsEnabledIntent() {
+        let loginItemState = FakeLoginItemState(status: .requiresApproval)
+        let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+        let config = TinyBuddyAppConfig(
+            configVersion: 1,
+            launchAtLoginEnabled: false,
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+        coordinator.start()
+
+        coordinator.reconcileLaunchAtLoginIntent()
+
+        let expectation = expectation(description: "coalesce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, true)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    @MainActor
+    func testReconcileLaunchAtLoginIntentSkipsAmbiguousStates() {
+        for status in [TinyBuddyLoginItemManager.Status.notFound, .error] {
+            let loginItemState = FakeLoginItemState(status: status)
+            let (coordinator, storage, _, _) = makeCoordinator(loginItemState: loginItemState)
+            let config = TinyBuddyAppConfig(
+                configVersion: 1,
+                launchAtLoginEnabled: true,
+                dayIdentifier: dayID
+            )
+            XCTAssertEqual(makeStore(storage: storage).save(config), .saved)
+            coordinator.start()
+
+            coordinator.reconcileLaunchAtLoginIntent()
+
+            let expectation = expectation(description: "coalesce")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                XCTAssertEqual(coordinator.currentConfig()?.launchAtLoginEnabled, true)
+                XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
+                XCTAssertEqual(loginItemState.registerCallCount, 0)
+                expectation.fulfill()
+            }
+            wait(for: [expectation], timeout: 2)
+        }
+    }
+
+    @MainActor
     func testRapidChangesCoalesce() {
         var rebuildCallCount = 0
-        let (coordinator, storage, _, _, _) = makeCoordinator(
+        let (coordinator, storage, _, _) = makeCoordinator(
             rebuildClosure: { rebuildCallCount += 1 }
         )
 
@@ -273,7 +509,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
 
     @MainActor
     func testConfigGenerationAdvancesOnPublish() {
-        let (coordinator, storage, _, _, _) = makeCoordinator()
+        let (coordinator, storage, _, _) = makeCoordinator()
 
         let config = TinyBuddyAppConfig(
             configVersion: 1,
@@ -308,7 +544,7 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     @MainActor
     func testPersistenceFailureKeepsOldConfig() {
         var writeCallCount = 0
-        let (coordinator, storage, _, _, _) = makeCoordinator()
+        let (coordinator, storage, _, _) = makeCoordinator()
 
         let config = TinyBuddyAppConfig(
             configVersion: 1,
@@ -335,7 +571,8 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
             configStore: store,
             scanRootsProvider: { TinyBuddyTestConfigRootsProvider.result() },
             rebuildRepositoryChangeMonitor: {},
-            rescheduleTimer: {}
+            rescheduleTimer: {},
+            loginItemManager: makeLoginItemManager(state: FakeLoginItemState())
         )
         coordinator2.start()
         XCTAssertEqual(coordinator2.currentConfig()?.hudEnabled, true)
@@ -357,8 +594,9 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
     @MainActor
     private func makeCoordinator(
         rebuildClosure: @escaping () -> Void = {},
-        rescheduleClosure: @escaping () -> Void = {}
-    ) -> (TinyBuddyConfigCoordinator, InMemoryConfigStorage, TinyBuddyConfigStore, Int, Int) {
+        rescheduleClosure: @escaping () -> Void = {},
+        loginItemState: FakeLoginItemState = FakeLoginItemState()
+    ) -> (TinyBuddyConfigCoordinator, InMemoryConfigStorage, TinyBuddyConfigStore, FakeLoginItemState) {
         let storage = InMemoryConfigStorage()
         let configStore = TinyBuddyConfigStore(
             directPreferencesProvider: { storage.values },
@@ -374,9 +612,10 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
             configStore: configStore,
             scanRootsProvider: { TinyBuddyTestConfigRootsProvider.result() },
             rebuildRepositoryChangeMonitor: rebuildClosure,
-            rescheduleTimer: rescheduleClosure
+            rescheduleTimer: rescheduleClosure,
+            loginItemManager: makeLoginItemManager(state: loginItemState)
         )
-        return (coordinator, storage, configStore, 0, 0)
+        return (coordinator, storage, configStore, loginItemState)
     }
 }
 

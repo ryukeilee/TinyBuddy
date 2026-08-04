@@ -442,12 +442,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
         registerSettingsChangeObserver()
+        registerLoginItemChangeObserver()
         timeEnvironmentChangeMonitor.start()
         _ = timeCalibrator.calibrate()
         configCoordinator.start()
         // Keep the path projection aligned with bookmarks that followed a
         // moved directory, without triggering a second refresh at launch.
         configCoordinator.reconcilePersistedScanRoots()
+        // === Login-item state sync & bounded recovery ===
+        //
+        // SMAppService has no change notifications. Refresh the cached status
+        // at launch, repair a stale registration only when the persisted
+        // intent is enabled and the system reports a missing/error service
+        // (upgrade, reinstall, or app path replacement), then rewrite the
+        // persisted intent from the unambiguous actual state. Every step is
+        // best-effort: a failure is logged and must never interrupt HUD,
+        // Widget, focus engine, or background refresh initialization below.
+        let loginItemManager = TinyBuddyLoginItemManager.shared
+        loginItemManager.refreshStatus()
+        do {
+            try loginItemManager.recoverIfNeeded(
+                intentEnabled: configCoordinator.currentConfig()?.launchAtLoginEnabled ?? false
+            )
+        } catch {
+            tinyBuddyStartupLogger.error(
+                "login item recovery failed reason=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+        configCoordinator.reconcileLaunchAtLoginIntent()
         gitActivityRefreshCoordinator.start(
             isApplicationActive: NSApp.isActive,
             isInterfaceVisible: isHUDVisible,
@@ -834,6 +856,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func registerLoginItemChangeObserver() {
+        // A successful settings-toggle change persists the intent through the
+        // coordinator's single coalesced path. The manager call inside propose
+        // is idempotent, so this cannot double-register.
+        authorizationCommandObservers.append(
+            observeAuthorizationCommand(named: .tinyBuddyLaunchAtLoginChangeRequested) { [weak self] notification in
+                self?.handleLaunchAtLoginChangeRequested(notification)
+            }
+        )
+        // Any observed actual-state change (launch refresh, activation refresh,
+        // settings view onAppear) folds back into the persisted intent.
+        authorizationCommandObservers.append(
+            observeAuthorizationCommand(named: .tinyBuddyLoginItemStatusDidChange) { [weak self] _ in
+                self?.configCoordinator.reconcileLaunchAtLoginIntent()
+            }
+        )
+    }
+
+    private func handleLaunchAtLoginChangeRequested(_ notification: Notification) {
+        let enabled = notification.userInfo?[TinyBuddyLoginItemCommand.enabledKey] as? Bool ?? false
+        do {
+            try configCoordinator.proposeLaunchAtLoginChange(enabled)
+        } catch {
+            // The settings view already surfaced the failure; only the
+            // persisted intent must not move.
+            tinyBuddyStartupLogger.error(
+                "launch-at-login change failed reason=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Relinquish primary instance ownership so the next launch can claim it.
         TinyBuddyInstanceCoordinator.shared.relinquishOwnership(
@@ -864,6 +917,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A foreground return is a user-driven chance to roll the week/day
         // view forward. This only reuses the in-memory session cache.
         refreshFocusHistoryForPresentation()
+        // The user may have changed the login item in System Settings while
+        // the app was in the background; refresh the cached status so the
+        // settings toggle and the persisted intent stay in sync.
+        TinyBuddyLoginItemManager.shared.refreshStatus()
     }
 
     func applicationDidResignActive(_ notification: Notification) {

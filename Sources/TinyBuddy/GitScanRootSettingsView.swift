@@ -26,6 +26,13 @@ extension Notification.Name {
     static let tinyBuddyResetRequested = Notification.Name(
         "TinyBuddy.resetRequested"
     )
+    static let tinyBuddyLaunchAtLoginChangeRequested = Notification.Name(
+        "TinyBuddy.launchAtLoginChangeRequested"
+    )
+}
+
+enum TinyBuddyLoginItemCommand {
+    static let enabledKey = "TinyBuddy.loginItemEnabled"
 }
 
 enum GitScanRootAuthorizationCommand {
@@ -37,21 +44,28 @@ enum GitScanRootAuthorizationCommand {
 final class GitScanRootSettingsViewModel: ObservableObject {
     @Published private(set) var authorizations: [GitScanRootAuthorization] = []
     @Published private(set) var exclusionRules: [TinyBuddyExclusionRule] = []
+    @Published private(set) var launchAtLoginEnabled: Bool
+    @Published var loginItemErrorMessage: String?
 
     private let store: GitScanRootAuthorizationStore
     private let configStore: TinyBuddyConfigStore
+    private let loginItemManager: TinyBuddyLoginItemManager
     private let notificationCenter: NotificationCenter
     private nonisolated(unsafe) var authorizationsDidChangeObserver: NSObjectProtocol?
     private nonisolated(unsafe) var configDidChangeObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var loginItemStatusDidChangeObserver: NSObjectProtocol?
 
     init(
         store: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
         configStore: TinyBuddyConfigStore = TinyBuddyConfigStore(),
+        loginItemManager: TinyBuddyLoginItemManager = .shared,
         notificationCenter: NotificationCenter = .default
     ) {
         self.store = store
         self.configStore = configStore
+        self.loginItemManager = loginItemManager
         self.notificationCenter = notificationCenter
+        self.launchAtLoginEnabled = loginItemManager.isEnabled
         reloadAuthorizations()
         reloadExclusionRules()
         authorizationsDidChangeObserver = notificationCenter.addObserver(
@@ -70,6 +84,15 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.reloadExclusionRules()
+            }
+        }
+        loginItemStatusDidChangeObserver = notificationCenter.addObserver(
+            forName: .tinyBuddyLoginItemStatusDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshLoginItemStatus()
             }
         }
     }
@@ -122,6 +145,50 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         exclusionRules = configStore.load()?.exclusionRules ?? []
     }
 
+    /// Re-queries the login-item state and mirrors it into the toggle. Called
+    /// on view appear, on status-change notifications, and after every toggle.
+    func refreshLoginItemStatus() {
+        loginItemManager.refreshStatus()
+        launchAtLoginEnabled = loginItemManager.isEnabled
+        switch loginItemManager.cachedStatus {
+        case .enabled, .notRegistered:
+            loginItemErrorMessage = nil
+        case .requiresApproval, .notFound, .error:
+            break
+        }
+    }
+
+    /// Drives the real login-item state without swallowing failures. On
+    /// failure the UI rolls back (the toggle always reflects the actual
+    /// cached status) and a Chinese error/guidance message is published.
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try loginItemManager.setEnabled(enabled)
+        } catch {
+            if loginItemManager.cachedStatus == .requiresApproval {
+                loginItemErrorMessage = "登录启动项需要你在「系统设置 › 通用 › 登录项」中批准后才能生效。"
+            } else {
+                loginItemErrorMessage = "无法更改登录启动项，请稍后重试。"
+            }
+            // The failure left the actual state untouched; mirror the cached
+            // status back into the toggle so the UI rolls back.
+            launchAtLoginEnabled = loginItemManager.isEnabled
+            return
+        }
+        loginItemErrorMessage = nil
+        refreshLoginItemStatus()
+        if enabled, loginItemManager.cachedStatus == .requiresApproval {
+            loginItemErrorMessage = "已请求启用登录启动项，请在「系统设置 › 通用 › 登录项」中批准。"
+        }
+        // Ask the AppDelegate to persist the intent through the coordinator's
+        // single coalesced persistence path.
+        notificationCenter.post(
+            name: .tinyBuddyLaunchAtLoginChangeRequested,
+            object: nil,
+            userInfo: [TinyBuddyLoginItemCommand.enabledKey: enabled]
+        )
+    }
+
     private func persistExclusionRules(_ rules: [TinyBuddyExclusionRule]) -> Bool {
         guard let current = configStore.load() else {
             return false
@@ -153,6 +220,9 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         }
         if let configDidChangeObserver {
             notificationCenter.removeObserver(configDidChangeObserver)
+        }
+        if let loginItemStatusDidChangeObserver {
+            notificationCenter.removeObserver(loginItemStatusDidChangeObserver)
         }
     }
 }
@@ -253,14 +323,8 @@ struct GitScanRootSettingsView: View {
                 .accessibilityHidden(true)
 
             Toggle(isOn: Binding(
-                get: { TinyBuddyLoginItemManager.shared.isEnabled },
-                set: { newValue in
-                    try? TinyBuddyLoginItemManager.shared.setEnabled(newValue)
-                    NotificationCenter.default.post(
-                        name: .tinyBuddySettingsDidChange,
-                        object: nil
-                    )
-                }
+                get: { viewModel.launchAtLoginEnabled },
+                set: { newValue in viewModel.setLaunchAtLogin(newValue) }
             )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("登录时启动 TinyBuddy")
@@ -272,6 +336,14 @@ struct GitScanRootSettingsView: View {
             }
             .toggleStyle(.switch)
             .accessibilityHint("启用后，TinyBuddy 会在你登录 macOS 时自动启动")
+            .onAppear { viewModel.refreshLoginItemStatus() }
+
+            if let message = viewModel.loginItemErrorMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("登录启动项设置提示：\(message)")
+            }
 
             Divider()
                 .accessibilityHidden(true)
