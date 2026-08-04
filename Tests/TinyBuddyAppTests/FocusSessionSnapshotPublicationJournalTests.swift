@@ -62,16 +62,19 @@ final class FocusSessionSnapshotPublicationJournalTests: XCTestCase {
 
     func testHistoryPublicationStatusCanBeReconstructedForStartupReplay() {
         let active = historyPublication(revision: 9, goalMinutes: 60, isFocusSessionActive: true)
-        let ended = historyPublication(revision: 10, goalMinutes: 60, isFocusSessionActive: false)
+        let paused = historyPublication(revision: 10, goalMinutes: 60, isFocusSessionPaused: true)
+        let ended = historyPublication(revision: 11, goalMinutes: 60, isFocusSessionActive: false)
 
         XCTAssertEqual(FocusHistoryPublicationStatus.status(for: active), .focusing)
+        XCTAssertEqual(FocusHistoryPublicationStatus.status(for: paused), .focusing)
         XCTAssertEqual(FocusHistoryPublicationStatus.status(for: ended), .completedOnce)
     }
 
     private func historyPublication(
         revision: Int64,
         goalMinutes: Int,
-        isFocusSessionActive: Bool = false
+        isFocusSessionActive: Bool = false,
+        isFocusSessionPaused: Bool = false
     ) -> FocusHistoryPublication {
         let day = FocusHistoryDay(
             dayIdentifier: "2026-07-21",
@@ -101,7 +104,8 @@ final class FocusSessionSnapshotPublicationJournalTests: XCTestCase {
                 ),
                 currentGoalStreakDays: day.isGoalMet == true ? 1 : 0
             ),
-            isFocusSessionActive: isFocusSessionActive
+            isFocusSessionActive: isFocusSessionActive,
+            isFocusSessionPaused: isFocusSessionPaused
         )
     }
 }

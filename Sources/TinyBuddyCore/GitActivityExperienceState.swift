@@ -58,7 +58,7 @@ public enum GitActivityExperienceState: Equatable, Sendable {
             self = .failed
         case .partial:
             self = .partial
-        case .idle, .focusing, .completedToday:
+        case .idle, .focusing, .paused, .completedToday:
             self = .ready
         }
     }

@@ -203,26 +203,34 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
     /// revision as history lets HUD and Widget status update atomically rather
     /// than reading a newer in-memory engine state from a delayed callback.
     public let isFocusSessionActive: Bool
+    /// Whether the authoritative session is open but paused. This is kept
+    /// beside `isFocusSessionActive` so every consumer can distinguish a
+    /// deliberate pause from an ended/idle session without consulting a
+    /// process-local manual-control projection.
+    public let isFocusSessionPaused: Bool
 
     public init(
         revision: Int64,
         snapshot: FocusHistorySnapshot,
-        isFocusSessionActive: Bool = false
+        isFocusSessionActive: Bool = false,
+        isFocusSessionPaused: Bool = false
     ) {
         self.revision = max(0, revision)
         self.snapshot = snapshot
         self.isFocusSessionActive = isFocusSessionActive
+        self.isFocusSessionPaused = isFocusSessionPaused
     }
 
     private enum CodingKeys: String, CodingKey {
         case revision
         case snapshot
         case isFocusSessionActive
+        case isFocusSessionPaused
     }
 
-    /// Older shared snapshots did not encode the live-state bit. They remain
-    /// readable as non-running until the primary engine publishes a fresh,
-    /// revision-bound snapshot.
+    /// Older shared snapshots did not encode the live-state bits. They remain
+    /// readable as non-running/non-paused until the primary engine publishes a
+    /// fresh, revision-bound snapshot.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         revision = try container.decode(Int64.self, forKey: .revision)
@@ -231,6 +239,10 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .isFocusSessionActive
         ) ?? false
+        isFocusSessionPaused = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isFocusSessionPaused
+        ) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -238,6 +250,7 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
         try container.encode(revision, forKey: .revision)
         try container.encode(snapshot, forKey: .snapshot)
         try container.encode(isFocusSessionActive, forKey: .isFocusSessionActive)
+        try container.encode(isFocusSessionPaused, forKey: .isFocusSessionPaused)
     }
 }
 

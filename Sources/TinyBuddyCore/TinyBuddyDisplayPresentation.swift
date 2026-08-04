@@ -40,6 +40,7 @@ public enum TinyBuddyDisplayState: String, CaseIterable, Equatable, Sendable {
     case noActivity
     case idle
     case focusing
+    case paused
     case completedToday
 
     /// Higher-priority states must win when more than one condition is true.
@@ -64,6 +65,11 @@ public enum TinyBuddyDisplayState: String, CaseIterable, Equatable, Sendable {
             return 40
         case .completedToday:
             return 30
+        case .paused:
+            // A current paused session is more actionable than a historical
+            // completion/no-activity fallback, while data-quality states above
+            // it still remain authoritative.
+            return 45
         case .focusing:
             return 20
         case .idle:
@@ -73,7 +79,7 @@ public enum TinyBuddyDisplayState: String, CaseIterable, Equatable, Sendable {
 
     public var isActivityState: Bool {
         switch self {
-        case .idle, .focusing, .completedToday, .noActivity, .partial:
+        case .idle, .focusing, .paused, .completedToday, .noActivity, .partial:
             return true
         case .loading, .authorizationRequired, .authorizationInvalid,
                 .readFailed, .stale, .noRepositories:
@@ -127,6 +133,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
     public enum DisplayState: Equatable, Sendable {
         case idle
         case focusing
+        case paused
         case completed
         case active
     }
@@ -176,6 +183,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
     public init(
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot,
+        focusHistoryPublication: FocusHistoryPublication? = nil,
         refreshStatus: GitActivityRefreshStatus? = nil,
         dataAvailability: TinyBuddyDisplayDataAvailability = .available,
         isRefreshing: Bool = false,
@@ -192,6 +200,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             focusCount: focusCount,
             completionCount: completionCount,
             hasActivitySnapshot: hasActivitySnapshot,
+            focusHistoryPublication: focusHistoryPublication,
             refreshStatus: refreshStatus,
             dataAvailability: dataAvailability,
             isRefreshing: isRefreshing,
@@ -206,7 +215,8 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             snapshot: snapshot,
             focusCount: focusCount,
             completionCount: completionCount,
-            hasActivitySnapshot: hasActivitySnapshot
+            hasActivitySnapshot: hasActivitySnapshot,
+            focusHistoryPublication: focusHistoryPublication
         )
         let recentProjectName = Self.normalizedProjectName(
             activitySnapshot.recentProjectName
@@ -275,6 +285,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         focusCount: Int,
         completionCount: Int,
         hasActivitySnapshot: Bool,
+        focusHistoryPublication: FocusHistoryPublication?,
         refreshStatus: GitActivityRefreshStatus?,
         dataAvailability: TinyBuddyDisplayDataAvailability,
         isRefreshing: Bool,
@@ -344,6 +355,13 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             }
         }
 
+        // A paused focus session is an authoritative activity state, not an
+        // idle/completed fallback. It is resolved only after data-quality
+        // states so a corrupt, stale, or loading snapshot remains explicit.
+        if focusHistoryPublication?.isFocusSessionPaused == true {
+            return .paused
+        }
+
         if hasActivitySnapshot,
            focusCount == 0,
            completionCount == 0 {
@@ -373,8 +391,13 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         snapshot: TinyBuddySnapshot,
         focusCount: Int,
         completionCount: Int,
-        hasActivitySnapshot: Bool
+        hasActivitySnapshot: Bool,
+        focusHistoryPublication: FocusHistoryPublication?
     ) -> DisplayState {
+        if focusHistoryPublication?.isFocusSessionPaused == true {
+            return .paused
+        }
+
         guard hasActivitySnapshot else {
             switch snapshot.status {
             case .idle:
@@ -509,6 +532,15 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
                 nil,
                 nil
             )
+        case .paused:
+            return (
+                "已暂停",
+                "专注已暂停，恢复后会继续累计当前时长。",
+                "pause.circle.fill",
+                .warning,
+                nil,
+                nil
+            )
         case .completedToday:
             return (
                 "今日完成",
@@ -540,6 +572,8 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             return "•~•"
         case .focusing:
             return "–_–"
+        case .paused:
+            return "•_•"
         case .completedToday:
             return "★ᴗ★"
         }
@@ -613,6 +647,8 @@ private extension TinyBuddyDisplayPresentation.DisplayState {
             return "idle"
         case .focusing:
             return "focusing"
+        case .paused:
+            return "paused"
         case .completed:
             return "completed"
         case .active:
@@ -718,7 +754,7 @@ public struct TinyBuddyDisplayLayout: Equatable, Sendable {
         _ state: TinyBuddyDisplayState
     ) -> Bool {
         switch state {
-        case .idle, .focusing, .completedToday, .noActivity:
+        case .idle, .focusing, .paused, .completedToday, .noActivity:
             return true
         case .loading, .authorizationRequired, .authorizationInvalid,
              .readFailed, .stale, .noRepositories, .partial:

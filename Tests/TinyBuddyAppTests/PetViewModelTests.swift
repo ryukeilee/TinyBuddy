@@ -1454,9 +1454,9 @@ final class PetViewModelTests: XCTestCase {
 
         // Initially no timer
         viewModel.setFocusSessionEngine(engine)
-        // Timer should NOT start because there's no active session yet
-        // (we can't directly observe the timer but we can observe behavior)
+        // Timer should NOT start because there's no active session yet.
         XCTAssertEqual(viewModel.manualControlState, .idle)
+        XCTAssertFalse(viewModel.isManualControlRefreshTimerRunning)
         widgetReloadCount = 0
 
         // Start a manual session - timer should start ticking
@@ -1470,10 +1470,22 @@ final class PetViewModelTests: XCTestCase {
         // Widget reload waits for AppDelegate's committed combined-snapshot
         // publication; the control surface never reloads an old snapshot.
         XCTAssertEqual(widgetReloadCount, 0)
+        XCTAssertTrue(viewModel.isManualControlRefreshTimerRunning)
+
+        // Pausing freezes activeDuration, so the timer must stop immediately.
+        viewModel.pauseManualFocus()
+        XCTAssertTrue(viewModel.manualControlState.isManualSessionPaused)
+        XCTAssertFalse(viewModel.isManualControlRefreshTimerRunning)
+
+        // Resuming is the only transition that starts it again.
+        viewModel.resumeManualFocus()
+        XCTAssertTrue(viewModel.manualControlState.isManualSessionActive)
+        XCTAssertTrue(viewModel.isManualControlRefreshTimerRunning)
 
         // End the session - timer should stop
         viewModel.endManualFocus()
         XCTAssertEqual(viewModel.manualControlState, .idle)
+        XCTAssertFalse(viewModel.isManualControlRefreshTimerRunning)
         XCTAssertEqual(widgetReloadCount, 0)
     }
 

@@ -1092,6 +1092,9 @@ private extension FocusSessionEngine {
             snapshot: snapshot,
             isFocusSessionActive: sessions.contains {
                 $0.isOpen && $0.status == .active
+            },
+            isFocusSessionPaused: sessions.contains {
+                $0.isOpen && $0.status == .paused
             }
         )
     }

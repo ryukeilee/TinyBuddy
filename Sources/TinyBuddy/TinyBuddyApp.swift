@@ -14,7 +14,10 @@ private let tinyBuddyHUDLogger = Logger(subsystem: "local.tinybuddy", category: 
 /// transition while retaining the pet state from an older one.
 enum FocusHistoryPublicationStatus {
     static func status(for publication: FocusHistoryPublication) -> PetStatus {
-        if publication.isFocusSessionActive {
+        // A paused session is still open. Keep the legacy status in the
+        // focusing bucket while the shared publication carries the explicit
+        // paused fact consumed by HUD and Widget presentation.
+        if publication.isFocusSessionActive || publication.isFocusSessionPaused {
             return .focusing
         }
         let completedCount = publication.snapshot.recentDays.last?.completedSessionCount ?? 0
@@ -722,6 +725,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // If the committed publication is different but the writer was a
             // concurrent caller, the newer publication was already written and
             // the Widget should have been reloaded by that caller.
+            return
+        }
+
+        // A same-revision callback can race with a user status selection: the
+        // selection retains the already-committed history publication but may
+        // intentionally have a different legacy status. Only mirror the
+        // callback when the durable combined snapshot still carries the
+        // callback's status; otherwise the old callback is a no-op.
+        if let status, update.snapshot?.snapshot.status != status {
+            _ = focusSessionPublicationJournal.clear(expected: publication)
             return
         }
 

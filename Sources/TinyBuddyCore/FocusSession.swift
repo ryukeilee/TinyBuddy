@@ -55,6 +55,20 @@ extension ManualFocusControlState {
         if case .paused = self { return true }
         return false
     }
+
+    /// Stable animation key for the manual-control panel. Duration is
+    /// intentionally excluded so the active timer can update its text without
+    /// replaying a state transition every second.
+    public var transitionIdentity: String {
+        switch self {
+        case .idle:
+            return "idle"
+        case .focusing:
+            return "focusing"
+        case .paused:
+            return "paused"
+        }
+    }
 }
 
 /// Stable, privacy-safe authority classes for a recorded decision. The enum

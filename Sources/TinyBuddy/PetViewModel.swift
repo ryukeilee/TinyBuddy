@@ -118,6 +118,12 @@ final class PetViewModel: ObservableObject {
         observers.count
     }
 
+    /// Testable lifecycle signal for the manual-control timer. The timer is
+    /// deliberately present only while an active session is accumulating.
+    var isManualControlRefreshTimerRunning: Bool {
+        manualControlTimer != nil
+    }
+
     private let onboardingStore: TinyBuddyOnboardingStore
     private let store: DailyStatsStore
     private let session: PetSession
@@ -183,7 +189,8 @@ final class PetViewModel: ObservableObject {
            committedSnapshot.dayIdentifier == expectedDayIdentifier {
             widgetPresentationBeforePublication = TinyBuddyDisplayPresentation(
                 snapshot: committedSnapshot.snapshot,
-                activitySnapshot: committedSnapshot.activitySnapshot
+                activitySnapshot: committedSnapshot.activitySnapshot,
+                focusHistoryPublication: committedSnapshot.focusHistoryPublication
             )
         } else {
             widgetPresentationBeforePublication = TinyBuddyDisplayPresentation(
@@ -213,6 +220,7 @@ final class PetViewModel: ObservableObject {
         let displayPresentation = Self.makeDisplayPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,
+            focusHistoryPublication: combinedHUDState.committedSnapshot?.focusHistoryPublication,
             refreshStatus: latestRefreshStatus,
             dataAvailability: combinedHUDState.dataAvailability,
             isRefreshing: false,
@@ -221,7 +229,8 @@ final class PetViewModel: ObservableObject {
         )
         let widgetPresentation = TinyBuddyDisplayPresentation(
             snapshot: snapshot,
-            activitySnapshot: activitySnapshot
+            activitySnapshot: activitySnapshot,
+            focusHistoryPublication: combinedHUDState.committedSnapshot?.focusHistoryPublication
         )
         self.session = session
         self.activityStore = activityStore
@@ -292,11 +301,14 @@ final class PetViewModel: ObservableObject {
                 self.isGitActivityRefreshing = false
                 self.latestRefreshStatus = refreshStatus
                 self.updateRefreshDiagnostics(for: refreshStatus)
-                self.reloadCommittedHUDState()
-                // Ensure the Widget picks up the latest committed snapshot
-                // even when the coordinator's own content-change check did
-                // not trigger a timeline reload.
-                self.reloadWidgetIfPossible()
+                let previousHistory = self.focusHistoryPublication
+                let didChange = self.reloadCommittedHUDState()
+                // A refresh-status notification is also emitted for retries
+                // that commit no new content. Only reload WidgetKit when the
+                // rendered presentation or authoritative focus slice changed.
+                if didChange || previousHistory != self.focusHistoryPublication {
+                    self.reloadWidgetIfPossible()
+                }
             }
         })
         observers.append(notificationCenter.addObserver(
@@ -421,8 +433,14 @@ final class PetViewModel: ObservableObject {
         guard update.didPersist || update.outcome == .alreadyCurrent else {
             return
         }
-        _ = reloadCommittedHUDState()
-        reloadWidgetIfPossible()
+        let previousHistory = focusHistoryPublication
+        let didChange = reloadCommittedHUDState()
+        // `updatePetSlice` may already be current when a delayed status
+        // callback arrives. Do not wake WidgetKit unless the committed
+        // presentation or history payload actually changed.
+        if didChange || previousHistory != focusHistoryPublication {
+            reloadWidgetIfPossible()
+        }
     }
 
     /// Lightweight status update for the combined publication path.  Writes
@@ -434,10 +452,16 @@ final class PetViewModel: ObservableObject {
         guard self.status != status else { return }
         let synchronizedStats = session.synchronizeStatus(status)
         // Only update HUD state from the legacy store; the combined snapshot
-        // write (with focus history) happens in the caller.
+        // write (with focus history) happens in the caller. Update the source
+        // values first so any derived presentation cannot observe the old
+        // status for one render pass.
+        if self.status != status {
+            self.status = status
+        }
+        if self.stats != synchronizedStats {
+            self.stats = synchronizedStats
+        }
         updateDisplayPresentation()
-        self.status = status
-        self.stats = synchronizedStats
     }
 
     func requestGitScanAuthorization() {
@@ -480,7 +504,8 @@ final class PetViewModel: ObservableObject {
         guard let engine = focusSessionEngine else { return }
         let token = UUID()
         _ = engine.startManualFocus(project: project, at: Date(), commandToken: token)
-        startManualControlRefreshIfNeeded()
+        // The refreshed state is the single timer gate. A failed/no-op command
+        // therefore cannot briefly create a needless timer.
         refreshManualControlState()
     }
 
@@ -497,7 +522,6 @@ final class PetViewModel: ObservableObject {
         guard let engine = focusSessionEngine else { return }
         let token = UUID()
         _ = engine.resumeManualFocus(at: Date(), commandToken: token)
-        startManualControlRefreshIfNeeded()
         refreshManualControlState()
     }
 
@@ -523,11 +547,13 @@ final class PetViewModel: ObservableObject {
         if manualControlState != newState {
             manualControlState = newState
         }
-        // Stop the timer when the session ends; start it when a session becomes active.
+        // Only an actively accumulating session needs a one-second tick.
+        // Paused duration is stable, so leaving the timer stopped avoids wakeups
+        // and prevents a paused panel from being needlessly re-rendered.
         switch newState {
-        case .focusing, .paused:
+        case .focusing:
             startManualControlRefreshIfNeeded()
-        case .idle:
+        case .paused, .idle:
             stopManualControlRefresh()
         }
     }
@@ -555,7 +581,10 @@ final class PetViewModel: ObservableObject {
     }
 
     private func restorePersistedState() {
-        isGitActivityRefreshing = false
+        // Foreground notifications can arrive while a refresh is still in
+        // flight. Do not clear its indicator or let this older read masquerade
+        // as the refresh result; the generation/sequence completion remains
+        // authoritative.
         let persistedStatus = Self.displayRefreshStatus(
             refreshStatusStore.load(),
             timeContext: timeEnvironment.capture()
@@ -568,7 +597,9 @@ final class PetViewModel: ObservableObject {
             latestRefreshStatus = nil
         }
         updateRefreshDiagnostics(for: latestRefreshStatus)
-        if reloadHUDState() {
+        let previousHistory = focusHistoryPublication
+        let didChange = reloadHUDState()
+        if didChange || previousHistory != focusHistoryPublication {
             reloadWidgetIfPossible()
         }
     }
@@ -614,7 +645,9 @@ final class PetViewModel: ObservableObject {
     }
 
     private func handleTimeEnvironmentDidChange() {
-        isGitActivityRefreshing = false
+        // A time-boundary revalidation must not cancel an already accepted
+        // refresh. Its completion notification is still the only path allowed
+        // to clear the in-flight marker.
         let timeContext = timeEnvironment.capture()
         latestRefreshStatus = Self.displayRefreshStatus(
             refreshStatusStore.load(),
@@ -634,13 +667,14 @@ final class PetViewModel: ObservableObject {
             diagnosticRecorder: sharedSnapshotDiagnosticRecorder,
             rebuiltSnapshotFaultIdentifiers: &rebuiltSnapshotFaultIdentifiers
         )
-        _ = applyHUDState(
+        let previousHistory = focusHistoryPublication
+        let didChange = applyHUDState(
             snapshot: combinedHUDState.snapshot,
             activitySnapshot: combinedHUDState.activitySnapshot,
             committedSnapshot: combinedHUDState.committedSnapshot,
             dataAvailability: combinedHUDState.dataAvailability
         )
-        if combinedHUDState.didPersist {
+        if didChange || previousHistory != focusHistoryPublication {
             reloadWidgetIfPossible()
         }
         updateHiddenSnapshotDiagnosticSummary()
@@ -774,9 +808,11 @@ final class PetViewModel: ObservableObject {
         committedSnapshot: TinyBuddyCombinedSnapshot? = nil,
         dataAvailability: TinyBuddyDisplayDataAvailability = .available
     ) -> Bool {
+        let nextFocusHistoryPublication = committedSnapshot?.focusHistoryPublication
         let displayPresentation = Self.makeDisplayPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,
+            focusHistoryPublication: nextFocusHistoryPublication,
             refreshStatus: latestRefreshStatus,
             dataAvailability: dataAvailability,
             isRefreshing: isGitActivityRefreshing,
@@ -795,8 +831,8 @@ final class PetViewModel: ObservableObject {
         }
         latestActivitySnapshot = activitySnapshot
         latestDataAvailability = dataAvailability
-        if focusHistoryPublication != committedSnapshot?.focusHistoryPublication {
-            focusHistoryPublication = committedSnapshot?.focusHistoryPublication
+        if focusHistoryPublication != nextFocusHistoryPublication {
+            focusHistoryPublication = nextFocusHistoryPublication
         }
         recordHUDConsumptionIfMatching(
             snapshot: snapshot,
@@ -824,6 +860,7 @@ final class PetViewModel: ObservableObject {
         let committedPresentation = Self.makeDisplayPresentation(
             snapshot: committedSnapshot.snapshot,
             activitySnapshot: committedSnapshot.activitySnapshot,
+            focusHistoryPublication: committedSnapshot.focusHistoryPublication,
             refreshStatus: latestRefreshStatus,
             dataAvailability: latestDataAvailability,
             isRefreshing: isGitActivityRefreshing,
@@ -851,6 +888,7 @@ final class PetViewModel: ObservableObject {
         let nextPresentation = Self.makeDisplayPresentation(
             snapshot: TinyBuddySnapshot(status: status, stats: stats),
             activitySnapshot: latestActivitySnapshot,
+            focusHistoryPublication: focusHistoryPublication,
             refreshStatus: latestRefreshStatus,
             dataAvailability: latestDataAvailability,
             isRefreshing: isGitActivityRefreshing,
@@ -882,6 +920,7 @@ final class PetViewModel: ObservableObject {
     private static func makeDisplayPresentation(
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot,
+        focusHistoryPublication: FocusHistoryPublication? = nil,
         refreshStatus: GitActivityRefreshStatus?,
         dataAvailability: TinyBuddyDisplayDataAvailability,
         isRefreshing: Bool,
@@ -891,6 +930,7 @@ final class PetViewModel: ObservableObject {
         TinyBuddyDisplayPresentation(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,
+            focusHistoryPublication: focusHistoryPublication,
             refreshStatus: refreshStatus,
             dataAvailability: dataAvailability,
             isRefreshing: isRefreshing,
@@ -1149,6 +1189,10 @@ final class PetViewModel: ObservableObject {
         case .idle:
             return .idle
         case .focusing:
+            return .focusing
+        case .paused:
+            // Preserve the source-compatible compatibility enum; callers use
+            // `displayPresentation.state` for the full cross-surface state.
             return .focusing
         case .completed:
             return .completed

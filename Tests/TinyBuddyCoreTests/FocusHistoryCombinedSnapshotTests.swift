@@ -68,6 +68,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         XCTAssertEqual(decoded.revision, current.revision)
         XCTAssertEqual(decoded.snapshot, current.snapshot)
         XCTAssertFalse(decoded.isFocusSessionActive)
+        XCTAssertFalse(decoded.isFocusSessionPaused)
     }
 
     func testHistoryUpdateRejectsOlderArchiveRevisionButAcceptsEqualRevisionConfigurationRefresh() {

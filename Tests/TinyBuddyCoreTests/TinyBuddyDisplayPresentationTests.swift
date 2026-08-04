@@ -15,6 +15,7 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             .noRepositories: 60,
             .partial: 50,
             .noActivity: 40,
+            .paused: 45,
             .completedToday: 30,
             .focusing: 20,
             .idle: 10
@@ -25,6 +26,33 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
         for state in TinyBuddyDisplayState.allCases {
             XCTAssertEqual(state.priority, expectedPriorities[state])
         }
+    }
+
+    func testPausedPublicationWinsOverActivityCountsAndAnomaliesStillWin() {
+        let paused = presentation(
+            activity: activity(focus: 4, completion: 3, project: "Paused"),
+            snapshotStatus: .focusing,
+            focusHistoryPublication: makePublication(isPaused: true)
+        )
+        XCTAssertEqual(paused.state, .paused)
+        XCTAssertEqual(paused.displayState, .paused)
+        XCTAssertEqual(paused.title, "已暂停")
+        XCTAssertEqual(paused.accentRole, .warning)
+
+        let repeated = presentation(
+            activity: activity(focus: 4, completion: 3, project: "Paused"),
+            snapshotStatus: .focusing,
+            focusHistoryPublication: makePublication(isPaused: true)
+        )
+        XCTAssertEqual(paused.transitionIdentity, repeated.transitionIdentity)
+
+        let stale = presentation(
+            activity: activity(focus: 4, completion: 3),
+            snapshotStatus: .focusing,
+            focusHistoryPublication: makePublication(isPaused: true),
+            dataAvailability: .stale
+        )
+        XCTAssertEqual(stale.state, .stale)
     }
 
     func testStateMatrixClassifiesEveryDisplayState() {
@@ -104,6 +132,15 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                 "focusing",
                 presentation(activity: activity(focus: 1, completion: 0)),
                 .focusing
+            ),
+            (
+                "paused",
+                presentation(
+                    activity: activity(focus: 1, completion: 0),
+                    snapshotStatus: .focusing,
+                    focusHistoryPublication: makePublication(isPaused: true)
+                ),
+                .paused
             ),
             (
                 "completed today",
@@ -856,6 +893,7 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             commitCount: nil
         ),
         snapshotStatus: PetStatus = .idle,
+        focusHistoryPublication: FocusHistoryPublication? = nil,
         refreshStatus: GitActivityRefreshStatus? = nil,
         dataAvailability: TinyBuddyDisplayDataAvailability = .available,
         isRefreshing: Bool = false,
@@ -869,12 +907,57 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                 stats: DailyStats(dayIdentifier: "2026-07-18", focusCount: 0, completionCount: 0)
             ),
             activitySnapshot: activity,
+            focusHistoryPublication: focusHistoryPublication,
             refreshStatus: refreshStatus,
             dataAvailability: dataAvailability,
             isRefreshing: isRefreshing,
             onboardingCompleted: onboardingCompleted,
             locale: locale,
             timeZone: timeZone ?? shanghaiTimeZone
+        )
+    }
+
+    private func makePublication(isPaused: Bool) -> FocusHistoryPublication {
+        let previousDay = FocusHistoryDay(
+            dayIdentifier: "2026-07-19",
+            state: .noSessions,
+            focusDuration: 0,
+            completedSessionCount: 0,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let currentDay = FocusHistoryDay(
+            dayIdentifier: "2026-07-20",
+            state: .sessions,
+            focusDuration: 1,
+            completedSessionCount: 3,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let snapshot = FocusHistorySnapshot(
+            state: .available,
+            sourceHealth: .available,
+            recentDays: [previousDay, currentDay],
+            currentWeek: FocusHistoryWeek(
+                startDayIdentifier: "2026-07-14",
+                endDayIdentifier: "2026-07-20",
+                state: .available,
+                focusDuration: 1,
+                completedSessionCount: 3,
+                goalCompletionRate: nil,
+                goalMetDayCount: nil,
+                configuredGoalDayCount: nil,
+                projectDistribution: nil
+            ),
+            currentGoalStreakDays: nil
+        )
+        return FocusHistoryPublication(
+            revision: 1,
+            snapshot: snapshot,
+            isFocusSessionActive: false,
+            isFocusSessionPaused: isPaused
         )
     }
 

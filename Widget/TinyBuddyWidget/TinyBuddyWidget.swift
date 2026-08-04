@@ -275,6 +275,7 @@ struct TinyBuddyProvider: TimelineProvider {
             presentation: TinyBuddyDisplayPresentation(
                 snapshot: snapshot,
                 activitySnapshot: activitySnapshot,
+                focusHistoryPublication: focusHistoryPublication,
                 refreshStatus: refreshStatus,
                 dataAvailability: dataAvailability,
                 onboardingCompleted: TinyBuddyDisplaySharedState.onboardingCompleted(

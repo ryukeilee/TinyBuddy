@@ -76,6 +76,15 @@ final class AccessibilityContractTests: XCTestCase {
                 "专注中", "保持当前专注"
             ),
             (
+                "paused",
+                presentation(
+                    activity: activity(focus: 1, completion: 1),
+                    snapshotStatus: .focusing,
+                    focusHistoryPublication: pausedPublication()
+                ),
+                "已暂停", "专注已暂停"
+            ),
+            (
                 "completedToday",
                 presentation(activity: activity(focus: 1, completion: 1)),
                 "今日完成", "今天已经有完成记录"
@@ -140,6 +149,11 @@ final class AccessibilityContractTests: XCTestCase {
             ),
             presentation(snapshotStatus: .idle),
             presentation(activity: activity(focus: 1, completion: 0)),
+            presentation(
+                activity: activity(focus: 1, completion: 1),
+                snapshotStatus: .focusing,
+                focusHistoryPublication: pausedPublication()
+            ),
             presentation(activity: activity(focus: 1, completion: 1)),
         ]
 
@@ -171,6 +185,11 @@ final class AccessibilityContractTests: XCTestCase {
             ),
             presentation(snapshotStatus: .idle),
             presentation(activity: activity(focus: 1, completion: 0)),
+            presentation(
+                activity: activity(focus: 1, completion: 0),
+                snapshotStatus: .focusing,
+                focusHistoryPublication: pausedPublication()
+            ),
             presentation(activity: activity(focus: 1, completion: 1)),
         ]
 
@@ -197,6 +216,8 @@ final class AccessibilityContractTests: XCTestCase {
                 XCTAssertEqual(value.accentRole, .neutral)
             case .focusing:
                 XCTAssertEqual(value.accentRole, .focus)
+            case .paused:
+                XCTAssertEqual(value.accentRole, .warning)
             case .completedToday:
                 XCTAssertEqual(value.accentRole, .success)
             }
@@ -333,6 +354,7 @@ final class AccessibilityContractTests: XCTestCase {
             commitCount: nil
         ),
         snapshotStatus: PetStatus = .idle,
+        focusHistoryPublication: FocusHistoryPublication? = nil,
         refreshStatus: GitActivityRefreshStatus? = nil,
         dataAvailability: TinyBuddyDisplayDataAvailability = .available,
         isRefreshing: Bool = false,
@@ -346,12 +368,47 @@ final class AccessibilityContractTests: XCTestCase {
                 stats: DailyStats(dayIdentifier: "2026-07-20", focusCount: 0, completionCount: 0)
             ),
             activitySnapshot: activity,
+            focusHistoryPublication: focusHistoryPublication,
             refreshStatus: refreshStatus,
             dataAvailability: dataAvailability,
             isRefreshing: isRefreshing,
             onboardingCompleted: onboardingCompleted,
             locale: locale,
             timeZone: timeZone ?? shanghaiTimeZone
+        )
+    }
+
+    private func pausedPublication() -> FocusHistoryPublication {
+        let day = FocusHistoryDay(
+            dayIdentifier: "2026-07-20",
+            state: .sessions,
+            focusDuration: 1,
+            completedSessionCount: 0,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let snapshot = FocusHistorySnapshot(
+            state: .available,
+            sourceHealth: .available,
+            recentDays: [day],
+            currentWeek: FocusHistoryWeek(
+                startDayIdentifier: "2026-07-20",
+                endDayIdentifier: "2026-07-20",
+                state: .available,
+                focusDuration: 1,
+                completedSessionCount: 0,
+                goalCompletionRate: nil,
+                goalMetDayCount: nil,
+                configuredGoalDayCount: nil,
+                projectDistribution: nil
+            ),
+            currentGoalStreakDays: nil
+        )
+        return FocusHistoryPublication(
+            revision: 1,
+            snapshot: snapshot,
+            isFocusSessionPaused: true
         )
     }
 

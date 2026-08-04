@@ -264,6 +264,8 @@ public enum TinyBuddyHUDTheme {
             return statusAccent(for: .neutral)
         case .focusing:
             return statusAccent(for: .focus)
+        case .paused:
+            return statusAccent(for: .warning)
         case .completed, .active:
             return statusAccent(for: .success)
         }

@@ -369,8 +369,12 @@ struct PetView: View {
                 secondaryText: secondaryText,
                 action: viewModel.performGitActivityAction
             )
-            .id(presentation.transitionIdentity)
-            .transition(.opacity)
+            // Keep the panel subtree stable. Replacing it with `.id` causes
+            // rapid A→B→A publications to stack opacity transitions and
+            // briefly reveal the window background. Content transitions keep
+            // the same layout/gesture tree while animating only semantic text
+            // and image changes.
+            .contentTransition(.opacity)
         }
         .frame(
             maxWidth: .infinity,
@@ -532,7 +536,7 @@ struct PetView: View {
         .background(panelFill)
         .overlay(panelBorder)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .animation(semanticAnimation, value: viewModel.manualControlState.isManualSessionActive)
+        .animation(semanticAnimation, value: viewModel.manualControlState.transitionIdentity)
     }
 
     private var defaultManualProject: FocusProjectContext {

@@ -77,7 +77,7 @@ struct GitActivityExperiencePresentation: Equatable {
             return .failed
         case .partial:
             return .partial
-        case .idle, .focusing, .completedToday:
+        case .idle, .focusing, .paused, .completedToday:
             return .ready
         }
     }

@@ -672,19 +672,27 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
         let engine = makeEngine(clock, store)
 
         _ = engine.startManualFocus(project: projX, at: clock.now)
-        XCTAssertTrue(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+        let activePublication = try XCTUnwrap(engine.focusHistoryPublication())
+        XCTAssertTrue(activePublication.isFocusSessionActive)
+        XCTAssertFalse(activePublication.isFocusSessionPaused)
 
         clock.advance(by: 10)
         _ = engine.pauseManualFocus(at: clock.now)
-        XCTAssertFalse(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+        let pausedPublication = try XCTUnwrap(engine.focusHistoryPublication())
+        XCTAssertFalse(pausedPublication.isFocusSessionActive)
+        XCTAssertTrue(pausedPublication.isFocusSessionPaused)
 
         clock.advance(by: 10)
         _ = engine.resumeManualFocus(at: clock.now)
-        XCTAssertTrue(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+        let resumedPublication = try XCTUnwrap(engine.focusHistoryPublication())
+        XCTAssertTrue(resumedPublication.isFocusSessionActive)
+        XCTAssertFalse(resumedPublication.isFocusSessionPaused)
 
         clock.advance(by: 10)
         _ = engine.endManualFocus(at: clock.now)
-        XCTAssertFalse(try XCTUnwrap(engine.focusHistoryPublication()).isFocusSessionActive)
+        let endedPublication = try XCTUnwrap(engine.focusHistoryPublication())
+        XCTAssertFalse(endedPublication.isFocusSessionActive)
+        XCTAssertFalse(endedPublication.isFocusSessionPaused)
     }
 
     func test_project_durations_today_excludes_paused_time() {
