@@ -510,7 +510,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Always record the current version after upgrade work is dispatched.
         TinyBuddyVersionUpgradeTracker.recordCurrentVersion()
 
-        let focusBridge = FocusSessionAppBridge.createStandard(projectRegistry: projectRegistry)
+        let focusBridge = FocusSessionAppBridge.createStandard(
+            projectRegistry: projectRegistry,
+            exclusionRulesProvider: { [configStore] in
+                configStore.load()?.exclusionRules.map(\.pattern) ?? []
+            }
+        )
         focusSessionBridge = focusBridge
         // Evaluate reminders from every durable session mutation, including
         // automatic/manual lifecycle transitions. The bridge heartbeat below

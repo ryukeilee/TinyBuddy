@@ -25,6 +25,12 @@ public final class FocusSessionCoordinator {
     private let policy: FocusAttributionPolicy
     private let clock: FocusClock
     private let gitProjectResolver: @MainActor (String, String) -> FocusProjectContext?
+    /// Evaluated against the *final* attribution candidate on every report.
+    /// Returning true suppresses automatic focus for that project. Evaluating
+    /// here (rather than at discovery time) lets the latest rules take effect
+    /// immediately and prevents a stale asynchronous scan result from reviving
+    /// automatic focus for an excluded repository.
+    private let exclusionGate: @MainActor (FocusProjectContext) -> Bool
 
     private var foreground: (bundleID: String, displayName: String, isCodeEditor: Bool)?
     private var recentGit: (key: String, displayName: String, at: Date)?
@@ -37,12 +43,14 @@ public final class FocusSessionCoordinator {
         clock: FocusClock,
         gitProjectResolver: @escaping @MainActor (String, String) -> FocusProjectContext? = {
             FocusProjectContext(key: $0, displayName: $1)
-        }
+        },
+        exclusionGate: @escaping @MainActor (FocusProjectContext) -> Bool = { _ in false }
     ) {
         self.engine = engine
         self.policy = policy
         self.clock = clock
         self.gitProjectResolver = gitProjectResolver
+        self.exclusionGate = exclusionGate
     }
 
     // MARK: - App‑facing events
@@ -168,20 +176,24 @@ public final class FocusSessionCoordinator {
 
 private extension FocusSessionCoordinator {
     /// The project that focus should be attributed to *now*, or `nil` when no
-    /// foreground app is active.
+    /// foreground app is active or the candidate is excluded by the latest rules.
     func focusProject() -> FocusProjectContext? {
         guard let fg = foreground else { return nil }
 
+        let candidate: FocusProjectContext
         if fg.isCodeEditor, let git = recentGit {
-            if let window = policy.gitAttributionWindow {
-                guard clock.now.timeIntervalSince(git.at) <= window else {
-                    return project(for: fg)
-                }
-            }
-            return FocusProjectContext(key: git.key, displayName: git.displayName)
+            let stillAttributable = policy.gitAttributionWindow.map {
+                clock.now.timeIntervalSince(git.at) <= $0
+            } ?? true
+            candidate = stillAttributable
+                ? FocusProjectContext(key: git.key, displayName: git.displayName)
+                : project(for: fg)
+        } else {
+            candidate = project(for: fg)
         }
 
-        return project(for: fg)
+        guard !exclusionGate(candidate) else { return nil }
+        return candidate
     }
 
     func project(for fg: (bundleID: String, displayName: String, isCodeEditor: Bool)) -> FocusProjectContext {

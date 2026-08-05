@@ -383,7 +383,11 @@ extension FocusSessionAppBridge {
     /// Creates a standard bridge using the App Group container for persistence.
     @MainActor
     static func createStandard(
-        projectRegistry: TinyBuddyProjectRegistry? = nil
+        projectRegistry: TinyBuddyProjectRegistry? = nil,
+        exclusionRulesProvider: @escaping @MainActor () -> [String] = { [] },
+        fileExists: @escaping (String) -> Bool = {
+            FileManager.default.fileExists(atPath: $0)
+        }
     ) -> FocusSessionAppBridge? {
         guard let appGroupURL = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: "group.com.ryukeili.TinyBuddy") else {
@@ -445,7 +449,26 @@ extension FocusSessionAppBridge {
         let coordinator = FocusSessionCoordinator(
             engine: engine,
             policy: FocusAttributionPolicy(),
-            clock: clock
+            clock: clock,
+            exclusionGate: { context in
+                // Exclusion rules are path rules. Only Git-registry projects
+                // carry canonical paths; foreground-app (bundle-ID) contexts
+                // have no path to match and are never excluded here.
+                guard let registry = projectRegistry,
+                      let project = registry.resolve(projectKey: context.key) else {
+                    return false
+                }
+                // Freeze the rules once per report so a rule change mid-event
+                // cannot produce a torn decision, and only match against
+                // canonical directories that still exist (a moved repository
+                // no longer lives under an old excluded path and is restored).
+                let patterns = exclusionRulesProvider()
+                let livePaths = Array(project.aliases).filter { fileExists($0) }
+                return FocusProjectExclusionMatcher.isExcluded(
+                    canonicalPaths: livePaths,
+                    patterns: patterns
+                )
+            }
         )
         return FocusSessionAppBridge(
             coordinator: coordinator,
