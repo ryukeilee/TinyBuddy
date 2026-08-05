@@ -346,7 +346,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             for: repoURL,
             lines: [
                 harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
-                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': result"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': Merge made by the 'ort' strategy."),
                 harness.reflogLine(daysOffset: -1, hour: 11, minute: 5, message: "commit: yesterday")
             ]
         )
@@ -359,6 +359,74 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
         XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.dayIdentifier"] as? String, harness.todayIdentifier)
+    }
+
+    func testScriptCountsCherryPickAndRevertAsCompletionsAndIgnoresFastForwardMerge() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectOperations")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: normal"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 20, message: "cherry-pick: picked change"),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 30, message: "revert: Revert \"picked change\""),
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge topic: Fast-forward")
+            ]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 3)
+        // 9:10/9:20 fall in the 9:00 block and 9:30 in the 9:30 block; two distinct blocks.
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectOperations")
+    }
+
+    func testScriptDeduplicatesIdenticalCommitEventsAcrossSeparateRepositories() throws {
+        let harness = try ScriptHarness()
+        let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let secondRepoURL = try harness.makeRepository(named: "ProjectBeta")
+        try harness.writeHeadReflog(
+            for: firstRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: shared work")]
+        )
+        try harness.writeHeadReflog(
+            for: secondRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: shared work")]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+        let metrics = try XCTUnwrap(harness.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+    }
+
+    func testScriptDoesNotDeduplicateDistinctCommitsAcrossRepositories() throws {
+        let harness = try ScriptHarness()
+        let firstRepoURL = try harness.makeRepository(named: "ProjectAlpha")
+        let secondRepoURL = try harness.makeRepository(named: "ProjectBeta")
+        try harness.writeHeadReflog(
+            for: firstRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: alpha work")]
+        )
+        try harness.writeHeadReflog(
+            for: secondRepoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: beta work")]
+        )
+
+        let result = try harness.run(scanRoots: [harness.scanRootURL])
+        let plist = try harness.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        // Both events are at 9:10 within the same 09:00 block, so one focus block.
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
     }
 
     func testScriptPublishesValidRepositoryWhenAnotherReflogIsNotARegularFile() throws {
@@ -831,7 +899,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             for: repoURL,
             lines: [
                 harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
-                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': result")
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': Merge made by the 'ort' strategy.")
             ]
         )
         _ = try harness.run(scanRoots: [harness.scanRootURL])
@@ -1185,7 +1253,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
             for: repoURL,
             lines: [
                 harness.reflogLine(daysOffset: 0, hour: 9, minute: 10, message: "commit: first"),
-                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': result")
+                harness.reflogLine(daysOffset: 0, hour: 9, minute: 40, message: "merge branch 'main': Merge made by the 'ort' strategy.")
             ]
         )
         try harness.seedPreferencesPlist([

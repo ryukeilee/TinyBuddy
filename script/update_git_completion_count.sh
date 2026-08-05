@@ -586,9 +586,9 @@ parse_reflog_events() {
           my $kind;
           if ($message =~ /^commit \(amend\):/) {
               $kind = "amend";
-          } elsif ($message =~ /^commit(?: \(.+\))?:/) {
+          } elsif ($message =~ /^(?:commit|cherry-pick|revert)(?: \([^)]+\))?:/) {
               $kind = "commit";
-          } elsif ($message =~ /^merge(?:\s+[^:]*)?:/) {
+          } elsif ($message =~ /^merge(?:\s+[^:]*)?: Merge made/) {
               $kind = "merge";
           } elsif ($message =~ /^rebase \(start\):/) {
               $kind = "rewriteStart";
@@ -623,10 +623,10 @@ parse_reflog_events() {
       "commit (amend):"*)
         kind="amend"
         ;;
-      commit:*|"commit ("*"):"*)
+      commit:*|"commit ("*"):"*|cherry-pick:*|"cherry-pick ("*"):"*|revert:*|"revert ("*"):"*)
         kind="commit"
         ;;
-      merge:*|"merge "*":"*)
+      "merge "*": Merge made"*)
         kind="merge"
         ;;
       "rebase (start):"*)
@@ -676,7 +676,9 @@ parse_reflog_events() {
 # rebase. Amend replaces the earlier logical event, while rebase/reset/checkout
 # records never create another completion. Events are later grouped by the
 # canonical common Git directory, filtered for automated identities, and
-# deduplicated by object identity inside the bounded observation window.
+# deduplicated by logical event identity inside the bounded observation window
+# across every scanned repository so the same commit in duplicate checkouts is
+# not counted twice.
 append_reflog_events_for_today() {
   local repository_identity="$1"
   local display_name="$2"
@@ -909,7 +911,13 @@ normalize_activity_events() {
       old_key = identity SUBSEP $5
       new_key = identity SUBSEP $6
       source_key = identity SUBSEP source
-      duplicate_key = identity SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP $8
+      # The duplicate window is keyed on the logical event itself (old OID, new
+      # OID, kind, subject) without the repository identity so the same commit
+      # recorded in separate repositories (copied/backed-up checkouts of the
+      # same common Git directory) collapses to one completion event. The OID is
+      # content-addressed, so an identical tuple across repos is the same commit
+      # operation rather than two distinct completions.
+      duplicate_key = $5 SUBSEP $6 SUBSEP $7 SUBSEP $8
 
       if ($7 == "rewriteStart") {
         rewrite_generation[source_key]++
@@ -973,9 +981,21 @@ normalize_activity_events() {
       object_epoch[new_key] = epoch
       duplicate_epoch[duplicate_key] = epoch
 
-      if ($7 == "amend" && (old_key in active)) {
-        previous_index = active[old_key]
-        deactivate(previous_index, old_key)
+      # An amend replaces its prior logical event. When the prior commit was
+      # collapsed as a cross-repository duplicate (a copied/backed-up checkout
+      # scanned earlier), its same-repository active entry no longer exists;
+      # fall back to the single surviving event that produced the old object id
+      # so the amended commit replaces that completion instead of counting twice.
+      if ($7 == "amend") {
+        previous_index = 0
+        if (old_key in active) {
+          previous_index = active[old_key]
+        } else if (($5 in global_oid_active) && live[global_oid_active[$5]]) {
+          previous_index = global_oid_active[$5]
+        }
+        if (previous_index != 0) {
+          deactivate(previous_index, event_identity[previous_index] SUBSEP $5)
+        }
       }
 
       count++
@@ -989,6 +1009,7 @@ normalize_activity_events() {
       event_subject[count] = $8
       live[count] = 1
       active[new_key] = count
+      global_oid_active[$6] = count
     }
 
     END {

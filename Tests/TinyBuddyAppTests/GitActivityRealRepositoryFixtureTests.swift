@@ -319,6 +319,248 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
         XCTAssertEqual(repeatedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 6)
     }
 
+    func testCherryPickCountsAsCompletionAndFastForwardMergeDoesNot() throws {
+        let fixture = try RealGitFixture()
+        let repository = try fixture.makeRepository(named: "ProjectCherryPick")
+        let base = try fixture.gitOutput(in: repository, ["rev-parse", "HEAD"])
+
+        // A donor commit yesterday is not part of today's completion count, but
+        // cherry-picking it today creates a real new commit that must count.
+        try fixture.git(in: repository, ["checkout", "-b", "donor", base])
+        try fixture.commit(
+            in: repository,
+            file: "donor.txt",
+            contents: "donor\n",
+            message: "donor work",
+            date: "2024-01-14T23:00:00Z"
+        )
+        let donor = try fixture.gitOutput(in: repository, ["rev-parse", "HEAD"])
+        try fixture.git(in: repository, ["checkout", "main"])
+
+        try fixture.commit(
+            in: repository,
+            file: "work.txt",
+            contents: "work\n",
+            message: "work",
+            date: "2024-01-15T09:00:00Z"
+        )
+        try fixture.git(
+            in: repository,
+            ["cherry-pick", donor],
+            environment: fixture.gitDateEnvironment("2024-01-15T09:20:00Z")
+        )
+
+        // A fast-forward merge moves HEAD without creating a commit and must not
+        // add a completion.
+        try fixture.git(in: repository, ["checkout", "-b", "ahead"])
+        try fixture.commit(
+            in: repository,
+            file: "ahead.txt",
+            contents: "ahead\n",
+            message: "ahead work",
+            date: "2024-01-15T09:30:00Z"
+        )
+        try fixture.git(in: repository, ["checkout", "main"])
+        try fixture.git(
+            in: repository,
+            ["merge", "ahead"],
+            environment: fixture.gitDateEnvironment("2024-01-15T09:35:00Z")
+        )
+
+        // A real merge commit still counts as a completion.
+        try fixture.git(in: repository, ["checkout", "-b", "ffless", "ahead"])
+        try fixture.commit(
+            in: repository,
+            file: "mergeable.txt",
+            contents: "mergeable\n",
+            message: "mergeable work",
+            date: "2024-01-15T09:40:00Z"
+        )
+        try fixture.git(in: repository, ["checkout", "main"])
+        try fixture.git(
+            in: repository,
+            ["merge", "--no-ff", "ffless", "-m", "merge ffless"],
+            environment: fixture.gitDateEnvironment("2024-01-15T09:50:00Z")
+        )
+
+        let result = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let plist = try fixture.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 5)
+        // Events at 09:00/09:20 share the 09:00 block; 09:30/09:40/09:50 share the
+        // 09:30 block. The 09:35 fast-forward adds no completion and no focus block.
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+    }
+
+    func testCopiedRepositoryDoesNotDoubleCountSharedCompletionEvents() throws {
+        let fixture = try RealGitFixture()
+        let primary = try fixture.makeRepository(named: "ProjectPrimary")
+        try fixture.commit(
+            in: primary,
+            file: "work.txt",
+            contents: "work\n",
+            message: "work",
+            date: "2024-01-15T09:05:00Z"
+        )
+        try fixture.commit(
+            in: primary,
+            file: "more.txt",
+            contents: "more\n",
+            message: "more work",
+            date: "2024-01-15T10:05:00Z"
+        )
+
+        // Copying the whole checkout (including its Git metadata) is an exact
+        // duplicate of the same completion events in a second repository.
+        let duplicate = fixture.scanRootURL.appendingPathComponent(
+            "ProjectDuplicate",
+            isDirectory: true
+        )
+        try fixture.fileManager.copyItem(at: primary, to: duplicate)
+
+        let result = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let plist = try fixture.readPreferencesPlist()
+        let metrics = try XCTUnwrap(fixture.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 2)
+    }
+
+    func testCopiedRepositoryAmendReplacesSingleSurvivingCompletion() throws {
+        let fixture = try RealGitFixture()
+        let primary = try fixture.makeRepository(named: "ProjectOriginal")
+        try fixture.commit(
+            in: primary,
+            file: "work.txt",
+            contents: "work\n",
+            message: "work",
+            date: "2024-01-15T09:05:00Z"
+        )
+
+        // The backup is copied before the amend, so it retains the pre-amend
+        // commit while the original later amends it. Cross-repository dedup must
+        // collapse the identical pre-amend commit and the amend must replace that
+        // single surviving completion rather than counting the amended commit
+        // a second time.
+        let duplicate = fixture.scanRootURL.appendingPathComponent(
+            "ProjectCopy",
+            isDirectory: true
+        )
+        try fixture.fileManager.copyItem(at: primary, to: duplicate)
+
+        try "work amended\n".write(
+            to: primary.appendingPathComponent("work.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try fixture.git(in: primary, ["add", "work.txt"])
+        try fixture.git(
+            in: primary,
+            ["commit", "--amend", "-m", "work amended"],
+            environment: fixture.gitDateEnvironment("2024-01-15T09:10:00Z")
+        )
+
+        let result = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let plist = try fixture.readPreferencesPlist()
+        let metrics = try XCTUnwrap(fixture.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "2")
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+    }
+
+    func testRebaseInteractiveSquashKeepsRealCompletionEventsStable() throws {
+        let fixture = try RealGitFixture()
+        let repository = try fixture.makeRepository(named: "ProjectSquash")
+        try fixture.commit(
+            in: repository,
+            file: "one.txt",
+            contents: "one\n",
+            message: "topic one",
+            date: "2024-01-15T09:20:00Z"
+        )
+        try fixture.commit(
+            in: repository,
+            file: "two.txt",
+            contents: "two\n",
+            message: "topic two",
+            date: "2024-01-15T09:25:00Z"
+        )
+
+        // An interactive rebase that squashes the second commit into the first
+        // rewrites objects without creating or dropping completions: both commits
+        // were real completion events today, and the squash only remaps them.
+        try fixture.git(
+            in: repository,
+            ["rebase", "-i", "HEAD~2"],
+            environment: [
+                "GIT_SEQUENCE_EDITOR": "sed -i '' '2s/pick/squash/'",
+                "GIT_EDITOR": "true",
+                "GIT_AUTHOR_DATE": "2024-01-15T09:30:00Z",
+                "GIT_COMMITTER_DATE": "2024-01-15T09:30:00Z"
+            ]
+        )
+
+        let result = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let plist = try fixture.readPreferencesPlist()
+        let metrics = try XCTUnwrap(fixture.metrics(from: result.standardOutput))
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(metrics["repository_count"], "1")
+        // Two real events stay two; the squash rewrite adds nothing and drops nothing.
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        // Both events fall in the 09:00 focus block; the rewrite remaps within it.
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+
+        let repeated = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let repeatedPlist = try fixture.readPreferencesPlist()
+        XCTAssertEqual(repeated.exitCode, 0, repeated.standardError)
+        XCTAssertEqual(repeatedPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 2)
+        XCTAssertEqual(repeatedPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+    }
+
+    func testForcePushToRemoteDoesNotCreateOrDropTodayCompletions() throws {
+        let fixture = try RealGitFixture()
+        let repository = try fixture.makeRepository(named: "ProjectForcePush")
+        try fixture.commit(
+            in: repository,
+            file: "work.txt",
+            contents: "work\n",
+            message: "work",
+            date: "2024-01-15T09:10:00Z"
+        )
+
+        // A bare remote outside the scan root receives the branch. Pushing and
+        // force-pushing update remote refs only; they never write the local HEAD
+        // reflog, so they must not add a completion event.
+        let bareRemote = fixture.rootURL.appendingPathComponent("bare-remote", isDirectory: true)
+        try fixture.fileManager.createDirectory(at: bareRemote, withIntermediateDirectories: true)
+        try fixture.git(in: bareRemote, ["init", "--bare"])
+        try fixture.git(in: repository, ["remote", "add", "origin", bareRemote.path])
+        try fixture.git(in: repository, ["push", "-u", "origin", "main"])
+        try fixture.git(in: repository, ["push", "--force", "origin", "main"])
+
+        // Rewinding to adopt a rewritten remote history is a reset (not a counted
+        // kind) and must not roll back the real completion above: the reflog keeps
+        // today's commit event even though HEAD moves back to the seed.
+        try fixture.git(in: repository, ["reset", "--hard", "HEAD^"])
+
+        let result = try fixture.runScript(scanRoots: [fixture.scanRootURL])
+        let plist = try fixture.readPreferencesPlist()
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
+        XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
+        XCTAssertEqual(
+            plist["tinybuddy.gitTodayRecentProject.projectName"] as? String,
+            "ProjectForcePush"
+        )
+    }
+
     func testCrossWorktreeRebaseMapsDuplicateSubjectsBeforeAmendingAnEarlierCommit() throws {
         let fixture = try RealGitFixture()
         let repository = try fixture.makeRepository(named: "ProjectDuplicateSubjects")
