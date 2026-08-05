@@ -37,6 +37,20 @@ while IFS= read -r f; do
   esac
 done < <(find "$ROOT" -name "*.entitlements" -not -path "*/.git/*" 2>/dev/null)
 
+# ── 0. 工程与源文件同步 ───────────────────────────────────
+# project.yml 的 sources 以路径引用，新增源文件后 Xcode 目标的文件
+# 列表不会自动更新，需重新生成 TinyBuddy.xcodeproj 才有新文件（否则
+# 编译报 "cannot find 'X' in scope"）。仅在工程过期（project.yml 或任一
+# 源文件比 pbxproj 新）且本机装有 xcodegen 时重新生成，避免无关 churn。
+XCODEGEN_BIN="$(command -v xcodegen 2>/dev/null || true)"
+PBXPROJ="$XCODEPROJ/project.pbxproj"
+STALE_INPUT="$(find "$ROOT/project.yml" "$ROOT/Sources" "$ROOT/Widget" "$ROOT/Tests" \
+  -type f \( -name "*.swift" -o -name "*.yml" \) -newer "$PBXPROJ" -print 2>/dev/null | head -1)"
+if [ -n "$XCODEGEN_BIN" ] && [ -n "$STALE_INPUT" ]; then
+  info "工程过期（$STALE_INPUT 更新于 $PBXPROJ），重新生成 Xcode 工程 ..."
+  ( cd "$ROOT" && "$XCODEGEN_BIN" generate ) || fail "xcodegen generate 失败：请安装 xcodegen 或手动运行它"
+fi
+
 # ── 1. 构建 ───────────────────────────────────────────────────
 info "构建 $APP_NAME ..."
 mkdir -p "$LOG_DIR"
