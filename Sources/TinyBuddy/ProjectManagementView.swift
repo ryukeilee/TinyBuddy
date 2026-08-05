@@ -5,6 +5,8 @@ struct ProjectManagementView: View {
     let registryProvider: () -> TinyBuddyProjectRegistry?
     let sessionEngineProvider: () -> FocusSessionEngine?
     let recentProjectStore: GitTodayRecentProjectStore
+    let autoMergeUndoProvider: () -> TinyBuddyProjectMergeUndo?
+    let clearAutoMergeUndo: () -> Void
 
     @State private var projects: [TinyBuddyProject] = []
     @State private var selectedID: TinyBuddyProjectID?
@@ -119,6 +121,11 @@ struct ProjectManagementView: View {
             .sorted {
                 $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
             } ?? []
+        // Adopt the undo token of an automatic merge until the user performs an
+        // explicit identity modification, which invalidates it.
+        if mergeUndo == nil {
+            mergeUndo = autoMergeUndoProvider()
+        }
         if selectedID == nil || !projects.contains(where: { $0.id == selectedID }) {
             selectedID = projects.first?.id
         }
@@ -153,6 +160,7 @@ struct ProjectManagementView: View {
         switch registry.merge(preview) {
         case .saved(_, let undo):
             mergeUndo = undo
+            clearAutoMergeUndo()
             sessionEngineProvider()?.refreshProjectIdentityPresentation()
             refreshRecentProjectDisplay(registry)
             message = "项目已合并；撤销入口会保留到下一次身份修改。"
@@ -171,6 +179,7 @@ struct ProjectManagementView: View {
         switch registry.undoMerge(undo) {
         case .saved:
             mergeUndo = nil
+            clearAutoMergeUndo()
             sessionEngineProvider()?.refreshProjectIdentityPresentation()
             refreshRecentProjectDisplay(registry)
             message = "项目合并已撤销。"
@@ -199,6 +208,7 @@ struct ProjectManagementView: View {
         switch result {
         case .saved:
             mergeUndo = nil
+            clearAutoMergeUndo()
             sessionEngineProvider()?.refreshProjectIdentityPresentation()
             refreshRecentProjectDisplay(registry)
             message = success

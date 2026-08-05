@@ -317,6 +317,259 @@ final class ProjectIdentityTests: XCTestCase {
         XCTAssertEqual(store.load(), first)
     }
 
+    func testFileStoreKeepsValidBackupWhenPrimaryIsCorrupt() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ProjectRegistryBackupTests.\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("registry.json")
+        let store = TinyBuddyProjectRegistryFileStore(fileURL: url)
+        let first = TinyBuddyProjectRegistrySnapshot(projects: [
+            project(id: "first", name: "First", alias: "/first/.git")
+        ])
+        let second = TinyBuddyProjectRegistrySnapshot(
+            revision: 1,
+            generation: 1,
+            projects: [project(id: "second", name: "Second", alias: "/second/.git")]
+        )
+        XCTAssertTrue(store.save(first))
+        XCTAssertTrue(store.save(second))
+        XCTAssertEqual(store.load(), second)
+
+        // Primary becomes unreadable. Load falls back to the backup (first).
+        try Data("corrupt".utf8).write(to: url, options: .atomic)
+        XCTAssertEqual(store.load(), first)
+
+        // A later save must not copy the corrupt primary over the only good
+        // backup; otherwise a second corruption would destroy every copy.
+        let third = TinyBuddyProjectRegistrySnapshot(
+            revision: 2,
+            generation: 2,
+            projects: [project(id: "third", name: "Third", alias: "/third/.git")]
+        )
+        XCTAssertTrue(store.save(third))
+        try Data("corrupt-again".utf8).write(to: url, options: .atomic)
+        XCTAssertEqual(store.load(), first)
+    }
+
+    func testFileStoreRejectsRedirectLoopSnapshot() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ProjectRegistryLoopTests.\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("registry.json")
+        let store = TinyBuddyProjectRegistryFileStore(fileURL: url)
+        let loop = TinyBuddyProjectRegistrySnapshot(
+            projects: [
+                project(id: "a", name: "A", alias: "/a/.git"),
+                project(id: "b", name: "B", alias: "/b/.git")
+            ],
+            redirects: [
+                TinyBuddyProjectID(rawValue: "a"): TinyBuddyProjectID(rawValue: "b"),
+                TinyBuddyProjectID(rawValue: "b"): TinyBuddyProjectID(rawValue: "a")
+            ]
+        )
+        XCTAssertFalse(loop.isSemanticallyValid)
+        XCTAssertFalse(store.save(loop))
+        XCTAssertNil(store.load())
+    }
+
+    func testCaseOnlyRenameAndReferenceResolveToOneStableProject() throws {
+        let store = ProjectRegistryMemoryStore()
+        let stableID = TinyBuddyProjectID(rawValue: "case-stable")
+        let registry = TinyBuddyProjectRegistry(store: store, idProvider: { stableID })
+        let token = registry.beginScan()
+
+        let original = try resolved(registry.observe(observation(
+            fingerprint: "git-roots:abc",
+            alias: "/Users/Me/Repo/.git",
+            name: "Repo"
+        ), token: token))
+        // A case-only rename on a case-insensitive volume changes the alias
+        // string but not the repository. Both resolution paths must still
+        // land on the single durable identity.
+        XCTAssertEqual(registry.resolve(projectKey: "/USERS/me/REPO/.GIT")?.id, stableID)
+        XCTAssertEqual(registry.resolve(projectKey: "GIT-ROOTS:ABC")?.id, stableID)
+
+        let renamed = try resolved(registry.observe(observation(
+            fingerprint: "git-roots:abc",
+            alias: "/Users/Me/Repo/.GIT",
+            name: "Repo"
+        ), token: token))
+        XCTAssertEqual(renamed.id, stableID)
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 1)
+        XCTAssertEqual(original.id, renamed.id)
+    }
+
+    func testCaseFoldedResolutionFallsBackForLegacyReferences() throws {
+        // Observation matching stays case-exact, so read-side resolution folds
+        // case only as a fallback: stale references recorded before a case-only
+        // rename still land on the durable identity, while exact-case keys are
+        // never crossed.
+        let first = project(id: "legacy", name: "Legacy", alias: "/OLD/Path/.git")
+        var second = project(id: "current", name: "Current", alias: "/new/path/.git")
+        second.repositoryFingerprint = "git-roots:shared"
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(projects: [first, second]))
+        let registry = TinyBuddyProjectRegistry(store: store)
+
+        XCTAssertEqual(registry.resolve(projectKey: "/OLD/Path/.git")?.id, first.id)
+        XCTAssertEqual(registry.resolve(projectKey: "/new/path/.git")?.id, second.id)
+        // Folded fallback resolves the stale different-case reference that has
+        // no exact counterpart anywhere in the registry.
+        XCTAssertEqual(registry.resolve(projectKey: "/new/PATH/.GIT")?.id, second.id)
+        XCTAssertEqual(registry.resolve(projectKey: "GIT-ROOTS:SHARED")?.id, second.id)
+
+        // An observation with a different-case alias and the shared fingerprint
+        // consolidates into the fingerprint owner instead of minting a third
+        // identity; the unrelated legacy row is left untouched.
+        let token = registry.beginScan()
+        let resolved = try resolved(registry.observe(observation(
+            fingerprint: "git-roots:shared",
+            alias: "/new/PATH/.GIT",
+            name: "Current"
+        ), token: token))
+        XCTAssertEqual(resolved.id, second.id)
+        XCTAssertTrue(registry.currentSnapshot.projects
+            .first { $0.id == second.id }?.aliases.contains("/new/PATH/.GIT") == true)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == first.id }?.state, .active)
+    }
+
+    func testCaseTwinAliasesOnCaseSensitiveVolumeStayDistinct() throws {
+        // /Repo and /repo are genuinely different repositories that can coexist
+        // on a case-sensitive volume. Observation must never fold their aliases
+        // together, and resolution must prefer the exact-case row.
+        let upper = project(id: "upper", name: "Upper", alias: "/Repo/.git")
+        var lower = project(id: "lower", name: "Lower", alias: "/repo/.git")
+        lower.repositoryFingerprint = "git-roots:lower"
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(projects: [upper, lower]))
+        let registry = TinyBuddyProjectRegistry(store: store)
+        let token = registry.beginScan()
+
+        let upperResolved = try resolved(registry.observe(observation(
+            fingerprint: "git-roots:upper",
+            alias: "/Repo/.git",
+            name: "Upper"
+        ), token: token))
+        XCTAssertEqual(upperResolved.id, upper.id)
+        // Neither row was merged into the other.
+        XCTAssertEqual(registry.currentSnapshot.projects.filter { $0.state != .removed }.count, 2)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == upper.id }?.state, .active)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == lower.id }?.state, .active)
+        XCTAssertEqual(registry.resolve(projectKey: "/Repo/.git")?.id, upper.id)
+        XCTAssertEqual(registry.resolve(projectKey: "/repo/.git")?.id, lower.id)
+    }
+
+    func testAutoMergeConsolidatesDuplicateGroupsAndPreservesHistory() throws {
+        // The policy target is deterministic: active, then customized name,
+        // then smallest stable ID — so "a-canonical" wins over "b-legacy".
+        let target = project(id: "a-canonical", name: "Canonical", alias: "/canonical/.git")
+        var duplicate = project(id: "b-legacy", name: "Legacy", alias: "/legacy/.git")
+        duplicate.repositoryFingerprint = "ROOTS:SHARED" // case differs on purpose
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(projects: [target, duplicate]))
+        let registry = TinyBuddyProjectRegistry(store: store)
+
+        let undo: TinyBuddyProjectMergeUndo?
+        switch registry.autoMergeDuplicates() {
+        case .completed(let count, let token):
+            XCTAssertEqual(count, 1)
+            undo = token
+        case .persistenceFailed:
+            return XCTFail("auto-merge should persist")
+        }
+
+        // The merged-out row stays as a tombstone; one identity is active.
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 2)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == target.id }?.state, .active)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == duplicate.id }?.state, .removed)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == target.id }?.aliases.count, 2)
+        XCTAssertEqual(registry.resolve(projectKey: "/legacy/.git")?.id, target.id)
+        XCTAssertEqual(registry.resolve(projectKey: "roots:shared")?.id, target.id)
+        XCTAssertEqual(registry.resolve(projectKey: "ROOTS:SHARED")?.id, target.id)
+
+        // Repeated passes are no-ops once consolidated.
+        guard case .completed(0, _) = registry.autoMergeDuplicates() else {
+            return XCTFail("second auto-merge pass should be a no-op")
+        }
+
+        guard let undo else { return XCTFail("undo token missing") }
+        guard case .saved = registry.undoMerge(undo) else {
+            return XCTFail("auto-merge undo should save")
+        }
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 2)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == duplicate.id }?.state, .active)
+        XCTAssertEqual(registry.resolve(projectKey: "/legacy/.git")?.id, duplicate.id)
+    }
+
+    func testAutoMergePrefersActiveTargetAndSkipsArchivedGroups() throws {
+        var unavailable = project(id: "unavailable", name: "Unavailable", alias: "/unavailable/.git")
+        unavailable.state = .temporarilyUnavailable
+        unavailable.repositoryFingerprint = "roots:same"
+        var active = project(id: "active", name: "Active", alias: "/active/.git")
+        active.repositoryFingerprint = "roots:same"
+        var archived = project(id: "archived", name: "Archived", alias: "/archived/.git")
+        archived.state = .archived
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(projects: [
+            unavailable, active, archived
+        ]))
+        let registry = TinyBuddyProjectRegistry(store: store)
+
+        // The archived member makes its group ineligible; only the active/
+        // unavailable pair merges, preferring the active project as target.
+        guard case .completed(let count, _) = registry.autoMergeDuplicates(),
+              count == 1 else {
+            return XCTFail("expected exactly one eligible merge")
+        }
+        let byID = Dictionary(uniqueKeysWithValues: registry.currentSnapshot.projects.map { ($0.id, $0) })
+        XCTAssertEqual(byID[active.id]?.state, .active)
+        XCTAssertEqual(byID[unavailable.id]?.state, .removed)
+        XCTAssertEqual(byID[archived.id]?.state, .archived)
+        XCTAssertEqual(registry.resolve(id: unavailable.id)?.id, active.id)
+    }
+
+    func testAutoMergeSkipsEntirelyArchivedGroup() throws {
+        var archivedTarget = project(id: "archived-target", name: "Archived Target", alias: "/at/.git")
+        archivedTarget.state = .archived
+        var archivedSource = project(id: "archived-source", name: "Archived Source", alias: "/as/.git")
+        archivedSource.state = .archived
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(projects: [
+            archivedTarget, archivedSource
+        ]))
+        let registry = TinyBuddyProjectRegistry(store: store)
+
+        guard case .completed(0, _) = registry.autoMergeDuplicates() else {
+            return XCTFail("archived group must not be merged automatically")
+        }
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 2)
+        XCTAssertEqual(registry.resolve(projectKey: "/as/.git")?.id, archivedSource.id)
+    }
+
+    func testAutoMergePersistenceFailureLeavesRegistryUnchanged() throws {
+        let target = project(id: "target", name: "Canonical", alias: "/canonical/.git")
+        let duplicate = project(id: "duplicate", name: "Legacy", alias: "/legacy/.git")
+        let initial = TinyBuddyProjectRegistrySnapshot(projects: [target, duplicate])
+        let store = ProjectRegistryMemoryStore(initial)
+        let registry = TinyBuddyProjectRegistry(store: store)
+        store.failsSaves = true
+
+        XCTAssertEqual(registry.autoMergeDuplicates(), .persistenceFailed)
+        XCTAssertEqual(registry.currentSnapshot, initial)
+        XCTAssertEqual(registry.resolve(projectKey: "/legacy/.git")?.id, duplicate.id)
+    }
+
+    func testAutoMergeKeepsRecentProjectResolvableThroughRedirect() throws {
+        let target = project(id: "a-target", name: "Canonical", alias: "/canonical/.git")
+        let duplicate = project(id: "b-duplicate", name: "Legacy", alias: "/legacy/.git")
+        let registry = TinyBuddyProjectRegistry(store: ProjectRegistryMemoryStore(
+            TinyBuddyProjectRegistrySnapshot(projects: [target, duplicate])
+        ))
+        guard case .completed(1, _) = registry.autoMergeDuplicates() else {
+            return XCTFail("auto-merge should merge")
+        }
+
+        // The recent-project store may still hold the duplicate's ID from
+        // before the merge; resolving it must land on the canonical project.
+        XCTAssertEqual(registry.resolve(id: duplicate.id)?.id, target.id)
+        XCTAssertEqual(registry.automaticContext(for: duplicate.id.rawValue)?.key, target.id.rawValue)
+    }
+
     private func observation(
         fingerprint: String,
         alias: String,

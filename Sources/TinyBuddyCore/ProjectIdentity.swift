@@ -163,8 +163,14 @@ public final class TinyBuddyProjectRegistryFileStore: TinyBuddyProjectRegistryPe
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: staged, options: .atomic)
             if FileManager.default.fileExists(atPath: fileURL.path) {
-                let previous = try Data(contentsOf: fileURL)
-                try previous.write(to: backupURL, options: .atomic)
+                // Only a primary that still decodes as a valid snapshot is worth
+                // preserving as the recovery backup. Copying corrupt bytes over
+                // the last good backup would destroy the only recoverable copy
+                // if the replacement below ever failed mid-flight.
+                if read(fileURL) != nil {
+                    let previous = try Data(contentsOf: fileURL)
+                    try previous.write(to: backupURL, options: .atomic)
+                }
                 _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: staged)
             } else {
                 try FileManager.default.moveItem(at: staged, to: fileURL)
@@ -355,6 +361,15 @@ public enum TinyBuddyProjectMergeResult: Equatable, Sendable {
     case persistenceFailed
 }
 
+public enum TinyBuddyProjectAutoMergeOutcome: Equatable, Sendable {
+    /// Every eligible duplicate group was merged. `undo` covers the last
+    /// merge of the pass; earlier merges stay committed.
+    case completed(mergeCount: Int, undo: TinyBuddyProjectMergeUndo?)
+    /// A merge could not be persisted. The failed step left the registry
+    /// unchanged; merges completed earlier in the same pass remain durable.
+    case persistenceFailed
+}
+
 public struct TinyBuddyProjectDiscoveryReconciliation: Equatable, Sendable {
     public let observedProjectIDs: Set<TinyBuddyProjectID>
     public let didCompleteAvailabilityReconciliation: Bool
@@ -407,8 +422,14 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard token.generation == snapshot.generation else { return .ignoredStale }
         var working = snapshot
+        // Fingerprints are opaque tokens whose character case never carries
+        // meaning, so comparison folds. Aliases stay case-exact here: on a
+        // case-sensitive volume two genuinely different repositories can live
+        // at `/Repo` and `/repo`, and folding would merge the wrong identity.
+        // A case-only rename of the same repository is still recognized through
+        // its unchanged fingerprint.
         let fingerprintMatches = working.projects.indices.filter {
-            working.projects[$0].repositoryFingerprint == fingerprint
+            working.projects[$0].repositoryFingerprint?.lowercased() == fingerprint.lowercased()
         }
         let aliasMatches = working.projects.indices.filter {
             working.projects[$0].aliases.contains(alias)
@@ -434,20 +455,11 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
             if !sourceIndices.isEmpty {
                 guard working.revision < Int64.max,
                       working.generation < Int64.max else { return .rejectedInvalid }
-                var target = working.projects[resolvedIndex]
-                for sourceIndex in sourceIndices.sorted(by: { working.projects[$0].id < working.projects[$1].id }) {
-                    let source = working.projects[sourceIndex]
-                    target.aliases.formUnion(source.aliases)
-                    if target.repositoryFingerprint == nil {
-                        target.repositoryFingerprint = source.repositoryFingerprint
-                    }
-                    working.projects[sourceIndex].state = .removed
-                    working.redirects[source.id] = target.id
-                    for (sourceID, targetID) in working.redirects where targetID == source.id {
-                        working.redirects[sourceID] = target.id
-                    }
-                }
-                working.projects[resolvedIndex] = target
+                mergeSources(
+                    sourceIndices.sorted(by: { working.projects[$0].id < working.projects[$1].id }),
+                    into: resolvedIndex,
+                    in: &working
+                )
                 working = advanced(working, generation: working.generation + 1)
                 guard store.save(working) else { return .persistenceFailed }
                 snapshot = working
@@ -524,10 +536,55 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
         let candidates = snapshot.projects.filter {
             $0.kind == .gitRepository && $0.state != .removed && $0.repositoryFingerprint != nil
         }
-        return Dictionary(grouping: candidates, by: { $0.repositoryFingerprint! })
+        return Dictionary(grouping: candidates, by: { $0.repositoryFingerprint!.lowercased() })
             .filter { $0.value.count > 1 }
-            .map { TinyBuddyProjectDuplicateGroup(fingerprint: $0.key, projects: $0.value.sorted { $0.id < $1.id }) }
-            .sorted { $0.fingerprint < $1.fingerprint }
+            .map { group in
+                let members = group.value.sorted { $0.id < $1.id }
+                return TinyBuddyProjectDuplicateGroup(
+                    fingerprint: members[0].repositoryFingerprint!,
+                    projects: members
+                )
+            }
+            .sorted { $0.fingerprint.lowercased() < $1.fingerprint.lowercased() }
+    }
+
+    /// Automatically consolidates every duplicate fingerprint group. Group
+    /// members must all be live git repositories sharing one fingerprint; a
+    /// group containing an archived member is left for the explicit
+    /// preview/merge path because an automatic pass never reverts a user
+    /// decision. Each merge is atomic and revision-monotonic, keeps the
+    /// target's identity and state, unions aliases, and tombstones sources so
+    /// delayed inputs resolve through redirects. Attribution always resolves
+    /// on read, so focus history and daily stats stay intact without a data
+    /// migration step.
+    public func autoMergeDuplicates() -> TinyBuddyProjectAutoMergeOutcome {
+        lock.lock(); defer { lock.unlock() }
+        var mergeCount = 0
+        var lastUndo: TinyBuddyProjectMergeUndo?
+        while true {
+            guard snapshot.revision < Int64.max,
+                  snapshot.generation < Int64.max else { return .persistenceFailed }
+            guard let group = nextAutoMergeGroup(in: snapshot) else { break }
+            let sourceIDs = Set(group.sources.map { $0.id })
+            let sourceIndices = snapshot.projects.indices.filter {
+                sourceIDs.contains(snapshot.projects[$0].id) && snapshot.projects[$0].state != .removed
+            }
+            guard let targetIndex = snapshot.projects.firstIndex(where: {
+                $0.id == group.target.id && $0.state != .removed
+            }),
+            sourceIndices.count == sourceIDs.count else { break }
+
+            let before = snapshot
+            var working = snapshot
+            mergeSources(sourceIndices, into: targetIndex, in: &working)
+            working = advanced(working, generation: working.generation + 1)
+            guard working.isSemanticallyValid else { return .persistenceFailed }
+            guard store.save(working) else { return .persistenceFailed }
+            snapshot = working
+            mergeCount += 1
+            lastUndo = TinyBuddyProjectMergeUndo(before: before, committedRevision: working.revision)
+        }
+        return .completed(mergeCount: mergeCount, undo: lastUndo)
     }
 
     public func previewMerge(
@@ -575,20 +632,7 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
 
         let before = snapshot
         var working = snapshot
-        var target = working.projects[targetIndex]
-        for index in sourceIndices {
-            let source = working.projects[index]
-            target.aliases.formUnion(source.aliases)
-            if target.repositoryFingerprint == nil {
-                target.repositoryFingerprint = source.repositoryFingerprint
-            }
-            working.projects[index].state = .removed
-            working.redirects[source.id] = target.id
-            for (redirectSource, redirectTarget) in working.redirects where redirectTarget == source.id {
-                working.redirects[redirectSource] = target.id
-            }
-        }
-        working.projects[targetIndex] = target
+        mergeSources(sourceIndices, into: targetIndex, in: &working)
         working = advanced(working, generation: working.generation + 1)
         guard working.isSemanticallyValid else { return .rejectedInvalid }
         guard store.save(working) else { return .persistenceFailed }
@@ -643,8 +687,10 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
             for index in working.projects.indices {
                 guard working.projects[index].state == .active,
                       working.projects[index].aliases.contains(where: { alias in
-                          prefixes.contains { prefix in
-                              alias == prefix || alias.hasPrefix(prefix + "/")
+                          let foldedAlias = alias.lowercased()
+                          return prefixes.contains { prefix in
+                              let foldedPrefix = prefix.lowercased()
+                              return foldedAlias == foldedPrefix || foldedAlias.hasPrefix(foldedPrefix + "/")
                           }
                       }) else { continue }
                 working.projects[index].state = .temporarilyUnavailable
@@ -734,6 +780,63 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
         return normalized.isEmpty ? nil : normalized
     }
 
+    /// Applies one identity consolidation: unions the sources' aliases into
+    /// the target, upgrades a missing target fingerprint, tombstones every
+    /// source, and re-points any redirect chain that ended at a source so
+    /// historical and delayed inputs resolve through the target.
+    private func mergeSources(
+        _ sourceIndices: [Int],
+        into targetIndex: Int,
+        in working: inout TinyBuddyProjectRegistrySnapshot
+    ) {
+        var target = working.projects[targetIndex]
+        for sourceIndex in sourceIndices {
+            let source = working.projects[sourceIndex]
+            target.aliases.formUnion(source.aliases)
+            if target.repositoryFingerprint == nil {
+                target.repositoryFingerprint = source.repositoryFingerprint
+            }
+            working.projects[sourceIndex].state = .removed
+            working.redirects[source.id] = target.id
+            for (redirectSource, redirectTarget) in working.redirects where redirectTarget == source.id {
+                working.redirects[redirectSource] = target.id
+            }
+        }
+        working.projects[targetIndex] = target
+    }
+
+    /// Deterministic pick of the first eligible duplicate group. A group is
+    /// eligible when it holds more than one live git project sharing one
+    /// fingerprint and none of its members was explicitly archived. The
+    /// target prefers an active project over a temporarily unavailable one,
+    /// then a customized display name, then the smallest stable ID.
+    private func nextAutoMergeGroup(
+        in value: TinyBuddyProjectRegistrySnapshot
+    ) -> (target: TinyBuddyProject, sources: [TinyBuddyProject])? {
+        let eligible = Dictionary(
+            grouping: value.projects.filter {
+                $0.kind == .gitRepository && $0.state != .removed && $0.repositoryFingerprint != nil
+            },
+            by: { $0.repositoryFingerprint!.lowercased() }
+        )
+        .values
+        .filter { $0.count > 1 && !$0.contains(where: { $0.state == .archived }) }
+        guard let group = eligible.min(by: { lhs, rhs in
+            (lhs.map(\.id).min() ?? TinyBuddyProjectID()) < (rhs.map(\.id).min() ?? TinyBuddyProjectID())
+        }) else { return nil }
+        let sorted = group.sorted { $0.id < $1.id }
+        let target = sorted.min { lhs, rhs in
+            let leftActive = lhs.state == .active
+            let rightActive = rhs.state == .active
+            if leftActive != rightActive { return leftActive }
+            if lhs.isDisplayNameCustomized != rhs.isDisplayNameCustomized {
+                return lhs.isDisplayNameCustomized
+            }
+            return lhs.id < rhs.id
+        } ?? sorted[0]
+        return (target, sorted.filter { $0.id != target.id })
+    }
+
     private func canonicalCandidateIndex(
         from indices: Set<Int>,
         fingerprint: String,
@@ -747,8 +850,8 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
             // Prefer an exact fingerprint over an alias-only match.  This is
             // what lets a moved repository reclaim its durable identity even
             // when an old path alias belongs to another stale row.
-            let leftExact = left.repositoryFingerprint == fingerprint
-            let rightExact = right.repositoryFingerprint == fingerprint
+            let leftExact = left.repositoryFingerprint?.lowercased() == fingerprint.lowercased()
+            let rightExact = right.repositoryFingerprint?.lowercased() == fingerprint.lowercased()
             if leftExact != rightExact { return leftExact }
             // Explicit names are user data and must not be overwritten by an
             // automatically discovered worktree name.
@@ -780,9 +883,19 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
         if value.projects.contains(where: { $0.id == direct }) {
             return terminalTarget(for: direct, in: value) ?? direct
         }
-        guard let project = value.projects.first(where: {
+        // Exact-case reference first: on a case-sensitive volume `/Repo` and
+        // `/repo` are distinct repositories and folding must not cross them.
+        // The case-folded fallback only serves stale references whose stored
+        // case differs from the key's (for example a legacy session recorded
+        // before a case-only rename of the repository).
+        let exact = value.projects.first(where: {
             $0.aliases.contains(key) || $0.repositoryFingerprint == key
-        }) else { return nil }
+        })
+        let project = exact ?? value.projects.first(where: {
+            $0.aliases.contains { $0.lowercased() == key.lowercased() }
+                || $0.repositoryFingerprint?.lowercased() == key.lowercased()
+        })
+        guard let project else { return nil }
         return terminalTarget(for: project.id, in: value) ?? project.id
     }
 }

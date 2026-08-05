@@ -94,7 +94,9 @@ struct TinyBuddyApp: App {
                     ProjectManagementView(
                         registryProvider: { appDelegate.projectIdentityRegistry },
                         sessionEngineProvider: { appDelegate.focusSessionEngine },
-                        recentProjectStore: appDelegate.recentProjectStore
+                        recentProjectStore: appDelegate.recentProjectStore,
+                        autoMergeUndoProvider: { appDelegate.lastProjectAutoMergeUndo },
+                        clearAutoMergeUndo: { appDelegate.lastProjectAutoMergeUndo = nil }
                     )
                         .tabItem { Label("项目身份", systemImage: "point.3.connected.trianglepath.dotted") }
                     FocusSessionReviewView(
@@ -240,6 +242,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Ephemeral only: it connects an existing FSEvent-triggered refresh to the
     /// next committed activity delta without persisting a repository path.
     private var pendingFocusGitChange = false
+    /// Undo token of the most recent automatic duplicate merge. Cleared by any
+    /// later explicit identity modification; the registry's revision guard
+    /// rejects a stale undo attempt safely.
+    fileprivate var lastProjectAutoMergeUndo: TinyBuddyProjectMergeUndo?
     private lazy var manualFocusMenuBarController = ManualFocusMenuBarController(
         recentProjectNameProvider: { [weak self] in
             self?.petViewModel.displayPresentation.recentProjectName
@@ -574,6 +580,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshFocusHistoryForPresentation()
         powerStateMonitor.start()
         hudVisibilityMonitor.start()
+        // Consolidate leftover duplicate identities from earlier runs so the
+        // project surface is already unified before the first scan commits.
+        runProjectIdentityAutoMergeIfNeeded()
     }
 
     private func reconcileProjectDiscovery(completeScan: Bool) {
@@ -601,6 +610,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        runProjectIdentityAutoMergeIfNeeded()
+
         if let fingerprint = projectDiscoveryStore.loadRecentRepositoryFingerprint(),
            let project = projectRegistry.resolve(projectKey: fingerprint) {
             recentProjectStore.saveTodayProject(id: project.id, displayName: project.displayName)
@@ -613,6 +624,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.post(
                 name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
                 object: nil
+            )
+        }
+    }
+
+    /// Merges duplicate project identities that share one repository
+    /// fingerprint. Runs after launch and after every committed discovery so
+    /// moved/renamed/re-authorized repositories converge on one identity even
+    /// when only one of the duplicate rows is still observed. Explicit
+    /// archives are never merged automatically; the manual preview/merge path
+    /// in the project settings covers them. The last undo token stays
+    /// available to the project settings until the next identity change.
+    private func runProjectIdentityAutoMergeIfNeeded() {
+        guard let projectRegistry,
+              let engine = focusSessionBridge?.sessionEngine else { return }
+        switch projectRegistry.autoMergeDuplicates() {
+        case .completed(let mergeCount, let undo):
+            if mergeCount > 0 {
+                lastProjectAutoMergeUndo = undo
+                engine.refreshProjectIdentityPresentation()
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+                        object: nil
+                    )
+                }
+            }
+        case .persistenceFailed:
+            tinyBuddyStartupLogger.error(
+                "automatic project identity merge could not be persisted; registry and history unchanged"
             )
         }
     }
