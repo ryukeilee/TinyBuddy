@@ -55,7 +55,14 @@ final class TinyBuddyLoginItemManager {
     private(set) var cachedStatus: Status
 
     init(
-        statusProvider: @escaping StatusProvider = { TinyBuddyLoginItemManager.productionStatus() },
+        statusProvider: @escaping StatusProvider = {
+            // The class is @MainActor, so every call to statusProvider() happens
+            // on the main actor; the default closure is evaluated at the (nonisolated)
+            // call site, so assert that isolation before querying SMAppService.
+            MainActor.assumeIsolated {
+                TinyBuddyLoginItemManager.productionStatus()
+            }
+        },
         register: @escaping RegistrationHandler = { try SMAppService.mainApp.register() },
         unregister: @escaping RegistrationHandler = { try SMAppService.mainApp.unregister() },
         notificationCenter: NotificationCenter = .default
