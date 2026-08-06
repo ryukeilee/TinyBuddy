@@ -613,6 +613,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     func handleWillSleep() {
         needsWakeRevalidation = true
         advanceLifecycleGeneration()
+        let hadActiveRefresh = isRefreshing
         invalidateActiveRefreshExecution()
         timer?.invalidate()
         timer = nil
@@ -629,12 +630,30 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         repositoryChangeMonitor?.stop()
         renewTimeScopeLease()
         cancelScript()
+        // The cancelled execution's start notification already moved the HUD
+        // into a refreshing state, but no result will ever be published for
+        // it. Emit a terminal status change (without a new status object) so
+        // consumers clear the in-flight marker and fall back to the last
+        // trusted status instead of staying stuck on "refreshing" until a
+        // post-wake refresh completes.
+        if hadActiveRefresh {
+            statusNotificationCenter.post(
+                name: .gitActivityRefreshStatusDidChange,
+                object: nil,
+                userInfo: nextLifecycleNotificationUserInfo()
+            )
+        }
     }
 
     func handleConfigChanged() {
         isPeriodicRefreshSuspended = false
         repositoryChangeMonitor?.stop()
         updateRepositoryChangeMonitoring()
+        // A queued manual/repository-change request was captured against the
+        // pre-change configuration. The replacement refresh below already
+        // fulfills that intent with current inputs, so the obsolete request
+        // must not be re-executed after the replacement completes.
+        pendingRefreshRequest = nil
         if isRefreshing {
             invalidateActiveRefreshExecution()
             cancelScript()
@@ -652,6 +671,11 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         repositoryChangeMonitor?.stop()
         updateRepositoryChangeMonitoring()
         scheduleTimerIfNeeded(forceReschedule: true)
+        // A queued manual/repository-change request predates the new
+        // authorization set. The replacement refresh below scans the updated
+        // roots immediately, so the obsolete queued request must not trigger
+        // an additional follow-up refresh once the replacement completes.
+        pendingRefreshRequest = nil
         if isRefreshing {
             invalidateActiveRefreshExecution()
             cancelScript()
@@ -982,8 +1006,14 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
 
         if let pendingRequest = pendingRefreshRequest {
             pendingRefreshRequest = nil
-            let canRunWhileActive = isApplicationActive
-            if canRunWhileActive || pendingRequest.kind == .authorization {
+            // Wake and repository-change requests are opportunistic and are
+            // dropped while the app is inactive. A manual request carries
+            // explicit user intent captured during an active refresh, so it
+            // must still run after the in-flight refresh completes even if
+            // the app moved to the background in the meantime.
+            let canRunWhileInactive = pendingRequest.kind == .authorization
+                || pendingRequest.kind == .manual
+            if isApplicationActive || canRunWhileInactive {
                 let monotonicTime = monotonicTimeProvider()
                 let shouldDropCoalescedWake = pendingRequest.kind == .wake
                     && succeeded

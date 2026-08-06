@@ -2440,6 +2440,149 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.statusHistory.count, 2)
     }
 
+    func testAuthorizationChangeDuringQueuedManualRefreshDropsObsoleteManualRequest() {
+        let oldRoot = URL(fileURLWithPath: "/Authorized/OldProject")
+        let currentRoot = URL(fileURLWithPath: "/Authorized/CurrentProject")
+        let harness = makeHarness(authorizedRoots: [oldRoot])
+        let firstRunStarted = expectation(description: "first refresh started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            firstRunStarted.fulfill()
+            releaseFirstRun.wait()
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        // The manual request is queued while the launch refresh is in flight.
+        harness.coordinator.handleManualRefresh()
+        // An authorization change cancels the in-flight scan and starts a
+        // replacement that already fulfills the user's intent with the new
+        // roots. The obsolete queued manual request must not survive it.
+        harness.authorizedRoots = [currentRoot]
+        harness.coordinator.handleAuthorizationChanged()
+
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRun.signal()
+        }
+        harness.performAndWaitForStatusCount(1) {}
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 1)
+        XCTAssertEqual(harness.capturedRootPaths, [currentRoot.path])
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
+    func testConfigChangeDuringQueuedManualRefreshDropsObsoleteManualRequest() {
+        let harness = makeHarness()
+        let firstRunStarted = expectation(description: "first refresh started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            firstRunStarted.fulfill()
+            releaseFirstRun.wait()
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        harness.coordinator.handleManualRefresh()
+        harness.coordinator.handleConfigChanged()
+
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRun.signal()
+        }
+        harness.performAndWaitForStatusCount(1) {}
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 1)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
+    func testWillSleepCancelsActiveRefreshAndPublishesTerminalPresentationState() {
+        let harness = makeHarness()
+        let firstRunStarted = expectation(description: "first refresh started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            firstRunStarted.fulfill()
+            releaseFirstRun.wait()
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        var terminalNotificationCount = 0
+        var terminalNotificationCarriedStatus = false
+        let terminalObserver = harness.statusNotificationCenterForTesting.addObserver(
+            forName: .gitActivityRefreshStatusDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            terminalNotificationCount += 1
+            if notification.object as? GitActivityRefreshStatus != nil {
+                terminalNotificationCarriedStatus = true
+            }
+        }
+        defer {
+            harness.statusNotificationCenterForTesting.removeObserver(terminalObserver)
+        }
+
+        harness.coordinator.handleWillSleep()
+        XCTAssertEqual(terminalNotificationCount, 1)
+        XCTAssertFalse(terminalNotificationCarriedStatus)
+        XCTAssertEqual(harness.scriptCancellationCount, 1)
+        // The cancelled execution publishes no new status record.
+        XCTAssertEqual(harness.statusHistory.count, 0)
+
+        releaseFirstRun.signal()
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 1)
+        XCTAssertEqual(harness.statusHistory.count, 0)
+
+        // Wake starts a single fresh refresh that publishes the terminal status.
+        harness.performAndWaitForStatusCount(1) {
+            harness.postWorkspaceNotification(named: NSWorkspace.didWakeNotification)
+        }
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 1)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .didWake)
+    }
+
+    func testManualRefreshQueuedBeforeBackgroundingStillRunsAfterCompletion() {
+        let harness = makeHarness()
+        let firstRunStarted = expectation(description: "first refresh started")
+        let releaseFirstRun = DispatchSemaphore(value: 0)
+        harness.setScriptRunnerHook { runCount in
+            guard runCount == 1 else { return }
+            firstRunStarted.fulfill()
+            releaseFirstRun.wait()
+        }
+
+        harness.coordinator.start()
+        wait(for: [firstRunStarted], timeout: 1.0)
+
+        // The manual request is queued while the app is active, then the app
+        // resigns active before the in-flight refresh completes. The explicit
+        // user intent must still be honored after completion.
+        harness.coordinator.handleManualRefresh()
+        harness.coordinator.handleDidResignActive()
+
+        harness.performAndWaitForScriptRunCount(2) {
+            releaseFirstRun.signal()
+        }
+        harness.performAndWaitForStatusCount(2) {}
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.statusHistory.count, 2)
+        XCTAssertEqual(harness.lastRefreshStatus?.trigger, .reopen)
+    }
+
     func testWidgetReloadFingerprintDistinguishesPartialFailureReasons() {
         let harness = makeHarness(
             authorizedRoots: [URL(fileURLWithPath: "/Authorized/LiveProject")],

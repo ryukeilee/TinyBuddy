@@ -354,6 +354,52 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(combinedSnapshotStore.load()?.revision, committedRevision)
     }
 
+    func testSleepTerminationStatusChangeClearsRefreshingPresentationState() async {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 10, minute: 0, second: 0)
+        let notificationCenter = NotificationCenter()
+        let store = DailyStatsStore(userDefaults: defaults, calendar: calendar, dateProvider: { today })
+        let activityStore = makeActivityStore(defaults: defaults, calendar: calendar, today: today)
+        let combinedSnapshotStore = store.makeCombinedSnapshotStore()
+        let viewModel = PetViewModel(
+            store: store,
+            activityStore: activityStore,
+            combinedSnapshotStore: combinedSnapshotStore,
+            refreshStatusStore: GitActivityRefreshStatusStore(userDefaults: defaults),
+            notificationCenter: notificationCenter,
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today)
+        )
+
+        // A start notification moves the HUD into the refreshing state.
+        notificationCenter.post(name: .gitActivityRefreshDidStart, object: nil)
+
+        let refreshingExpectation = expectation(description: "HUD shows refreshing")
+        Task { @MainActor in
+            while viewModel.displayPresentation.isRefreshing != true {
+                await Task.yield()
+            }
+            refreshingExpectation.fulfill()
+        }
+        await fulfillment(of: [refreshingExpectation], timeout: 1.0)
+
+        // The coordinator cancels the in-flight refresh on sleep and emits a
+        // terminal status change without a status object (no new record is
+        // persisted). The HUD must clear the in-flight marker and keep showing
+        // the last trusted state instead of staying stuck on "refreshing".
+        notificationCenter.post(name: .gitActivityRefreshStatusDidChange, object: nil)
+
+        let clearedExpectation = expectation(description: "HUD cleared refreshing")
+        Task { @MainActor in
+            while viewModel.displayPresentation.isRefreshing != false {
+                await Task.yield()
+            }
+            clearedExpectation.fulfill()
+        }
+        await fulfillment(of: [clearedExpectation], timeout: 1.0)
+        XCTAssertEqual(viewModel.displayPresentation.isRefreshing, false)
+    }
+
     func testFailedRefreshStatusDoesNotRepublishUncommittedActivity() async {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
