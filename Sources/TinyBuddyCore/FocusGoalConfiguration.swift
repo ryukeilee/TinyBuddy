@@ -194,6 +194,11 @@ public enum FocusReminderEngine {
     ///   - dayIdentifier: Current local day identifier.
     ///   - isInQuietHours: Whether the system is in a period where reminders should be suppressed.
     ///   - isSystemDND: Whether the system focus mode / DND is active.
+    ///   - canDeliverNotifications: Whether a notification created right now
+    ///     would actually be presented. When false the engine suppresses new
+    ///     reminders but still persists housekeeping (day reset, stale-gate
+    ///     rollback), so a reminder that was suppressed while undeliverable
+    ///     stays eligible and is re-evaluated once permission is restored.
     /// - Returns: The evaluation result.
     public static func evaluate(
         allSessions: [FocusSession],
@@ -202,7 +207,8 @@ public enum FocusReminderEngine {
         now: Date,
         dayIdentifier: String,
         isInQuietHours: Bool = false,
-        isSystemDND: Bool = false
+        isSystemDND: Bool = false,
+        canDeliverNotifications: Bool = true
     ) -> FocusReminderEvaluation {
         // Day boundary check — reset state if day changed.
         var currentState = state
@@ -234,9 +240,12 @@ public enum FocusReminderEngine {
             }
         }
 
-        // Skip all reminders during quiet hours or system DND, but persist the
-        // rollback/reset above so a suppressed evaluation cannot lose state.
-        if isInQuietHours || isSystemDND {
+        // Skip all reminders during quiet hours, system DND, or when the
+        // notification cannot actually be presented. The rollback/reset above
+        // is still persisted so a suppressed evaluation cannot lose state, and
+        // a reminder suppressed for lack of permission stays eligible and is
+        // re-evaluated once permission is restored.
+        if isInQuietHours || isSystemDND || !canDeliverNotifications {
             return FocusReminderEvaluation(action: .none, updatedState: currentState)
         }
 

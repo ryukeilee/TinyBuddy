@@ -923,11 +923,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessions: [FocusSession],
         dayIdentifier: String
     ) {
-        focusGoalCoordinator.evaluateReminders(
-            sessions: sessions,
-            now: Date(),
-            dayIdentifier: dayIdentifier
-        )
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.focusGoalCoordinator.evaluateReminders(
+                sessions: sessions,
+                now: Date(),
+                dayIdentifier: dayIdentifier
+            )
+        }
     }
 
     func evaluateFocusRemindersNow() {

@@ -1,6 +1,5 @@
 import SwiftUI
 import TinyBuddyCore
-@preconcurrency import UserNotifications
 
 /// Settings tab for focus goal configuration, reminder toggles, and
 /// notification permission status.
@@ -23,6 +22,7 @@ struct FocusGoalSettingsView: View {
     private enum NotificationStatus: Equatable {
         case unknown
         case authorized
+        case alertsDisabled
         case denied
         case notDetermined
     }
@@ -156,6 +156,15 @@ struct FocusGoalSettingsView: View {
                     case .authorized:
                         Text("已授权")
                             .foregroundColor(.green)
+                    case .alertsDisabled:
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("已授权，但系统提醒已关闭")
+                                .foregroundColor(.orange)
+                            Button("前往系统设置") {
+                                FocusNotificationManager.openSystemSettings()
+                            }
+                            .controlSize(.small)
+                        }
                     case .denied:
                         VStack(alignment: .trailing, spacing: 2) {
                             Text("已拒绝")
@@ -170,8 +179,13 @@ struct FocusGoalSettingsView: View {
             } header: {
                 Label("通知设置", systemImage: "bell.badge")
             } footer: {
-                if notificationStatus == .denied {
+                switch notificationStatus {
+                case .denied:
                     Text("通知权限被拒绝后，核心专注功能不受影响，但无法接收提醒。可在系统设置中重新开启。")
+                case .alertsDisabled:
+                    Text("通知权限已授予，但系统已关闭本应用的横幅或提醒。可在系统设置中重新开启。")
+                default:
+                    Text("授权后即可在专注目标达成或达到连续专注阈值时接收提醒。")
                 }
             }
 
@@ -212,7 +226,7 @@ struct FocusGoalSettingsView: View {
         switch notificationStatus {
         case .unknown: return "bell"
         case .authorized: return "bell.fill"
-        case .denied: return "bell.slash.fill"
+        case .denied, .alertsDisabled: return "bell.slash.fill"
         case .notDetermined: return "bell"
         }
     }
@@ -247,27 +261,35 @@ struct FocusGoalSettingsView: View {
     }
 
     private func refreshNotificationStatus() async {
-        let mgr = FocusNotificationManager()
-        if await mgr.isAuthorized() {
+        let state = await FocusNotificationManager().permissionState()
+        switch state {
+        case .authorized:
             notificationStatus = .authorized
-        } else {
-            // Determine if denied or not determined.
-            let settings = await UNUserNotificationCenter.current().notificationSettings()
-            switch settings.authorizationStatus {
-            case .denied:
-                notificationStatus = .denied
-            case .notDetermined:
-                notificationStatus = .notDetermined
-            default:
-                notificationStatus = .unknown
-            }
+        case .alertsDisabled:
+            notificationStatus = .alertsDisabled
+        case .denied:
+            notificationStatus = .denied
+        case .notDetermined:
+            notificationStatus = .notDetermined
+        case .unknown:
+            notificationStatus = .unknown
         }
     }
 
     private func requestNotificationPermission() async {
-        let mgr = FocusNotificationManager()
-        let granted = await mgr.requestAuthorization()
-        notificationStatus = granted ? .authorized : .denied
+        let state = await FocusNotificationManager().requestAuthorization()
+        switch state {
+        case .authorized:
+            notificationStatus = .authorized
+        case .alertsDisabled:
+            notificationStatus = .alertsDisabled
+        case .denied:
+            notificationStatus = .denied
+        case .notDetermined:
+            notificationStatus = .notDetermined
+        case .unknown:
+            notificationStatus = .unknown
+        }
     }
 
     private func saveConfiguration() {

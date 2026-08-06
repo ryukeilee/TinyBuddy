@@ -112,6 +112,129 @@ final class FocusReminderEngineTests: XCTestCase {
         XCTAssertEqual(result.action, .none)
     }
 
+    // MARK: - Not deliverable (permission missing)
+
+    func test_not_deliverable_suppresses_break_reminder_without_gating() {
+        let sessionID = UUID()
+        let sessions = [activeSession(activeSeconds: 4000, now: now, id: sessionID)]
+        let state = FocusReminderState(dayIdentifier: dayID)
+
+        let result = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: defaultConfig,
+            state: state,
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: false
+        )
+
+        // Nothing delivered and the session is NOT gated, so it stays eligible
+        // to fire once permission is restored.
+        XCTAssertEqual(result.action, .none)
+        XCTAssertFalse(result.updatedState.triggeredBreakReminderSessionIDs.contains(sessionID))
+    }
+
+    func test_not_deliverable_suppresses_goal_completion_without_gating() {
+        let exceededMinutes = defaultConfig.dailyFocusGoalMinutes + 10
+        let sessions = [endedSession(durationSeconds: TimeInterval(exceededMinutes * 60))]
+        let state = FocusReminderState(dayIdentifier: dayID)
+
+        let result = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: defaultConfig,
+            state: state,
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: false
+        )
+
+        XCTAssertEqual(result.action, .none)
+        XCTAssertFalse(result.updatedState.goalCompletedNotified)
+        XCTAssertNil(result.updatedState.lastReminderDeliveryDate)
+    }
+
+    func test_not_deliverable_still_rolls_back_stale_goal_gate() {
+        let sessions = [endedSession(durationSeconds: 40 * 60)]
+        var config = defaultConfig
+        config.dailyFocusGoalMinutes = 50
+        var state = FocusReminderState(dayIdentifier: dayID)
+        state.goalCompletedNotified = true
+
+        let result = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: config,
+            state: state,
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: false
+        )
+
+        // Housekeeping must not be lost while delivery is suppressed.
+        XCTAssertEqual(result.action, .none)
+        XCTAssertFalse(result.updatedState.goalCompletedNotified)
+    }
+
+    func test_goal_completion_fires_after_not_deliverable_period_ends() {
+        let nowMinutes = defaultConfig.dailyFocusGoalMinutes + 10
+        let sessions = [endedSession(durationSeconds: TimeInterval(nowMinutes * 60))]
+
+        // Suppressed while not deliverable — gate must NOT be set.
+        let suppressed = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: defaultConfig,
+            state: FocusReminderState(dayIdentifier: dayID),
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: false
+        )
+        XCTAssertEqual(suppressed.action, .none)
+        XCTAssertFalse(suppressed.updatedState.goalCompletedNotified)
+
+        // After permission returns, the still-valid reminder is recalculated.
+        let recovered = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: defaultConfig,
+            state: suppressed.updatedState,
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: true
+        )
+        guard case .goalCompleted = recovered.action else {
+            XCTFail("Expected goalCompleted after permission recovery")
+            return
+        }
+        XCTAssertTrue(recovered.updatedState.goalCompletedNotified)
+    }
+
+    func test_break_reminder_fires_after_notification_deliverability_returns() {
+        let sessionID = UUID()
+        let sessions = [activeSession(activeSeconds: 4000, now: now, id: sessionID)]
+
+        let suppressed = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: defaultConfig,
+            state: FocusReminderState(dayIdentifier: dayID),
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: false
+        )
+        XCTAssertEqual(suppressed.action, .none)
+
+        let recovered = FocusReminderEngine.evaluate(
+            allSessions: sessions,
+            config: defaultConfig,
+            state: suppressed.updatedState,
+            now: now,
+            dayIdentifier: dayID,
+            canDeliverNotifications: true
+        )
+        guard case .breakReminder = recovered.action else {
+            XCTFail("Expected breakReminder after deliverability returned")
+            return
+        }
+        XCTAssertTrue(recovered.updatedState.triggeredBreakReminderSessionIDs.contains(sessionID))
+    }
+
     func test_disabled_break_reminder_returns_none() {
         var config = defaultConfig
         config.isBreakReminderEnabled = false

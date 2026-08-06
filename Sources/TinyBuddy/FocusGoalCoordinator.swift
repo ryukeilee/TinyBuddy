@@ -8,16 +8,16 @@ import TinyBuddyCore
 @MainActor
 final class FocusGoalCoordinator {
     private let preferencesStore: FocusGoalPreferencesStore
-    private let notificationManager: FocusNotificationManager
+    private let notificationManager: FocusNotificationDelivering
     private let logger: Logger
 
     init(
         preferencesStore: FocusGoalPreferencesStore = FocusGoalPreferencesStore(),
-        notificationManager: FocusNotificationManager? = nil,
+        notificationManager: FocusNotificationDelivering? = nil,
         logger: Logger = Logger(subsystem: "local.tinybuddy", category: "FocusGoal")
     ) {
         self.preferencesStore = preferencesStore
-        self.notificationManager = notificationManager ?? FocusNotificationManager()
+        self.notificationManager = notificationManager ?? (FocusNotificationManager() as FocusNotificationDelivering)
         self.logger = logger
     }
 
@@ -65,12 +65,32 @@ final class FocusGoalCoordinator {
         sessions: [FocusSession],
         now: Date,
         dayIdentifier: String
-    ) -> FocusReminderAction {
+    ) async -> FocusReminderAction {
         let config = configuration
         let state = preferencesStore.validateReminderState(for: dayIdentifier)
         let isInQuietHours = checkQuietHours(config: config, now: now)
-        let isDND = isSystemDND()
+        let canDeliver = await notificationManager.canDeliver()
 
+        // Reconcile the system notification queue with deliverability and the
+        // currently enabled features. A request that can never be presented,
+        // or a delivered alert for a feature the user has turned off, is
+        // removed promptly instead of lingering in Notification Center.
+        if !canDeliver {
+            notificationManager.removePendingFocusNotifications()
+        }
+        if !config.isBreakReminderEnabled {
+            notificationManager.removeDeliveredBreakReminder()
+        }
+        if !config.isGoalCompletionEnabled {
+            notificationManager.removeDeliveredGoalCompletion()
+        }
+
+        // The engine only gates a reminder as delivered when it can actually
+        // be presented. When permission is missing, the gate is left open so
+        // the still-valid reminder is re-evaluated after permission returns.
+        // System Focus modes are enforced by macOS at delivery time and the
+        // app must not infer DND from its own foreground state: TinyBuddy is
+        // normally inactive while the user is doing the focused work.
         let evaluation = FocusReminderEngine.evaluate(
             allSessions: sessions,
             config: config,
@@ -78,24 +98,22 @@ final class FocusGoalCoordinator {
             now: now,
             dayIdentifier: dayIdentifier,
             isInQuietHours: isInQuietHours,
-            isSystemDND: isDND
+            isSystemDND: false,
+            canDeliverNotifications: canDeliver
         )
 
         // Persist updated state regardless of action.
         preferencesStore.saveReminderState(evaluation.updatedState)
 
-        // Deliver based on action.
+        // Deliver based on action. `canDeliver` was already true for any
+        // non-`.none` action, and the deliver methods re-check as a guard.
         switch evaluation.action {
         case .none:
             break
         case .breakReminder(let duration):
-            Task {
-                await notificationManager.deliverBreakReminder(continuousDuration: duration)
-            }
+            _ = await notificationManager.deliverBreakReminder(continuousDuration: duration)
         case .goalCompleted(let duration, let minutes):
-            Task {
-                await notificationManager.deliverGoalCompleted(focusDuration: duration, goalMinutes: minutes)
-            }
+            _ = await notificationManager.deliverGoalCompleted(focusDuration: duration, goalMinutes: minutes)
         }
 
         return evaluation.action
@@ -124,13 +142,6 @@ final class FocusGoalCoordinator {
             // Equal endpoints represent a full-day quiet interval.
             return true
         }
-    }
-
-    /// Focus modes are enforced by macOS at notification delivery time. The
-    /// app must not infer DND from its own foreground state: TinyBuddy is
-    /// normally inactive while the user is doing the focused work.
-    private func isSystemDND() -> Bool {
-        false
     }
 }
 
