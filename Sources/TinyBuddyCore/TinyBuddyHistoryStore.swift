@@ -82,6 +82,13 @@ public final class TinyBuddyHistoryStore {
     private let snapshotDecoder: (String) -> TinyBuddyCombinedSnapshot?
     private let retentionPolicy: TinyBuddyHistoryRetentionPolicy
     private let customContainerURL: URL?
+    /// Supplies the current local day identifier. Cleanup never removes the
+    /// current day (or later, possibly future-dated) snapshot files, so a
+    /// clock skew or timezone change cannot discard the active day's history.
+    private let currentDayIdentifierProvider: () -> String?
+    /// Isolates corrupted or unrecognized history files so they never re-enter
+    /// the readable archive and never accumulate as unmanaged junk.
+    private let quarantineProvider: () -> TinyBuddyCorruptedRecordQuarantine?
 
     private static let lock = NSLock()
     private static let snapshotFileExtension = "snapshot"
@@ -101,19 +108,31 @@ public final class TinyBuddyHistoryStore {
     }
 
     /// Test-only init with an explicit container URL. When nil, falls back to
-    /// the App Group container.
+    /// the App Group container. The current-day provider defaults to the real
+    /// local day; tests inject a fixed identifier so pruning is deterministic.
     init(
         fileManager: FileManager = .default,
         snapshotEncoder: @escaping (TinyBuddyCombinedSnapshot) -> String?,
         snapshotDecoder: @escaping (String) -> TinyBuddyCombinedSnapshot?,
         retentionPolicy: TinyBuddyHistoryRetentionPolicy = .default,
-        customContainerURL: URL? = nil
+        customContainerURL: URL? = nil,
+        currentDayIdentifierProvider: @escaping () -> String? = {
+            TinyBuddyTimeEnvironment().capture()?.dayIdentifier
+        },
+        quarantine: TinyBuddyCorruptedRecordQuarantine? = nil
     ) {
         self.fileManager = fileManager
         self.snapshotEncoder = snapshotEncoder
         self.snapshotDecoder = snapshotDecoder
         self.retentionPolicy = retentionPolicy
         self.customContainerURL = customContainerURL
+        self.currentDayIdentifierProvider = currentDayIdentifierProvider
+        if let quarantine {
+            self.quarantineProvider = { quarantine }
+        } else {
+            let lazilyCreated = TinyBuddyCorruptedRecordQuarantine()
+            self.quarantineProvider = { lazilyCreated }
+        }
     }
 
     // MARK: - Public API
@@ -157,11 +176,21 @@ public final class TinyBuddyHistoryStore {
 
         let fileURL = snapshotFileURL(for: snapshot.dayIdentifier, in: directoryURL)
 
-        // Write atomically to prevent partial files on crash.
+        // Write atomically to prevent partial files on crash, then read back
+        // and decode so an interrupted or silently corrupt write is never
+        // accepted as archived history. The read-back failure removes the
+        // file and reports failure; the source snapshot itself is untouched.
         let data = Data(encoded.utf8)
         do {
             try data.write(to: fileURL, options: .atomic)
         } catch {
+            return nil
+        }
+        guard let writtenData = try? Data(contentsOf: fileURL),
+              let writtenString = String(data: writtenData, encoding: .utf8),
+              snapshotDecoder(writtenString) != nil else {
+            try? fileManager.removeItem(at: fileURL)
+            logger.debug("archiveSnapshot(\(snapshot.dayIdentifier, privacy: .public)): read-back verification failed; removed partial file")
             return nil
         }
 
@@ -186,6 +215,10 @@ public final class TinyBuddyHistoryStore {
         guard let data = try? Data(contentsOf: fileURL),
               let encoded = String(data: data, encoding: .utf8),
               let snapshot = snapshotDecoder(encoded) else {
+            // Isolate the corrupted file so it cannot re-enter the readable
+            // archive or accumulate as unmanaged data. The quarantine keeps a
+            // redacted copy; the active archive drops the file atomically.
+            isolateCorruptFile(at: fileURL, dayIdentifier: dayIdentifier, reason: "decodeFailed")
             return .corrupt
         }
 
@@ -199,6 +232,7 @@ public final class TinyBuddyHistoryStore {
             }
         }
         if !criticalViolations.isEmpty {
+            isolateCorruptFile(at: fileURL, dayIdentifier: dayIdentifier, reason: "invalidSnapshot")
             return .corrupt
         }
 
@@ -387,11 +421,18 @@ public final class TinyBuddyHistoryStore {
 
         let snapshotFiles = fileURLs.filter { $0.pathExtension == Self.snapshotFileExtension }
 
-        // 4. Compute current size.
+        // 4. Compute current size. Unrecognized files that look like snapshot
+        //    attempts (valid extension, invalid day name) are corrupted or
+        //    foreign data: isolate them into quarantine and remove them from
+        //    the active archive so they cannot accumulate without bound.
         var totalBytes: Int64 = 0
+        var removedJunkCount = 0
         var fileDetails: [(url: URL, size: Int64, dayIdentifier: String)] = []
         for fileURL in snapshotFiles {
             guard let dayId = dayIdentifier(from: fileURL) else {
+                if isolateCorruptFile(at: fileURL, dayIdentifier: nil, reason: "unrecognizedDayIdentifier") {
+                    removedJunkCount += 1
+                }
                 continue
             }
             let size = (try? fileManager.attributesOfItem(atPath: fileURL.path))
@@ -402,44 +443,94 @@ public final class TinyBuddyHistoryStore {
 
         // 5. Sort by day descending (newest first).
         fileDetails.sort { $0.dayIdentifier > $1.dayIdentifier }
+        let initialValidCount = fileDetails.count
 
-        var removedCount = 0
-        var removedBytes: Int64 = 0
-
-        // 6. Remove excess by count limit (keep newest N).
-        if fileDetails.count > retentionPolicy.maxDayCount {
-            let excess = fileDetails.suffix(fileDetails.count - retentionPolicy.maxDayCount)
-            for entry in excess {
-                if (try? fileManager.removeItem(at: entry.url)) != nil {
-                    removedCount += 1
-                    removedBytes += entry.size
-                    totalBytes -= entry.size
-                }
-            }
-            fileDetails = Array(fileDetails.prefix(retentionPolicy.maxDayCount))
+        // 5a. Never remove the current local day (or any later, possibly
+        //     future-dated file from a clock adjustment). This preserves the
+        //     active day's snapshot, including any in-progress focus session
+        //     state, under every cleanup condition (startup, cross-day, low
+        //     disk, interrupted cleanup, concurrent writes).
+        let currentDay = currentDayIdentifierProvider()
+        let isProtected: (String) -> Bool = { day in
+            guard let currentDay else { return false }
+            return day >= currentDay
         }
 
-        // 7. Remove excess by size limit (remove oldest until under limit).
+        // 6. Remove excess by count limit (keep newest N, never protected).
+        var removedExcessCount = 0
+        var removedBytes: Int64 = 0
+        if fileDetails.count > retentionPolicy.maxDayCount {
+            // Candidates for removal are the entries beyond the newest
+            // `maxDayCount`, examined oldest-first; protected days are skipped.
+            var keptCount = fileDetails.count
+            for entry in fileDetails.reversed() where keptCount > retentionPolicy.maxDayCount {
+                guard !isProtected(entry.dayIdentifier) else {
+                    continue
+                }
+                if (try? fileManager.removeItem(at: entry.url)) != nil {
+                    removedExcessCount += 1
+                    removedBytes += entry.size
+                    totalBytes -= entry.size
+                    keptCount -= 1
+                }
+            }
+            fileDetails.removeAll { !fileManager.fileExists(atPath: $0.url.path) }
+        }
+
+        // 7. Remove excess by size limit (remove oldest until under limit,
+        //    never removing a protected day).
         if totalBytes > retentionPolicy.maxTotalBytes {
             for entry in fileDetails.reversed() {
                 guard totalBytes > retentionPolicy.maxTotalBytes else {
                     break
                 }
+                guard !isProtected(entry.dayIdentifier) else {
+                    continue
+                }
                 if (try? fileManager.removeItem(at: entry.url)) != nil {
-                    removedCount += 1
+                    removedExcessCount += 1
                     removedBytes += entry.size
                     totalBytes -= entry.size
                 }
             }
         }
 
+        let finalFileCount = max(0, initialValidCount - removedExcessCount)
+
         return CleanupResult(
-            removedFileCount: removedCount,
+            removedFileCount: removedJunkCount + removedExcessCount,
             removedBytes: removedBytes,
-            finalFileCount: fileDetails.count - removedCount,
-            finalSizeBytes: totalBytes,
+            finalFileCount: finalFileCount,
+            finalSizeBytes: max(0, totalBytes),
             didComplete: true
         )
+    }
+
+    /// Moves a corrupted or unrecognized history file out of the active
+    /// archive into the quarantine store (redacted) and removes it from disk.
+    /// The operation is idempotent: an already-removed file is skipped.
+    /// Returns whether the file was removed from the active archive.
+    @discardableResult
+    private func isolateCorruptFile(
+        at fileURL: URL,
+        dayIdentifier: String?,
+        reason: String
+    ) -> Bool {
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            return false
+        }
+        let rawData = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+        let diagnosticKey = dayIdentifier.map { "historyArchive:\($0)" }
+            ?? "historyArchive:unrecognizedFile"
+        _ = quarantineProvider()?.isolate(
+            domain: .historyArchive,
+            violationKind: .unknown(reason),
+            redactedOriginalData: String(rawData.prefix(4096)),
+            diagnosticKey: diagnosticKey
+        )
+        try? fileManager.removeItem(at: fileURL)
+        logger.debug("isolated corrupted history file \(diagnosticKey, privacy: .public)")
+        return !fileManager.fileExists(atPath: fileURL.path)
     }
 
     private static let cleanupMarker = "cleanup"

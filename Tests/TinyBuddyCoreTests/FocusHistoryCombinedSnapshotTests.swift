@@ -321,7 +321,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let adapter = TinyBuddyAppGroupPreferencesStore(
             applicationIdentifier: "group.example.TinyBuddy.history",
             loadValues: { _, keys in
-                Dictionary(uniqueKeysWithValues: keys.compactMap { key in
+                Dictionary(uniqueKeysWithValues: (keys ?? Array(preferences.values.keys)).compactMap { key in
                     preferences.values[key].map { (key, $0) }
                 })
             },

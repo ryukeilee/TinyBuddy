@@ -270,7 +270,11 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
                 }
                 return false
             },
-            removeValue: { key in true },
+            removeValue: { key in
+                prefs.removeValue(forKey: key)
+                removedKeys.append(key)
+                return true
+            },
             synchronize: { true },
             timeContextProvider: {
                 TinyBuddyTimeContext(
@@ -638,6 +642,159 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
         )
     }
 
+    // MARK: - Stale key accounting
+
+    func testStaleKeyCountOnlyCountsRemovableKeys() {
+        let today = "2026-07-20"
+        let thirtyDaysAgo = "2026-06-20"
+        // Still-referenced keys (dailyStats, currentStatus) are never counted
+        // as stale even though they carry a per-day shape.
+        let prefs: [String: Any] = [
+            "tinybuddy.dailyStats.dayIdentifier": today,
+            "tinybuddy.dailyStats.focusCount": "3",
+            "tinybuddy.currentStatus": "idle",
+            "tinybuddy.currentStatus.dayIdentifier": today,
+            "tinybuddy.gitTodayActivity.trustedSnapshot": "x",
+            "tinybuddy.gitTodayCommitCount.dayIdentifier": thirtyDaysAgo,
+            "tinybuddy.gitTodayCommitCount.count": "5"
+        ]
+
+        let service = TinyBuddyStorageCleanupService(
+            loadPreferences: { prefs },
+            writeValue: { _, _ in true },
+            removeValue: { _ in true },
+            synchronize: { true },
+            timeContextProvider: {
+                TinyBuddyTimeContext(
+                    now: Self.fixedDateForDay(today),
+                    timeZone: TimeZone(secondsFromGMT: 0)!,
+                    locale: Locale(identifier: "en_US_POSIX"),
+                    sourceCalendar: Calendar(identifier: .gregorian)
+                )
+            },
+            schemaVersionProvider: { TinyBuddyCombinedSnapshotStore.currentSchemaVersion },
+            committedRevisionProvider: { 42 },
+            retentionPolicy: RetentionPolicy(staleKeyMaxAgeDays: 1)
+        )
+
+        let usage = service.estimateStorageUsage()
+        XCTAssertEqual(usage.staleKeyCount, 1, "only the removable stale count key counts")
+    }
+
+    // MARK: - Interrupted cleanup recovery
+
+    func testRunCleanupRecoversInterruptedCleanupMarker() {
+        let containerURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tinybuddy-cleanup-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: containerURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: containerURL) }
+
+        let markerURL = containerURL
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Caches", isDirectory: true)
+            .appendingPathComponent("com.ryukeili.TinyBuddy", isDirectory: true)
+            .appendingPathComponent(".tinybuddy-cleanup-in-progress")
+        try! FileManager.default.createDirectory(
+            at: markerURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try! "cleanup".data(using: .utf8)!.write(to: markerURL)
+
+        let prefs: [String: Any] = [:]
+        let service = TinyBuddyStorageCleanupService(
+            loadPreferences: { prefs },
+            writeValue: { _, _ in true },
+            removeValue: { _ in true },
+            synchronize: { true },
+            timeContextProvider: { nil },
+            schemaVersionProvider: { nil },
+            committedRevisionProvider: { nil },
+            fileManager: .default,
+            historyStoreProvider: { TinyBuddyHistoryStore() },
+            appGroupContainerProvider: { containerURL },
+            retentionPolicy: RetentionPolicy(
+                staleKeyMaxAgeDays: 1,
+                minFreeDiskSpaceBytes: 0
+            )
+        )
+
+        let result = service.runCleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL.path), "interrupted marker must be recovered")
+        XCTAssertNotNil(result.storageUsage)
+
+        // The next cleanup starts clean.
+        let second = service.runCleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL.path))
+        XCTAssertNotNil(second.storageUsage)
+    }
+
+    // MARK: - TMPDIR artifact cleanup
+
+    func testRunCleanupRemovesAgedTmpdirArtifactsAndKeepsFreshOnes() {
+        let tmpdir = FileManager.default.temporaryDirectory
+        let oldDate = Date().addingTimeInterval(-10 * 86_400)
+        let freshDate = Date()
+
+        func makeItem(_ url: URL, modifiedAt date: Date) {
+            try! "content".write(to: url, atomically: true, encoding: .utf8)
+            try! FileManager.default.setAttributes(
+                [.modificationDate: date],
+                ofItemAtPath: url.path
+            )
+        }
+
+        let evidenceDir = tmpdir.appendingPathComponent("TinyBuddyRegressionEvidence", isDirectory: true)
+        try! FileManager.default.createDirectory(at: evidenceDir, withIntermediateDirectories: true)
+        let evidenceOld = evidenceDir.appendingPathComponent("overall.status")
+        makeItem(evidenceOld, modifiedAt: oldDate)
+        let evidenceFresh = evidenceDir.appendingPathComponent("fresh.log")
+        makeItem(evidenceFresh, modifiedAt: freshDate)
+        defer { try? FileManager.default.removeItem(at: evidenceDir) }
+
+        let benchmarkDir = tmpdir.appendingPathComponent("TinyBuddyGitBenchmark.ABC123", isDirectory: true)
+        try! FileManager.default.createDirectory(at: benchmarkDir, withIntermediateDirectories: true)
+        let benchmarkOld = benchmarkDir.appendingPathComponent("fixture.git")
+        makeItem(benchmarkOld, modifiedAt: oldDate)
+        try! FileManager.default.setAttributes(
+            [.modificationDate: oldDate],
+            ofItemAtPath: benchmarkDir.path
+        )
+        defer { try? FileManager.default.removeItem(at: benchmarkDir) }
+
+        let probeURL = tmpdir.appendingPathComponent("tinybuddy-probe.QWERTY")
+        makeItem(probeURL, modifiedAt: oldDate)
+        defer { try? FileManager.default.removeItem(at: probeURL) }
+
+        let unrelated = tmpdir.appendingPathComponent("unrelated-file-\(UUID().uuidString)")
+        makeItem(unrelated, modifiedAt: oldDate)
+        defer { try? FileManager.default.removeItem(at: unrelated) }
+
+        let prefs: [String: Any] = [:]
+        let service = TinyBuddyStorageCleanupService(
+            loadPreferences: { prefs },
+            writeValue: { _, _ in true },
+            removeValue: { _ in true },
+            synchronize: { true },
+            timeContextProvider: { nil },
+            schemaVersionProvider: { nil },
+            committedRevisionProvider: { nil },
+            appGroupContainerProvider: { tmpdir },
+            retentionPolicy: RetentionPolicy(
+                staleKeyMaxAgeDays: 1,
+                tmpdirArtifactMaxAgeDays: 7
+            )
+        )
+
+        let result = service.runCleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: evidenceOld.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: evidenceFresh.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: benchmarkOld.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: probeURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+        XCTAssertGreaterThan(result.removedTmpdirFileCount, 0)
+        XCTAssertGreaterThan(result.removedTmpdirBytes, 0)
+    }
+
     // MARK: - Retention policy age threshold
 
     func testRunCleanupLeavesRecentStaleKeysWhenAgeThresholdIsHigh() {
@@ -696,7 +853,11 @@ final class TinyBuddyStorageCleanupServiceTests: XCTestCase {
                 }
                 return false
             },
-            removeValue: { _ in true },
+            removeValue: { key in
+                prefs.removeValue(forKey: key)
+                removedKeys.append(key)
+                return true
+            },
             synchronize: { true },
             timeContextProvider: {
                 TinyBuddyTimeContext(

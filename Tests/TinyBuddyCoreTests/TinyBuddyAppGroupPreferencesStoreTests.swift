@@ -32,6 +32,32 @@ final class TinyBuddyAppGroupPreferencesStoreTests: XCTestCase {
         XCTAssertEqual(observedDomains, [expectedDomain, expectedDomain, expectedDomain])
     }
 
+    /// The cleanup flow must see every key in the app-group domain, including
+    /// legacy per-day Git activity keys that are not part of the
+    /// combined-snapshot key set. `loadDictionary()` requests the full domain.
+    func testLoadDictionaryRequestsAllDomainKeys() {
+        var requestedKeys: [String]? = []
+        let store = TinyBuddyAppGroupPreferencesStore(
+            applicationIdentifier: "group.example.TinyBuddy",
+            loadValues: { _, keys in
+                requestedKeys = keys
+                return [:]
+            },
+            setValue: { _, _, _ in },
+            synchronize: { _ in true }
+        )
+
+        _ = store.loadDictionary()
+        XCTAssertNil(requestedKeys, "loadDictionary must request the full domain (nil key list)")
+
+        // Snapshot-key reads remain bounded to the combined-snapshot key set.
+        _ = store.loadSnapshotKeysDictionary()
+        XCTAssertEqual(
+            Set(requestedKeys ?? []),
+            Set(TinyBuddyCombinedSnapshotStore.Key.all)
+        )
+    }
+
     func testExactDomainPublishesTodaySnapshotAfterYesterdayLegacyState() throws {
         let preferences = PreferencesValues()
         let yesterday = TinyBuddyCombinedSnapshot(
@@ -196,7 +222,7 @@ final class TinyBuddyAppGroupPreferencesStoreTests: XCTestCase {
             applicationIdentifier: "group.example.TinyBuddy",
             loadValues: { _, keys in
                 var result: [String: Any] = [:]
-                for key in keys {
+                for key in keys ?? Array(values.values.keys) {
                     result[key] = values.values[key]
                 }
                 return result

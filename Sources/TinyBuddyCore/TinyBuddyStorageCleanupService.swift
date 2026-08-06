@@ -166,7 +166,7 @@ public struct TinyBuddyStorageCleanupResult: Equatable, Sendable {
     }
 }
 
-public final class TinyBuddyStorageCleanupService {
+public final class TinyBuddyStorageCleanupService: @unchecked Sendable {
     public let retentionPolicy: RetentionPolicy
 
     private let loadPreferences: () -> [String: Any]?
@@ -189,7 +189,7 @@ public final class TinyBuddyStorageCleanupService {
         self.init(
             loadPreferences: { preferencesStore.loadDictionary() },
             writeValue: { key, value in preferencesStore.writeValue(value, forKey: key) },
-            removeValue: { key in preferencesStore.writeValue(NSString(), forKey: key) },
+            removeValue: { key in preferencesStore.removeValue(forKey: key) },
             synchronize: { preferencesStore.synchronize() },
             timeContextProvider: { TinyBuddyTimeEnvironment().capture() },
             schemaVersionProvider: { TinyBuddyCombinedSnapshotStore.readSchemaVersionFromAllSources() },
@@ -363,7 +363,7 @@ public final class TinyBuddyStorageCleanupService {
         if let todayId = context?.dayIdentifier {
             let staleKeys = findStaleKeys(in: preferences, todayIdentifier: todayId)
             for key in staleKeys {
-                if writeValue(key, NSString()) {
+                if removeValue(key) {
                     removedStaleKeys += 1
                 }
             }
@@ -438,7 +438,8 @@ public final class TinyBuddyStorageCleanupService {
         let tmpdir = FileManager.default.temporaryDirectory
         let artifactDirs = [
             "TinyBuddyBuildLogs",
-            "TinyBuddyReleaseEvidence"
+            "TinyBuddyReleaseEvidence",
+            "TinyBuddyRegressionEvidence"
         ]
 
         let cutoffDate = Date().addingTimeInterval(
@@ -485,6 +486,39 @@ public final class TinyBuddyStorageCleanupService {
                 let dirModDate = dirAttrs?[.modificationDate] as? Date ?? Date.distantPast
                 if dirModDate < cutoffDate {
                     try? fileManager.removeItem(at: dirURL)
+                }
+            }
+        }
+
+        // Sweep remaining TinyBuddy temp artifacts (script staging dirs such
+        // as TinyBuddyEntitlements.* / TinyBuddy-backup.*, benchmark fixtures
+        // TinyBuddyGitBenchmark.*, probe binaries tinybuddy-probe.*) that are
+        // older than the age limit. Only TinyBuddy-named entries are matched,
+        // so unrelated TMPDIR content is never touched.
+        if let tmpContents = try? fileManager.contentsOfDirectory(
+            at: tmpdir,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for itemURL in tmpContents {
+                let name = itemURL.lastPathComponent
+                guard name.hasPrefix("TinyBuddy") || name.hasPrefix("tinybuddy-") else {
+                    continue
+                }
+                // Skip the curated directories: their contents are handled
+                // above and the directory is removed only when empty and old.
+                if artifactDirs.contains(name) {
+                    continue
+                }
+                let attrs = try? fileManager.attributesOfItem(atPath: itemURL.path)
+                let modDate = attrs?[.modificationDate] as? Date ?? Date.distantPast
+                guard modDate < cutoffDate else {
+                    continue
+                }
+                let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+                if (try? fileManager.removeItem(at: itemURL)) != nil {
+                    removedCount += 1
+                    removedBytes += size
                 }
             }
         }
@@ -551,7 +585,19 @@ public final class TinyBuddyStorageCleanupService {
             }
         }
 
-        let staleCount = preferences.keys.filter(isKnownStaleKey).count
+        // Only count keys cleanup would actually remove: the per-day Git
+        // activity value keys whose day identifier is older than the stale
+        // threshold. Actively referenced keys (dailyStats, currentStatus,
+        // trusted snapshot) are never labeled stale.
+        let staleCount: Int
+        if let todayId = timeContextProvider()?.dayIdentifier {
+            staleCount = findStaleKeys(
+                in: preferences,
+                todayIdentifier: todayId
+            ).count
+        } else {
+            staleCount = preferences.keys.filter(isRemovableStaleKey).count
+        }
 
         return TinyBuddyStorageUsage(
             totalEstimatedBytes: totalBytes,
@@ -680,7 +726,7 @@ public final class TinyBuddyStorageCleanupService {
 
     private func tmpdirArtifactSize() -> (bytes: Int64, fileCount: Int) {
         let tmpdir = FileManager.default.temporaryDirectory
-        let dirs = ["TinyBuddyBuildLogs", "TinyBuddyReleaseEvidence"]
+        let dirs = ["TinyBuddyBuildLogs", "TinyBuddyReleaseEvidence", "TinyBuddyRegressionEvidence"]
         var totalBytes: Int64 = 0
         var totalCount = 0
 
@@ -812,16 +858,18 @@ public final class TinyBuddyStorageCleanupService {
         return abs(days)
     }
 
-    private func isKnownStaleKey(_ key: String) -> Bool {
-        let stalePrefixes = [
+    private func isRemovableStaleKey(_ key: String) -> Bool {
+        let removablePrefixes = [
             "tinybuddy.gitTodayCommitCount.",
             "tinybuddy.gitTodayFocusBlockCount.",
-            "tinybuddy.gitTodayRecentProject.",
-            "tinybuddy.dailyStats.",
-            "tinybuddy.currentStatus",
-            "tinybuddy.gitTodayActivity.trustedSnapshot"
+            "tinybuddy.gitTodayRecentProject."
         ]
-        return stalePrefixes.contains { key.hasPrefix($0) }
+        return removablePrefixes.contains { prefix in
+            key.hasPrefix(prefix)
+                && (key.hasSuffix(".count")
+                    || key.hasSuffix(".projectName")
+                    || key.hasSuffix(".dayIdentifier"))
+        }
     }
 
     private func estimatedValueSize(_ value: Any) -> Int {

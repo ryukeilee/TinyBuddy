@@ -190,6 +190,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeEnvironment: timeEnvironment
     )
     private lazy var combinedSnapshotStore = dailyStatsStore.makeCombinedSnapshotStore()
+    /// Archives per-day snapshots and runs the storage cleanup flow across
+    /// launch, cross-day transitions, snapshot commits, termination, and
+    /// disk-pressure events. Never blocks or fails HUD/history/Widget reads.
+    private lazy var historyArchivalCoordinator = TinyBuddyHistoryArchivalCoordinator(
+        snapshotReader: { [combinedSnapshotStore] expectedDay in
+            combinedSnapshotStore.readValidated(expectedDayIdentifier: expectedDay)
+        },
+        historyStore: TinyBuddyHistoryStore(),
+        cleanupService: TinyBuddyStorageCleanupService(),
+        timeContextProvider: { [timeEnvironment] in
+            timeEnvironment.capture()
+        }
+    )
     private lazy var focusSessionPublicationJournal = FocusSessionSnapshotPublicationJournal()
     lazy var petViewModel = PetViewModel(
         onboardingStore: onboardingStore,
@@ -278,6 +291,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         switch event {
         case .environmentChanged(let context):
+            // Archive the closing snapshot of the day that just ended BEFORE
+            // the refresh coordinator invalidates and re-initializes the
+            // snapshot store for the new day. The current day's file is never
+            // touched by archival or cleanup.
+            self.historyArchivalCoordinator.handleDayTransition(to: context.dayIdentifier)
             self.gitActivityRefreshCoordinator.handleTimeEnvironmentChanged(context)
             // Run calibration after the coordinator processes the change.
             // The calibrator's monotonic-clock comparison may detect a
@@ -303,6 +321,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             continuity = c
         case .invalid:
             continuity = nil
+        }
+
+        // A day change detected through the calibrator (for example after
+        // sleep across midnight) follows the same archival rule as the system
+        // notification path: archive the closing day before any new-day write.
+        let transitionDay: String?
+        switch outcome {
+        case .dayChanged(_, let to, _),
+             .discontinuityDetected(_, let to, _, _, _):
+            transitionDay = to
+        case .timeZoneChanged, .stable, .invalid:
+            transitionDay = nil
+        }
+        if let transitionDay {
+            historyArchivalCoordinator.handleDayTransition(to: transitionDay)
         }
 
         guard let continuity else { return }
@@ -493,6 +526,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is published atomically and the Widget timeline is reloaded.
         initializeCombinedSnapshotForCurrentDay()
 
+        // Archive today's snapshot and run the storage cleanup flow. Both are
+        // best-effort and off the HUD critical path: archival writes are
+        // atomic and idempotent, and cleanup never deletes the current day,
+        // active focus sessions, recovery backups, or referenced data.
+        historyArchivalCoordinator.runAtLaunch()
+
         // === Version upgrade detection: state reconstruction & widget self-healing ===
         //
         // Detect app version changes (cover install / upgrade) and set the
@@ -661,6 +700,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         previous: GitTodayActivitySnapshot?,
         current: GitTodayActivitySnapshot
     ) {
+        // Archive the committed snapshot for today (throttled, atomic, and
+        // idempotent) so history tracks the latest committed state.
+        if let currentDay = timeEnvironment.capture()?.dayIdentifier {
+            historyArchivalCoordinator.handleCommittedSnapshot(
+                dayIdentifier: currentDay
+            )
+        }
         guard pendingFocusGitChange else { return }
         pendingCommittedGitActivity = (previous, current)
         publishPendingFocusGitActivityIfPossible()
@@ -818,6 +864,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             WidgetCenter.shared.reloadAllTimelines()
         }
+
+        // Track the committed snapshot in the per-day history archive. This
+        // runs after the durable write so the archive always reflects the
+        // latest committed state; a failure here never affects HUD, history
+        // views, or Widget reads (the combined snapshot stays authoritative).
+        if let currentDay = timeEnvironment.capture()?.dayIdentifier {
+            historyArchivalCoordinator.handleCommittedSnapshot(
+                dayIdentifier: currentDay
+            )
+        }
     }
 
     private func replayPendingFocusSessionPublicationIfNeeded() {
@@ -888,6 +944,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // see the latest committed focus history, even if the PetViewModel
             // callback path is not triggered (e.g. early return in the caller).
             WidgetCenter.shared.reloadAllTimelines()
+        } else {
+            // A failed focus-history write may indicate disk pressure. Run
+            // cleanup immediately; it reclaims caches and age-expired temp
+            // artifacts and never deletes the current day, active focus
+            // sessions, recovery backups, or still-referenced data.
+            historyArchivalCoordinator.handleDiskSpacePressure()
         }
         notificationCenter.post(
             name: .focusSessionSnapshotSynchronizationDidFinish,
@@ -959,6 +1021,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
+        // Final archival of today's committed snapshot before the process
+        // exits; best-effort and never blocking termination recovery.
+        historyArchivalCoordinator.handleTermination()
         // During a reset the session journal has already been removed and the
         // engine must not finalize (and thereby recreate) pre-reset sessions.
         // Normal termination still finalizes the open session as usual.

@@ -10,6 +10,7 @@ public enum TinyBuddyDataDomain: String, Codable, Equatable, Sendable {
     case historyAggregation
     case sharedSnapshot
     case dailyStats
+    case historyArchive
 
     public var identifier: String { rawValue }
 }
