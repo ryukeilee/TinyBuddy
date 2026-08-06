@@ -2,13 +2,16 @@ import Foundation
 import XCTest
 
 final class WidgetTimelinePolicySourceTests: XCTestCase {
-    func testWidgetPrebuildsMidnightRolloverWithoutPeriodicTimelineWakeups() throws {
+    func testWidgetPrebuildsMidnightRolloverWithoutUnconditionalPeriodicWakeups() throws {
         let source = try String(contentsOf: widgetSourceURL(), encoding: .utf8)
 
         XCTAssertTrue(source.contains("timeContext.nextDayBoundary"))
+        // Stable states stay on `.never`: an unchanged Widget never asks for a
+        // periodic wakeup. Self-scheduling is opt-in per state, not global.
         XCTAssertTrue(source.contains("policy: .never"))
+        XCTAssertTrue(source.contains("policy: .after("))
+        XCTAssertTrue(source.contains("TinyBuddyWidgetTimelinePolicy.nextRefreshDate("))
         XCTAssertFalse(source.contains("nextRefreshDate(maxInterval:"))
-        XCTAssertFalse(source.contains("policy: .after"))
     }
 
     func testFutureRolloverEntryRejectsPreviousDayStatusAndFallbackSnapshot() throws {

@@ -304,7 +304,10 @@ final class FocusSessionAppBridge {
 
     /// A live duration changes without a new session-journal fact. Re-publish
     /// only when its displayed whole minute changes, while an existing 30s idle
-    /// sample is already awake. This adds no timer, disk write, or Widget reload
+    /// sample is already awake. The Widget self-schedules its own refresh while
+    /// a session is live, so this path advances the authoritative snapshot for
+    /// HUD and persistence without requesting a per-minute WidgetKit reload.
+    /// This adds no timer, disk write, or Widget reload
     /// while there is no open focus session.
     private func publishLiveFocusHistoryIfNeeded() {
         guard !isStopped, engine.currentProject != nil else {
@@ -314,7 +317,7 @@ final class FocusSessionAppBridge {
         let wholeMinutes = max(0, Int(engine.focusDurationToday() / 60))
         guard wholeMinutes != lastPublishedFocusMinute else { return }
         lastPublishedFocusMinute = wholeMinutes
-        engine.republishFocusHistory()
+        engine.republishFocusHistory(shouldReloadWidget: false)
     }
 
     private func seedForegroundApp() {

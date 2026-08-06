@@ -75,6 +75,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// as well as manual edits, while the legacy current-day handler above
     /// remains for compatibility with the review journal tests.
     public var committedHistorySnapshotHandler: (@Sendable (FocusHistoryPublication) -> Void)?
+    /// Optional second publication channel for periodic live-minute history
+    /// re-emissions. When set, `republishFocusHistory(shouldReloadWidget: false)`
+    /// routes here so the app can refresh the authoritative snapshot (HUD and
+    /// persistence read it directly) without requesting a WidgetKit reload —
+    /// the Widget self-schedules its own refresh while a session is live.
+    public var liveMinuteRepublishHandler: (@Sendable (FocusHistoryPublication) -> Void)?
 
     private struct PendingSwitch: Equatable {
         let fromSessionId: UUID
@@ -611,12 +617,22 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// Re-emits the existing cache when a user explicitly opens the report or
     /// changes the focus target. It performs no discovery or session scan.
-    public func republishFocusHistory() {
+    ///
+    /// - Parameter shouldReloadWidget: When `false` the publication routes to
+    ///   `liveMinuteRepublishHandler` instead of `committedHistorySnapshotHandler`,
+    ///   so a periodic live-minute re-emission can advance the authoritative
+    ///   snapshot without triggering a WidgetKit reload (the Widget self-schedules
+    ///   its refresh while a session is live). Transitions default to reloading.
+    public func republishFocusHistory(shouldReloadWidget: Bool = true) {
         lock.lock()
         let publication = makeFocusHistoryPublication()
         lock.unlock()
         if let publication {
-            committedHistorySnapshotHandler?(publication)
+            if shouldReloadWidget {
+                committedHistorySnapshotHandler?(publication)
+            } else {
+                liveMinuteRepublishHandler?(publication)
+            }
         }
     }
 

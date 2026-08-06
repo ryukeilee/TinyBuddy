@@ -392,7 +392,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         refreshInterval: TimeInterval = 5 * 60,
         minimumRefreshSpacing: TimeInterval = 60,
         widgetReloader: @escaping () throws -> Void = {
-            WidgetCenter.shared.reloadAllTimelines()
+            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         },
         scriptURLProvider: @escaping ScriptURLProvider = GitActivityRefreshCoordinator.locateRefreshScript,
         scriptRunner: ScriptRunner? = nil,

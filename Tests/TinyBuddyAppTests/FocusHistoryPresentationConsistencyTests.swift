@@ -48,22 +48,32 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertTrue(menu.contains("let state = engine.manualControlState"))
     }
 
-    func testLiveHistoryUsesExistingIdleSamplingAndReloadsWidgetOnDurationChange() throws {
+    func testLiveHistoryUsesExistingIdleSamplingAndAdvancesSnapshotWithoutWidgetReload() throws {
         let bridge = try source("Sources/TinyBuddy/FocusSessionAppBridge.swift")
         let viewModel = try source("Sources/TinyBuddy/PetViewModel.swift")
+        let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
 
         XCTAssertTrue(bridge.contains("private var wasIdle: Bool = true"))
         XCTAssertTrue(bridge.contains("private func publishLiveFocusHistoryIfNeeded()"))
         XCTAssertTrue(bridge.contains("wholeMinutes != lastPublishedFocusMinute"))
-        XCTAssertTrue(bridge.contains("engine.republishFocusHistory()"))
+        // The periodic live-minute re-emission updates the authoritative
+        // snapshot but does not request a WidgetKit reload: the Widget
+        // self-schedules its refresh while a session is live, so a per-minute
+        // reload would waste WidgetKit's refresh budget.
+        XCTAssertTrue(bridge.contains("engine.republishFocusHistory(shouldReloadWidget: false)"))
+        XCTAssertTrue(bridge.contains("The Widget self-schedules its own refresh while"))
         XCTAssertTrue(bridge.contains("This adds no timer, disk write, or Widget reload\n    /// while there is no open focus session."))
         XCTAssertFalse(bridge.contains("Timer("))
 
+        XCTAssertTrue(app.contains("liveMinuteRepublishHandler"))
+        XCTAssertTrue(app.contains("reloadWidget: false"))
+        XCTAssertTrue(app.contains("status: nil"))
+
         XCTAssertTrue(viewModel.contains("let previousHistory = focusHistoryPublication"))
-        XCTAssertTrue(viewModel.contains("didChange || focusHistoryPublication != previousHistory"))
+        XCTAssertTrue(viewModel.contains("func focusSessionStatsDidChange(reloadWidget: Bool = true)"))
+        XCTAssertTrue(viewModel.contains("if reloadWidget, didChange || focusHistoryPublication != previousHistory"))
         XCTAssertTrue(viewModel.contains("func synchronizeFocusSessionStatus(_ status: PetStatus)"))
         XCTAssertTrue(viewModel.contains("func applyFocusStatusForPublication(_ status: PetStatus)"))
-        let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
         // The handler now uses the lightweight status update + combined write
         // instead of a separate combined-snapshot-write in synchronizeFocusSessionStatus.
         XCTAssertTrue(app.contains("self.petViewModel.applyFocusStatusForPublication(status)"))

@@ -169,7 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.resetService.perform(level: level) ?? .failure(.removalFailed)
         },
         reloadWidget: {
-            WidgetCenter.shared.reloadAllTimelines()
+            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         },
         terminate: {
             NSApp.terminate(nil)
@@ -367,7 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // changes detected purely through the calibrator (e.g., a manual
             // clock adjustment without a system notification), request a
             // widget reload so the Widget picks up the new continuity record.
-            WidgetCenter.shared.reloadAllTimelines()
+            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         }
     }
 
@@ -610,6 +610,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.synchronizeFocusHistoryPublication(publication, status: status)
             }
         }
+        // Periodic live-minute re-emissions advance the authoritative snapshot
+        // for HUD and persistence but deliberately skip the WidgetKit reload:
+        // the Widget self-schedules its next refresh while a session is live,
+        // so a per-minute reload here would waste WidgetKit's refresh budget.
+        focusBridge?.sessionEngine.liveMinuteRepublishHandler = { [weak self] publication in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // The same superseded-publication guard as the committed path:
+                // a delayed live re-emission must never overwrite a newer
+                // transition that already reached the shared snapshot.
+                if let latestRevision = self.focusSessionEngine?.focusHistoryPublication()?.revision,
+                   publication.revision < latestRevision {
+                    return
+                }
+                self.synchronizeFocusHistoryPublication(
+                    publication,
+                    status: nil,
+                    reloadWidget: false
+                )
+            }
+        }
         focusBridge?.start()
         // Wire the session engine to the HUD for manual focus control.
         petViewModel.setFocusSessionEngine(focusBridge?.sessionEngine)
@@ -765,7 +786,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func synchronizeFocusHistoryPublication(
         _ publication: FocusHistoryPublication,
-        status: PetStatus? = nil
+        status: PetStatus? = nil,
+        reloadWidget: Bool = true
     ) {
         switch focusSessionPublicationJournal.stage(publication) {
         case .persistenceFailed:
@@ -841,7 +863,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let status {
             self.petViewModel.applyFocusStatusForPublication(status)
         }
-        petViewModel.focusSessionStatsDidChange()
+        petViewModel.focusSessionStatsDidChange(reloadWidget: reloadWidget)
         guard focusSessionPublicationJournal.clear(expected: publication) else {
             postFocusHistorySynchronization(succeeded: false)
             return
@@ -849,7 +871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if update.didPersist {
             // Full notification path: Widget reload + event broadcast.
-            postFocusHistorySynchronization(succeeded: true)
+            postFocusHistorySynchronization(succeeded: true, reloadWidget: reloadWidget)
         } else {
             // The publication is already current (same revision and content).
             // Reload the Widget directly so it picks up any latest in-memory
@@ -862,7 +884,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ).notice(
                 "focus history already current, reloading widget without notification"
             )
-            WidgetCenter.shared.reloadAllTimelines()
+            if reloadWidget {
+                TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+            }
         }
 
         // Track the committed snapshot in the per-day history archive. This
@@ -941,12 +965,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func postFocusHistorySynchronization(succeeded: Bool) {
+    private func postFocusHistorySynchronization(succeeded: Bool, reloadWidget: Bool = true) {
         if succeeded {
-            // Safety net: reload widget timelines directly so consumers always
-            // see the latest committed focus history, even if the PetViewModel
-            // callback path is not triggered (e.g. early return in the caller).
-            WidgetCenter.shared.reloadAllTimelines()
+            if reloadWidget {
+                // Safety net: reload widget timelines directly so consumers
+                // always see the latest committed focus history, even if the
+                // PetViewModel callback path is not triggered (e.g. early
+                // return in the caller). Live-minute re-emissions skip this:
+                // the Widget self-schedules its refresh while a session is live.
+                TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+            }
         } else {
             // A failed focus-history write may indicate disk pressure. Run
             // cleanup immediately; it reclaims caches and age-expired temp
@@ -957,7 +985,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notificationCenter.post(
             name: .focusSessionSnapshotSynchronizationDidFinish,
             object: nil,
-            userInfo: ["succeeded": succeeded]
+            userInfo: ["succeeded": succeeded, "reloadWidget": reloadWidget]
         )
     }
 
@@ -1189,7 +1217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 tinyBuddyStartupLogger.notice(
                     "Post-upgrade rebuild completed; reloading widget timelines"
                 )
-                WidgetCenter.shared.reloadAllTimelines()
+                TinyBuddyWidgetReloadCoordinator.shared.requestReload()
             }
         )
     }
@@ -1232,7 +1260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if result.requiresStandaloneWidgetReload {
-            WidgetCenter.shared.reloadAllTimelines()
+            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         }
     }
 
@@ -1280,7 +1308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tinyBuddyStartupLogger.notice(
                 "Combined snapshot initialized for day=\(expectedDayIdentifier, privacy: .public) outcome=\(String(describing: result.outcome), privacy: .public)"
             )
-            WidgetCenter.shared.reloadAllTimelines()
+            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         } else {
             tinyBuddyStartupLogger.error(
                 "Failed to initialize combined snapshot for day=\(expectedDayIdentifier, privacy: .public) outcome=\(String(describing: result.outcome), privacy: .public)"

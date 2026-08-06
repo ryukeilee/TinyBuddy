@@ -158,7 +158,7 @@ final class PetViewModel: ObservableObject {
         notificationCenter: NotificationCenter = .default,
         timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
         widgetReloader: @escaping () throws -> Void = {
-            WidgetCenter.shared.reloadAllTimelines()
+            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         },
         sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder = .shared,
         hudSnapshotConsumptionRecorder: @escaping (TinyBuddyHUDSnapshotConsumption) -> Void =
@@ -399,14 +399,19 @@ final class PetViewModel: ObservableObject {
             forName: .focusSessionSnapshotSynchronizationDidFinish,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            // Read the flag outside the main-actor hop so a Sendable Bool is
+            // all that crosses the isolation boundary.
+            let reloadWidget = (notification.userInfo?["reloadWidget"] as? Bool) ?? true
             MainActor.assumeIsolated {
                 // Safety net: re-read the committed snapshot and reload the
                 // Widget after every focus-history publication. This supplements
                 // the direct focusSessionStatsDidChange() call in the publication
                 // handler, ensuring the Widget always sees the latest data even
-                // if that direct path was bypassed.
-                self?.focusSessionStatsDidChange()
+                // if that direct path was bypassed. Periodic live-minute
+                // re-emissions opt out via the published flag so the Widget
+                // self-schedules its refresh instead.
+                self?.focusSessionStatsDidChange(reloadWidget: reloadWidget)
             }
         })
     }
@@ -790,13 +795,18 @@ final class PetViewModel: ObservableObject {
     /// than applying an optimistic in-memory presentation.  The combined
     /// snapshot was already written by the caller; this re-reads without
     /// re-writing to avoid an unnecessary revision increment.
-    func focusSessionStatsDidChange() {
+    ///
+    /// - Parameter reloadWidget: When `false` (periodic live-minute
+    ///   re-emissions) the HUD refreshes from the committed snapshot but the
+    ///   Widget is not reloaded — it self-schedules its refresh while a
+    ///   session is live, so a per-minute reload would waste WidgetKit budget.
+    func focusSessionStatsDidChange(reloadWidget: Bool = true) {
         let previousHistory = focusHistoryPublication
         let didChange = reloadCommittedHUDState()
         // Elapsed focus duration lives in the history publication rather than
         // the legacy count-based display presentation. Reload WidgetKit when
         // that authoritative slice changes even if the status/count UI did not.
-        if didChange || focusHistoryPublication != previousHistory {
+        if reloadWidget, didChange || focusHistoryPublication != previousHistory {
             reloadWidgetIfPossible()
         }
     }

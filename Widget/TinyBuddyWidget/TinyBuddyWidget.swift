@@ -106,7 +106,31 @@ struct TinyBuddyProvider: TimelineProvider {
         // content changes. A prebuilt midnight entry prevents yesterday's data
         // from surviving across the local-day boundary without creating a
         // periodic WidgetKit wakeup when nothing changed.
-        completion(Timeline(entries: entries, policy: .never))
+        //
+        // State-aware self-scheduling complements those push reloads: a live
+        // focus session advances its whole-minute elapsed metric on the
+        // Widget's own cadence, and a stale/loading snapshot self-heals toward
+        // the authoritative combined snapshot. Stable states stay on `.never`
+        // so an unchanged Widget never asks for a periodic wakeup.
+        let nextRefreshDate = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+            state: entry.presentation.state,
+            isFocusSessionActive: entry.focusHistoryPublication?.isFocusSessionActive == true,
+            isFocusSessionPaused: entry.focusHistoryPublication?.isFocusSessionPaused == true,
+            now: timeContext.now,
+            dayBoundary: timeContext.nextDayBoundary
+        )
+        if let nextRefreshDate {
+            Self.logger.notice(
+                "timeline self-scheduled state=\(entry.presentation.state.rawValue, privacy: .public) refresh=\(nextRefreshDate.timeIntervalSince(timeContext.now), privacy: .public)s"
+            )
+        }
+        let timeline: Timeline<TinyBuddyEntry>
+        if let nextRefreshDate {
+            timeline = Timeline(entries: entries, policy: .after(nextRefreshDate))
+        } else {
+            timeline = Timeline(entries: entries, policy: .never)
+        }
+        completion(timeline)
     }
 
     private func makeRolloverEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
