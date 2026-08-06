@@ -615,6 +615,14 @@ final class GitScanRootAuthorizationController {
         requestAuthorizationResult().didChangeAuthorization
     }
 
+    @discardableResult
+    func requestAuthorizationIfNeeded() {
+        guard !store.hasAuthorizedRoots else {
+            return
+        }
+        _ = requestAuthorization()
+    }
+
     func requestAuthorizationResult() -> GitScanRootAuthorizationRequestResult {
         let urls = requestedURLs(allowsMultipleSelection: true)
         let didCompleteOnboarding = onboardingStore.markCompleted()

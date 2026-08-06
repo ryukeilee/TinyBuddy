@@ -49,6 +49,51 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         XCTAssertFalse(repeatedResult.requiresStandaloneWidgetReload)
     }
 
+    func testRequestAuthorizationIfNeededPresentsPanelOnlyWhenNeverAuthorized() {
+        let store = makeStore(userDefaults: makeDefaults())
+        var selectionProviderCallCount = 0
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in
+                selectionProviderCallCount += 1
+                return nil
+            }
+        )
+
+        controller.requestAuthorizationIfNeeded()
+
+        XCTAssertEqual(selectionProviderCallCount, 1)
+    }
+
+    func testRequestAuthorizationIfNeededDoesNotPresentPanelWhenSavedAuthorizationIsInvalid() throws {
+        let defaults = makeDefaults()
+        let store = makeStore(userDefaults: defaults, resolver: { _ in nil })
+        try store.replaceAuthorizedRoots([URL(fileURLWithPath: "/Authorized/StaleProject")])
+        var selectionProviderCallCount = 0
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in
+                selectionProviderCallCount += 1
+                return nil
+            }
+        )
+
+        controller.requestAuthorizationIfNeeded()
+
+        XCTAssertEqual(selectionProviderCallCount, 0)
+    }
+
+    func testRequestAuthorizationCancelReturnsFalseWithoutChangingStore() {
+        let store = makeStore(userDefaults: makeDefaults())
+        let controller = GitScanRootAuthorizationController(
+            store: store,
+            authorizationSelectionProvider: { _ in nil }
+        )
+
+        XCTAssertFalse(controller.requestAuthorization())
+        XCTAssertFalse(store.hasAuthorizedRoots)
+    }
+
     func testRequestAuthorizationAddsWithoutReplacingExistingRoot() throws {
         let defaults = makeDefaults()
         let existing = URL(fileURLWithPath: "/Authorized/Existing")

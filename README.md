@@ -160,14 +160,6 @@ or project names.
 
 The refresh keeps a content-validated per-reflog fingerprint cache. Unchanged repositories reuse their last parsed events; a temporarily slow or unreadable repository reuses its last valid same-day result while other repositories continue. Root enumeration and reflog fingerprint reads have bounded timeouts, refresh execution has a hard upper bound, and an authorization change cancels the superseded process before starting its replacement.
 
-Run the repeatable Git stress benchmark with:
-
-```bash
-./script/benchmark_git_refresh.sh
-```
-
-It creates disposable repositories outside the worktree, verifies aggregate accuracy, compares first and incremental refresh latency, samples CPU and RSS, and checks cancellation convergence. Repository/event counts and gates can be adjusted with the `TINYBUDDY_BENCHMARK_*` environment variables declared at the top of the script.
-
 ## Signing Notes
 
 Unsigned Debug builds use `CODE_SIGNING_ALLOWED=NO` output under `.build/xcode`.
