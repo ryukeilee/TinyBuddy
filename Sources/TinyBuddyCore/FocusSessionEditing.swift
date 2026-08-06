@@ -51,6 +51,7 @@ public enum FocusSessionEditError: Equatable, Sendable {
     case persistenceFailed
     case nothingToUndo
     case alreadyConfirmed
+    case nothingToChange
 }
 
 public enum FocusSessionEditResult: Equatable, Sendable {

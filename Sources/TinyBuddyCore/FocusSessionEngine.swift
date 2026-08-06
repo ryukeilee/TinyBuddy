@@ -42,6 +42,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// Pending cross‑project switch (brief interruption candidate).
     private var pendingSwitch: PendingSwitch?
     private var lastEditUndo: [FocusSession]?
+    /// Exact session list immediately after the last edit. Undo restores the
+    /// pre-edit versions of records the edit itself changed or removed, while
+    /// sessions that were untouched by the edit keep their current state (they
+    /// may have advanced since) and sessions created after the edit survive.
+    private var lastEditPostSessions: [FocusSession]?
     private var committedRevision: Int64 = 0
     private var confirmedRevision: Int64 = 0
     /// Monotonic revision stored with the session archive. Unlike the manual
@@ -618,11 +623,19 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// Updates an ended session by stable identifier. Crossing local-day
     /// boundaries is represented as adjacent day-local sessions; the first
     /// segment retains the original ID so a retry can never target another row.
+    ///
+    /// Validation runs before any mutation: the session must be ended, the
+    /// project non-empty, the range valid and not in the future, every
+    /// day-local segment must resolve to a valid local day, and the proposed
+    /// segments must not overlap any other recorded session (including a
+    /// currently open one). A rejection leaves the archive untouched, so the
+    /// caller can retry with corrected input.
     public func editSession(
         id: UUID,
         project: FocusProjectContext? = nil,
         startedAt: Date? = nil,
-        endedAt: Date? = nil
+        endedAt: Date? = nil,
+        mode: FocusMode? = nil
     ) -> FocusSessionEditResult {
         edit { working in
             guard let index = working.firstIndex(where: { $0.id == id }) else { return .sessionNotFound }
@@ -636,10 +649,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
             guard config.maxSessionSpan.map({ end.timeIntervalSince(start) <= $0 }) ?? true else {
                 return .invalidTimeRange
             }
+            let resolvedMode = mode ?? working[index].mode
             var source = working[index]
             let projectChanged = resolvedProject != source.project
             let timeChanged = start != source.startedAt || end != source.endedAt
-            guard projectChanged || timeChanged else { return .invalidTimeRange }
+            let modeChanged = resolvedMode != source.mode
+            guard projectChanged || timeChanged || modeChanged else { return .nothingToChange }
             if projectChanged {
                 appendDecision(
                     to: &source,
@@ -658,10 +673,24 @@ public final class FocusSessionEngine: @unchecked Sendable {
                     source: .manualCorrection
                 )
             }
+            if modeChanged {
+                appendDecision(
+                    to: &source,
+                    at: clock.now,
+                    kind: .corrected,
+                    reason: .manualCorrection,
+                    source: .manualCorrection
+                )
+                source.mode = resolvedMode
+            }
             var replacement = splitForDayBoundaries(
                 source: source, project: resolvedProject, start: start, end: end
             )
             guard !replacement.isEmpty else { return .crossDayBoundaryUnavailable }
+            guard hasValidDayIdentifiers(replacement) else { return .crossDayBoundaryUnavailable }
+            guard !overlapsAnyOtherSession(replacement, replacingID: id, in: working) else {
+                return .overlappingSession
+            }
             for replacementIndex in replacement.indices {
                 if replacement[replacementIndex].startedAt != working[index].startedAt {
                     appendDecision(
@@ -725,6 +754,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// Merges two or more adjacent ended sessions. The earliest selected ID is
     /// retained as the stable identity of the resulting record.
+    ///
+    /// The selected records must form one contiguous range, and the merged
+    /// range must not overlap any unselected session. Every day-local segment
+    /// must resolve to a valid local day. Rejections leave the archive
+    /// untouched.
     public func mergeSessions(ids: [UUID], project: FocusProjectContext? = nil) -> FocusSessionEditResult {
         let selected = Array(Set(ids))
         guard selected.count >= 2 else { return .rejected(.insufficientSessionsToMerge) }
@@ -739,14 +773,14 @@ public final class FocusSessionEngine: @unchecked Sendable {
             for pair in zip(matches, matches.dropFirst()) where pair.0.endedAt != pair.1.startedAt {
                 return .invalidTimeRange
             }
-            working.removeAll { selected.contains($0.id) }
             var base = FocusSession(
                 id: first.id, project: resolvedProject, dayIdentifier: dayProvider(first.startedAt),
                 startedAt: first.startedAt, endedAt: end, status: .ended,
                 lastUserActivityAt: end, lastStateChangeAt: end,
                 pausedTotal: min(first.pausedTotal, end.timeIntervalSince(first.startedAt)),
                 isManuallyConfirmed: true,
-                decisionEvents: mergedDecisionEvents(matches)
+                decisionEvents: mergedDecisionEvents(matches),
+                mode: first.mode
             )
             appendDecision(
                 to: &base,
@@ -757,6 +791,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
             )
             let replacements = splitForDayBoundaries(source: base, project: resolvedProject, start: base.startedAt, end: end)
             guard !replacements.isEmpty else { return .crossDayBoundaryUnavailable }
+            guard hasValidDayIdentifiers(replacements) else { return .crossDayBoundaryUnavailable }
+            guard !overlapsAnyOtherSession(replacements, replacingIDs: selected, in: working) else {
+                return .overlappingSession
+            }
+            working.removeAll { selected.contains($0.id) }
             working.append(contentsOf: replacements)
             return nil
         }
@@ -768,15 +807,20 @@ public final class FocusSessionEngine: @unchecked Sendable {
             let source = working[index]
             guard !source.isOpen else { return .sessionIsActive }
             guard let end = source.endedAt, boundary > source.startedAt, boundary < end else { return .splitOutsideSession }
-            var first = FocusSession(id: source.id, project: source.project, dayIdentifier: dayProvider(source.startedAt), startedAt: source.startedAt, endedAt: boundary, status: .ended, lastUserActivityAt: boundary, lastStateChangeAt: boundary, pausedTotal: min(source.pausedTotal, boundary.timeIntervalSince(source.startedAt)), isManuallyConfirmed: true, decisionEvents: source.decisionEvents?.filter { $0.at < boundary })
-            var second = FocusSession(project: source.project, dayIdentifier: dayProvider(boundary), startedAt: boundary, endedAt: end, status: .ended, lastUserActivityAt: end, lastStateChangeAt: end, pausedTotal: 0, isManuallyConfirmed: true, decisionEvents: source.decisionEvents?.filter { $0.at >= boundary })
+            var first = FocusSession(id: source.id, project: source.project, dayIdentifier: dayProvider(source.startedAt), startedAt: source.startedAt, endedAt: boundary, status: .ended, lastUserActivityAt: boundary, lastStateChangeAt: boundary, pausedTotal: min(source.pausedTotal, boundary.timeIntervalSince(source.startedAt)), isManuallyConfirmed: true, decisionEvents: source.decisionEvents?.filter { $0.at < boundary }, mode: source.mode)
+            var second = FocusSession(project: source.project, dayIdentifier: dayProvider(boundary), startedAt: boundary, endedAt: end, status: .ended, lastUserActivityAt: end, lastStateChangeAt: end, pausedTotal: 0, isManuallyConfirmed: true, decisionEvents: source.decisionEvents?.filter { $0.at >= boundary }, mode: source.mode)
             appendDecision(to: &first, at: boundary, kind: .ended, reason: .manualSplit, source: .manualCorrection)
             appendDecision(to: &second, at: boundary, kind: .started, reason: .manualSplit, source: .manualCorrection)
             appendDecision(to: &first, at: clock.now, kind: .split, reason: .manualSplit, source: .manualCorrection)
             appendDecision(to: &second, at: clock.now, kind: .split, reason: .manualSplit, source: .manualCorrection)
+            let firstSegments = splitForDayBoundaries(source: first, project: first.project, start: first.startedAt, end: boundary)
+            let secondSegments = splitForDayBoundaries(source: second, project: second.project, start: boundary, end: end)
+            guard !firstSegments.isEmpty, !secondSegments.isEmpty else { return .crossDayBoundaryUnavailable }
+            guard hasValidDayIdentifiers(firstSegments),
+                  hasValidDayIdentifiers(secondSegments) else { return .crossDayBoundaryUnavailable }
             working.remove(at: index)
-            working.append(contentsOf: splitForDayBoundaries(source: first, project: first.project, start: first.startedAt, end: boundary))
-            working.append(contentsOf: splitForDayBoundaries(source: second, project: second.project, start: boundary, end: end))
+            working.append(contentsOf: firstSegments)
+            working.append(contentsOf: secondSegments)
             return nil
         }
     }
@@ -790,7 +834,48 @@ public final class FocusSessionEngine: @unchecked Sendable {
         }
         let nextRevision = confirmedRevision + 1
         let nextArchiveRevision = archiveRevision + 1
-        var restored = previous
+        // Reconstruct the pre-edit state without discarding any session that
+        // appeared or advanced after the edit:
+        //   - records the edit changed or removed restore their pre-edit version;
+        //   - records the edit left untouched keep their current state (an open
+        //     session may have ended since the edit);
+        //   - records the edit itself created (e.g. a split segment) are dropped;
+        //   - sessions created after the edit (automatic/manual activity) survive.
+        // If the restored records would conflict with the kept sessions, the
+        // undo is rejected without mutation and can be retried after the
+        // conflicting session is adjusted.
+        var restored: [FocusSession] = []
+        if let postEditSessions = lastEditPostSessions {
+            let postByID = Dictionary(uniqueKeysWithValues: postEditSessions.map { ($0.id, $0) })
+            let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+            for session in previous {
+                guard let post = postByID[session.id] else {
+                    restored.append(session) // removed by the edit
+                    continue
+                }
+                if post != session {
+                    restored.append(session) // changed by the edit
+                }
+            }
+            for session in sessions {
+                guard let post = postByID[session.id] else {
+                    restored.append(session) // created after the edit
+                    continue
+                }
+                guard let previousSession = previousByID[session.id] else {
+                    continue // created by the edit itself; its pre-edit record was restored above
+                }
+                if post == previousSession {
+                    restored.append(session) // untouched by the edit, keep current state
+                }
+            }
+        } else {
+            restored = previous
+        }
+        guard validate(restored) else {
+            lock.unlock()
+            return .rejected(.overlappingSession)
+        }
         for index in restored.indices where !restored[index].isOpen {
             restored[index].isManuallyConfirmed = true
             appendDecision(
@@ -813,6 +898,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
         evidenceBySessionID = evidence
         evidenceArchiveRevision += 1
         lastEditUndo = nil
+        lastEditPostSessions = nil
         committedRevision += 1
         confirmedRevision = nextRevision
         archiveRevision = nextArchiveRevision
@@ -1036,6 +1122,7 @@ private extension FocusSessionEngine {
         evidenceBySessionID = evidence
         evidenceArchiveRevision += 1
         lastEditUndo = previous
+        lastEditPostSessions = working
         pendingSwitch = nil
         committedRevision += 1
         confirmedRevision = nextRevision
@@ -1279,6 +1366,45 @@ private extension FocusSessionEngine {
         }
     }
 
+    /// Cross-day validation: every day-local segment produced by a split must
+    /// resolve to a valid local-day identifier. An invalid segment would be
+    /// persisted into the archive and could invalidate the whole archive on
+    /// the next load, so the edit is rejected instead.
+    func hasValidDayIdentifiers(_ segments: [FocusSession]) -> Bool {
+        segments.allSatisfy { TinyBuddyTimeContext.isValidDayIdentifier($0.dayIdentifier) }
+    }
+
+    /// Overlap validation: the proposed replacement segments must not overlap
+    /// any session outside the replaced set. An open session counts with an
+    /// unbounded end, so an edit can never collide with live focus. Segments
+    /// of one edit are contiguous by construction and only checked against
+    /// other records.
+    func overlapsAnyOtherSession(
+        _ segments: [FocusSession],
+        replacingID: UUID,
+        in working: [FocusSession]
+    ) -> Bool {
+        overlapsAnyOtherSession(segments, replacingIDs: [replacingID], in: working)
+    }
+
+    func overlapsAnyOtherSession(
+        _ segments: [FocusSession],
+        replacingIDs: [UUID],
+        in working: [FocusSession]
+    ) -> Bool {
+        let excluded = Set(replacingIDs)
+        for segment in segments {
+            guard let segmentEnd = segment.endedAt else { continue }
+            for other in working where !excluded.contains(other.id) {
+                let otherEnd = other.endedAt ?? Date.distantFuture
+                if segment.startedAt < otherEnd && other.startedAt < segmentEnd {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     func splitForDayBoundaries(source: FocusSession, project: FocusProjectContext, start: Date, end: Date) -> [FocusSession] {
         guard end > start else { return [] }
         var result: [FocusSession] = []
@@ -1304,7 +1430,7 @@ private extension FocusSessionEngine {
                     source: event.source
                 )
             }
-            result.append(FocusSession(id: keepsOriginalID ? source.id : UUID(), project: project, dayIdentifier: dayProvider(cursor), startedAt: cursor, endedAt: segmentEnd, status: .ended, lastUserActivityAt: segmentEnd, lastStateChangeAt: segmentEnd, pausedTotal: min(excluded, segmentGross), isManuallyConfirmed: true, decisionEvents: segmentEvents))
+            result.append(FocusSession(id: keepsOriginalID ? source.id : UUID(), project: project, dayIdentifier: dayProvider(cursor), startedAt: cursor, endedAt: segmentEnd, status: .ended, lastUserActivityAt: segmentEnd, lastStateChangeAt: segmentEnd, pausedTotal: min(excluded, segmentGross), isManuallyConfirmed: true, decisionEvents: segmentEvents, mode: source.mode))
             keepsOriginalID = false
             cursor = segmentEnd
         }

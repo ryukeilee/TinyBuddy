@@ -15,6 +15,7 @@ struct FocusSessionReviewView: View {
     @State private var projectName = ""
     @State private var start = Date()
     @State private var end = Date()
+    @State private var sessionMode: FocusMode = .automatic
     @State private var splitAt = Date()
     @State private var message: String?
     @State private var refreshID = UUID()
@@ -197,6 +198,12 @@ struct FocusSessionReviewView: View {
             TextField("项目名称", text: $projectName)
             DatePicker("开始", selection: $start)
             DatePicker("结束", selection: $end)
+            Picker("模式", selection: $sessionMode) {
+                Text("自动").tag(FocusMode.automatic)
+                Text("手动").tag(FocusMode.manual)
+            }
+            .pickerStyle(.segmented)
+            .disabled(selectedSession?.isOpen == true)
             HStack {
                 Button("确认记录") { confirm() }
                     .disabled(selectedSession == nil || selectedSession?.isOpen == true || selectedSession?.isManuallyConfirmed == true)
@@ -220,12 +227,13 @@ struct FocusSessionReviewView: View {
         projectName = session.project.displayName
         start = session.startedAt
         end = session.endedAt ?? session.startedAt
+        sessionMode = session.mode
         splitAt = start.addingTimeInterval(max(1, end.timeIntervalSince(start) / 2))
     }
 
     private func saveEdit() {
         guard let id = selectedSession?.id else { return }
-        apply(engine?.editSession(id: id, project: FocusProjectContext(key: projectKey, displayName: projectName), startedAt: start, endedAt: end))
+        apply(engine?.editSession(id: id, project: FocusProjectContext(key: projectKey, displayName: projectName), startedAt: start, endedAt: end, mode: sessionMode))
     }
     private func confirm() { guard let id = selectedSession?.id else { return }; apply(engine?.confirmSession(id: id)) }
     private func delete() { guard let id = selectedSession?.id else { return }; apply(engine?.deleteSession(id: id)) }
@@ -467,6 +475,7 @@ struct FocusSessionReviewView: View {
         case .persistenceFailed: return "未能写入磁盘，原记录与统计保持不变。"
         case .nothingToUndo: return "没有可撤销的编辑。"
         case .alreadyConfirmed: return "这条记录已经由用户确认或修正。"
+        case .nothingToChange: return "没有检测到需要修改的内容。"
         }
     }
 }

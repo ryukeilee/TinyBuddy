@@ -1067,3 +1067,336 @@ extension FocusSessionEngineTests {
         XCTAssertEqual(sessions.reduce(0) { $0 + $1.activeDuration(now: clock.now) }, 1_200, accuracy: 0.001)
     }
 }
+
+// MARK: - Edit/delete validation, mode editing, and undo safety
+
+extension FocusSessionEngineTests {
+    func test_edit_rejects_overlap_with_other_ended_session_without_mutating() {
+        let idA = endedSession(projectA, start: t0, duration: 30)
+        clock.set(to: t0.addingTimeInterval(60))
+        let engine = makeEngine(clock: clock, store: store)
+        let idB: UUID = {
+            engine.userActivity(in: projectB, at: t0.addingTimeInterval(60))
+            clock.set(to: t0.addingTimeInterval(90))
+            engine.lockScreen(at: clock.now)
+            return engine.allSessions.first { $0.id != idA }!.id
+        }()
+        let original = engine.allSessions
+
+        // Extend B backwards so it overlaps A.
+        XCTAssertEqual(
+            engine.editSession(id: idB, startedAt: t0.addingTimeInterval(10), endedAt: t0.addingTimeInterval(90)),
+            .rejected(.overlappingSession)
+        )
+        XCTAssertEqual(engine.allSessions, original)
+    }
+
+    func test_cross_day_edit_rejects_overlap_with_next_day_session_without_mutating() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = calendar.date(from: DateComponents(year: 2026, month: 7, day: 20, hour: 23, minute: 50))!
+        clock.set(to: start)
+        let idA = endedSession(projectA, start: start, duration: 30)
+        let nextDayStart = start.addingTimeInterval(1_200)
+        clock.set(to: nextDayStart)
+        let engine = makeEngine(clock: clock, store: store)
+        let idB: UUID = {
+            engine.userActivity(in: projectB, at: nextDayStart)
+            clock.set(to: nextDayStart.addingTimeInterval(60))
+            engine.lockScreen(at: clock.now)
+            return engine.allSessions.first { $0.id != idA }!.id
+        }()
+        let original = engine.allSessions
+
+        // Extend the first session across midnight; it must not overlap session B.
+        clock.set(to: nextDayStart.addingTimeInterval(120))
+        XCTAssertEqual(
+            engine.editSession(id: idA, endedAt: nextDayStart.addingTimeInterval(120)),
+            .rejected(.overlappingSession)
+        )
+        XCTAssertEqual(engine.allSessions, original)
+        _ = idB
+    }
+
+    func test_delete_and_edit_reject_active_session() {
+        let engine = makeEngine(clock: clock, store: store)
+        engine.userActivity(in: projectA, at: t0)
+        let openID = engine.allSessions[0].id
+
+        XCTAssertEqual(engine.deleteSession(id: openID), .rejected(.sessionIsActive))
+        XCTAssertEqual(engine.editSession(id: openID, project: projectB), .rejected(.sessionIsActive))
+        XCTAssertEqual(engine.editSession(id: openID, mode: .manual), .rejected(.sessionIsActive))
+        XCTAssertEqual(engine.allSessions.count, 1)
+    }
+
+    func test_merge_rejects_non_adjacent_sessions() {
+        let idA = endedSession(projectA, start: t0, duration: 30)
+        clock.set(to: t0.addingTimeInterval(30))
+        let engine = makeEngine(clock: clock, store: store)
+        let idB: UUID = {
+            engine.userActivity(in: projectA, at: t0.addingTimeInterval(30))
+            clock.set(to: t0.addingTimeInterval(60))
+            engine.lockScreen(at: clock.now)
+            return engine.allSessions.first { $0.id != idA }!.id
+        }()
+        let idC: UUID = {
+            engine.userActivity(in: projectB, at: t0.addingTimeInterval(60))
+            clock.set(to: t0.addingTimeInterval(90))
+            engine.lockScreen(at: clock.now)
+            return engine.allSessions.first { $0.id != idA && $0.id != idB }!.id
+        }()
+        let original = engine.allSessions
+
+        // A and C are separated by B, so the merge range would not be
+        // contiguous; the merge must be rejected without mutation.
+        XCTAssertEqual(engine.mergeSessions(ids: [idA, idC]), .rejected(.invalidTimeRange))
+        XCTAssertEqual(engine.allSessions, original)
+    }
+
+    func test_edit_rejects_cross_day_split_when_day_boundary_unavailable() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = calendar.date(from: DateComponents(year: 2026, month: 7, day: 20, hour: 23, minute: 50))!
+        clock.set(to: start)
+        let id = endedSession(projectA, start: start, duration: 60)
+        clock.set(to: start.addingTimeInterval(1_200))
+        let engine = FocusSessionEngine(
+            clock: clock,
+            persisting: store,
+            config: FocusSessionConfiguration(),
+            dayIdentifier: { dayIdentifier(for: $0) },
+            nextDayBoundary: { _ in nil }
+        )
+
+        XCTAssertEqual(
+            engine.editSession(id: id, endedAt: start.addingTimeInterval(1_200)),
+            .rejected(.crossDayBoundaryUnavailable)
+        )
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions[0].id, id)
+    }
+
+    func test_edit_rejects_cross_day_segment_with_invalid_day_identifier() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = calendar.date(from: DateComponents(year: 2026, month: 7, day: 20, hour: 23, minute: 50))!
+        clock.set(to: start)
+        let id = endedSession(projectA, start: start, duration: 60)
+        clock.set(to: start.addingTimeInterval(1_200))
+        // The day provider resolves the original day but fails after midnight,
+        // which would otherwise persist an invalid day identifier into the
+        // archive and invalidate the whole archive on the next load.
+        let engine = FocusSessionEngine(
+            clock: clock,
+            persisting: store,
+            config: FocusSessionConfiguration(),
+            dayIdentifier: { date in
+                date < start.addingTimeInterval(600)
+                    ? dayIdentifier(for: date)
+                    : "not-a-valid-day"
+            },
+            nextDayBoundary: { date in
+                calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+            }
+        )
+
+        XCTAssertEqual(
+            engine.editSession(id: id, endedAt: start.addingTimeInterval(1_200)),
+            .rejected(.crossDayBoundaryUnavailable)
+        )
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions[0].id, id)
+    }
+
+    func test_edit_changes_mode_and_persists_across_restart() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+        XCTAssertEqual(engine.allSessions[0].mode, .automatic)
+
+        guard case .saved = engine.editSession(id: id, mode: .manual) else {
+            return XCTFail("Expected mode edit")
+        }
+        XCTAssertEqual(engine.allSessions[0].mode, .manual)
+        XCTAssertTrue(engine.allSessions[0].isManuallyConfirmed)
+        XCTAssertTrue(
+            engine.allSessions[0].decisionEvents?.contains {
+                $0.source == .manualCorrection && $0.kind == .corrected
+            } == true
+        )
+
+        let restarted = makeEngine(clock: clock, store: store)
+        XCTAssertEqual(restarted.allSessions[0].mode, .manual)
+
+        guard case .saved = restarted.editSession(id: id, mode: .automatic) else {
+            return XCTFail("Expected mode edit back")
+        }
+        XCTAssertEqual(restarted.allSessions[0].mode, .automatic)
+    }
+
+    func test_edit_preserves_manual_mode_of_manual_session() {
+        let engine = makeEngine(clock: clock, store: store)
+        clock.set(to: t0)
+        XCTAssertEqual(engine.startManualFocus(project: projectA, at: t0), .saved)
+        clock.set(to: t0.addingTimeInterval(30))
+        XCTAssertEqual(engine.endManualFocus(at: clock.now), .saved)
+        let id = engine.allSessions[0].id
+        XCTAssertEqual(engine.allSessions[0].mode, .manual)
+
+        // A project/time correction must not silently convert a manual
+        // session into an automatic one.
+        guard case .saved = engine.editSession(id: id, project: projectB) else {
+            return XCTFail("Expected project edit")
+        }
+        XCTAssertEqual(engine.allSessions[0].mode, .manual)
+        XCTAssertEqual(engine.allSessions[0].project, projectB)
+
+        guard case .saved = engine.editSession(id: id, startedAt: t0.addingTimeInterval(5), endedAt: t0.addingTimeInterval(30)) else {
+            return XCTFail("Expected time edit")
+        }
+        XCTAssertEqual(engine.allSessions[0].mode, .manual)
+    }
+
+    func test_merge_preserves_first_session_mode() {
+        let engine = makeEngine(clock: clock, store: store)
+        clock.set(to: t0)
+        XCTAssertEqual(engine.startManualFocus(project: projectA, at: t0), .saved)
+        clock.set(to: t0.addingTimeInterval(30))
+        XCTAssertEqual(engine.endManualFocus(at: clock.now), .saved)
+        // Adjacent automatic session starts right after the manual one ends.
+        clock.set(to: t0.addingTimeInterval(30))
+        XCTAssertEqual(engine.userActivity(in: projectB, at: clock.now), .saved)
+        clock.set(to: t0.addingTimeInterval(60))
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        XCTAssertEqual(engine.allSessions.count, 2)
+
+        guard case .saved = engine.mergeSessions(ids: engine.allSessions.map(\.id)) else {
+            return XCTFail("Expected merge")
+        }
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions[0].mode, .manual)
+    }
+
+    func test_split_preserves_source_mode() {
+        let engine = makeEngine(clock: clock, store: store)
+        clock.set(to: t0)
+        XCTAssertEqual(engine.startManualFocus(project: projectA, at: t0), .saved)
+        clock.set(to: t0.addingTimeInterval(60))
+        XCTAssertEqual(engine.endManualFocus(at: clock.now), .saved)
+        let id = engine.allSessions[0].id
+
+        guard case .saved = engine.splitSession(id: id, at: t0.addingTimeInterval(20)) else {
+            return XCTFail("Expected split")
+        }
+        XCTAssertEqual(engine.allSessions.count, 2)
+        XCTAssertTrue(engine.allSessions.allSatisfy { $0.mode == .manual })
+    }
+
+    func test_edit_rejects_no_change() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+
+        XCTAssertEqual(
+            engine.editSession(id: id, project: projectA, startedAt: t0, endedAt: t0.addingTimeInterval(30), mode: .automatic),
+            .rejected(.nothingToChange)
+        )
+        XCTAssertEqual(engine.allSessions.count, 1)
+    }
+
+    func test_edit_rejects_overlap_with_open_session() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        clock.set(to: t0.addingTimeInterval(60))
+        let engine = makeEngine(clock: clock, store: store)
+        // An open session is running from t0+60 onward.
+        XCTAssertEqual(engine.userActivity(in: projectB, at: clock.now), .saved)
+        let original = engine.allSessions
+
+        // Extending the ended record into the live session range must be
+        // rejected as an overlap before any mutation. The end stays within
+        // the future-time tolerance so the overlap check is what fires.
+        XCTAssertEqual(
+            engine.editSession(id: id, endedAt: t0.addingTimeInterval(61)),
+            .rejected(.overlappingSession)
+        )
+        XCTAssertEqual(engine.allSessions, original)
+    }
+
+    func test_undo_does_not_resurrect_stale_open_session_state() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+        clock.set(to: t0.addingTimeInterval(40))
+        // An open session is running while the user edits the ended record.
+        XCTAssertEqual(engine.userActivity(in: projectB, at: clock.now), .saved)
+        guard case .saved = engine.editSession(id: id, project: projectB) else {
+            return XCTFail("Expected edit")
+        }
+        // The open session ends after the edit.
+        clock.set(to: t0.addingTimeInterval(60))
+        XCTAssertEqual(engine.lockScreen(at: clock.now), .saved)
+        let bBeforeUndo = engine.allSessions.first { $0.startedAt == t0.addingTimeInterval(40) }
+        XCTAssertEqual(bBeforeUndo?.status, .ended)
+
+        guard case .saved = engine.undoLastEdit() else { return XCTFail("Expected undo") }
+        // The session untouched by the edit must keep its current ended state
+        // instead of being resurrected as open from the pre-edit snapshot.
+        let b = engine.allSessions.first { $0.startedAt == t0.addingTimeInterval(40) }
+        XCTAssertEqual(b?.status, .ended)
+        XCTAssertEqual(engine.allSessions.count, 2)
+        XCTAssertEqual(engine.allSessions.first { $0.id == id }?.project, projectA)
+    }
+
+    func test_undo_preserves_sessions_created_after_edit() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+
+        guard case .saved = engine.editSession(id: id, project: projectB) else {
+            return XCTFail("Expected edit")
+        }
+        // Concurrent automatic activity creates a new session after the edit.
+        let autoStart = t0.addingTimeInterval(40)
+        clock.set(to: autoStart)
+        XCTAssertEqual(engine.userActivity(in: projectA, at: autoStart), .saved)
+        XCTAssertEqual(engine.allSessions.count, 2)
+
+        guard case .saved = engine.undoLastEdit() else { return XCTFail("Expected undo") }
+        let sessions = engine.allSessions
+        let autoSession = sessions.first { $0.project == projectA && $0.startedAt == autoStart }
+        XCTAssertNotNil(autoSession, "undo must not clobber sessions created after the edit")
+        XCTAssertEqual(sessions.count, 2)
+        XCTAssertEqual(sessions.first { $0.id == id }?.project, projectA)
+    }
+
+    func test_undo_rejected_when_restored_record_conflicts_with_later_session() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+
+        // Shrink the record; then a new session starts inside its original range.
+        guard case .saved = engine.editSession(id: id, endedAt: t0.addingTimeInterval(10)) else {
+            return XCTFail("Expected edit")
+        }
+        clock.set(to: t0.addingTimeInterval(20))
+        XCTAssertEqual(engine.userActivity(in: projectB, at: clock.now), .saved)
+        let before = engine.allSessions
+
+        // Restoring the pre-edit range would overlap the later session; the
+        // undo must fail without mutating anything.
+        XCTAssertEqual(engine.undoLastEdit(), .rejected(.overlappingSession))
+        XCTAssertEqual(engine.undoLastEdit(), .rejected(.overlappingSession))
+        XCTAssertEqual(engine.allSessions, before)
+    }
+
+    func test_undo_after_delete_keeps_later_sessions() {
+        let id = endedSession(projectA, start: t0, duration: 30)
+        let engine = makeEngine(clock: clock, store: store)
+        clock.set(to: t0.addingTimeInterval(40))
+        XCTAssertEqual(engine.userActivity(in: projectB, at: clock.now), .saved)
+        let openID = engine.allSessions.first { $0.id != id }!.id
+
+        guard case .saved = engine.deleteSession(id: id) else { return XCTFail("Expected delete") }
+        XCTAssertEqual(engine.allSessions.count, 1)
+
+        guard case .saved = engine.undoLastEdit() else { return XCTFail("Expected undo") }
+        XCTAssertEqual(engine.allSessions.count, 2)
+        XCTAssertNotNil(engine.allSessions.first { $0.id == id })
+        XCTAssertNotNil(engine.allSessions.first { $0.id == openID })
+    }
+}
