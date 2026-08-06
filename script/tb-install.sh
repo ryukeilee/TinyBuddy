@@ -47,7 +47,7 @@ PBXPROJ="$XCODEPROJ/project.pbxproj"
 STALE_INPUT="$(find "$ROOT/project.yml" "$ROOT/Sources" "$ROOT/Widget" "$ROOT/Tests" \
   -type f \( -name "*.swift" -o -name "*.yml" \) -newer "$PBXPROJ" -print 2>/dev/null | head -1)"
 if [ -n "$XCODEGEN_BIN" ] && [ -n "$STALE_INPUT" ]; then
-  info "工程过期（$STALE_INPUT 更新于 $PBXPROJ），重新生成 Xcode 工程 ..."
+  info "工程过期（$STALE_INPUT 更新于 ${PBXPROJ}），重新生成 Xcode 工程 ..."
   ( cd "$ROOT" && "$XCODEGEN_BIN" generate ) || fail "xcodegen generate 失败：请安装 xcodegen 或手动运行它"
 fi
 
