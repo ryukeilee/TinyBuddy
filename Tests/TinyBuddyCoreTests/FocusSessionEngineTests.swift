@@ -338,6 +338,39 @@ extension FocusSessionEngineTests {
         XCTAssertEqual(s.endedAt, clock.now)
         XCTAssertEqual(s.activeDuration(now: clock.now), 40, accuracy: 0.001)
     }
+
+    func test_terminate_publication_reflects_ended_session() throws {
+        // The app layer flushes `focusHistoryPublication()` synchronously at
+        // termination. It must already reflect the finalized (ended) session,
+        // not a stale open-session state that would resurrect "focusing" in
+        // HUD and Widget after relaunch.
+        let engine = makeEngine(clock: clock, store: store)
+        engine.userActivity(in: projectA, at: t0)
+        clock.advance(by: 40)
+        engine.appWillTerminate(at: clock.now)
+
+        let publication = try XCTUnwrap(engine.focusHistoryPublication())
+        XCTAssertFalse(publication.isFocusSessionActive)
+        XCTAssertFalse(publication.isFocusSessionPaused)
+    }
+
+    func test_terminate_paused_manual_session_preserves_pause_accounting() {
+        let engine = makeEngine(clock: clock, store: store)
+        engine.startManualFocus(project: projectA, at: t0)
+        clock.advance(by: 10)
+        engine.pauseManualFocus(at: clock.now) // paused at t0+10
+        XCTAssertEqual(engine.allSessions[0].status, .paused)
+
+        clock.advance(by: 100) // paused idle time
+        engine.appWillTerminate(at: clock.now) // quit at t0+110
+
+        let s = engine.allSessions[0]
+        XCTAssertEqual(s.status, .ended)
+        // The paused interval is excluded from active time, never counted
+        // twice, and the session is closed at the quit moment.
+        XCTAssertEqual(s.endedAt, t0.addingTimeInterval(110))
+        XCTAssertEqual(s.activeDuration(now: clock.now), 10, accuracy: 0.001)
+    }
 }
 
 // MARK: - Crash recovery
@@ -425,6 +458,31 @@ extension FocusSessionEngineTests {
         // Active: gross = 10, excluded = 0 (pause started at t0+10, but endedAt=t0+10
         // so the pause interval t0+10..t0+10 is 0), active = 10.
         XCTAssertEqual(s.activeDuration(now: clock.now), 10, accuracy: 0.001)
+    }
+
+    func test_crash_recovery_of_paused_manual_session_ends_without_backfill() {
+        // Manual session paused at t0+10 then the process dies. Relaunch must
+        // end the session at its last known state (pause start), preserve the
+        // pause accounting, and never resume it across the offline gap.
+        let engine = makeEngine(clock: clock, store: store)
+        engine.startManualFocus(project: projectA, at: t0)
+        clock.advance(by: 10)
+        engine.pauseManualFocus(at: clock.now) // paused at t0+10
+        XCTAssertEqual(engine.allSessions[0].status, .paused)
+
+        clock.advance(by: 500) // offline gap — must NOT become active time
+        let restarted = makeEngine(clock: clock, store: store)
+        let s = restarted.allSessions[0]
+
+        XCTAssertEqual(s.status, .ended)
+        XCTAssertEqual(s.endedAt, t0.addingTimeInterval(10))
+        XCTAssertEqual(s.activeDuration(now: clock.now), 10, accuracy: 0.001)
+
+        // Post-restart activity starts a fresh session at the boundary, never
+        // a resumed continuation of the crashed one.
+        XCTAssertEqual(restarted.userActivity(in: projectA, at: clock.now), .saved)
+        XCTAssertEqual(restarted.allSessions.count, 2)
+        XCTAssertGreaterThanOrEqual(restarted.allSessions[1].startedAt, s.endedAt!)
     }
 }
 

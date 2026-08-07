@@ -453,6 +453,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    /// Update installers and repository scripts terminate a running app with
+    /// SIGTERM; macOS' default disposition kills the process without posting
+    /// `NSApplication.willTerminateNotification`, silently degrading state
+    /// hand-off to crash recovery (the open session ends at its last event
+    /// instead of the exit moment and the combined snapshot keeps the live
+    /// state). Converting SIGTERM into a normal termination preserves the
+    /// final session settlement, the combined snapshot commit, and the
+    /// per-day archive. SIGKILL cannot be intercepted; its recovery is
+    /// handled by the launch-time session journal reconciliation.
+    private func installTerminationSignalHandlers() {
+        signal(SIGTERM) { _ in
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let resetRecoveryError {
             NSApp.setActivationPolicy(.regular)
@@ -480,6 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Darwin.exit(0)
         }
 
+        installTerminationSignalHandlers()
         NSApp.setActivationPolicy(.accessory)
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
@@ -787,6 +805,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.republishFocusHistory()
     }
 
+    /// Commits the engine's latest focus-history publication to the combined
+    /// snapshot synchronously at termination. The regular committed-history
+    /// callback is dispatched asynchronously and cannot be relied on to run
+    /// before the process exits; without this flush the last combined snapshot
+    /// would keep the open-session state and the per-day archive would capture
+    /// a stale day image. Mirrors the startup journal-replay path (same status
+    /// derivation, same revision guards), so a termination that is killed in
+    /// the middle still leaves a durable replay candidate behind.
+    private func flushFinalFocusPublicationForTermination() {
+        guard let engine = focusSessionBridge?.sessionEngine,
+              let publication = engine.focusHistoryPublication() else {
+            return
+        }
+        synchronizeFocusHistoryPublication(
+            publication,
+            status: FocusHistoryPublicationStatus.status(for: publication)
+        )
+    }
+
     private func synchronizeFocusHistoryPublication(
         _ publication: FocusHistoryPublication,
         status: PetStatus? = nil,
@@ -1055,16 +1092,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerStateMonitor.stop()
         timeEnvironmentChangeMonitor.stop()
         gitActivityRefreshCoordinator.stop()
-        // Final archival of today's committed snapshot before the process
-        // exits; best-effort and never blocking termination recovery.
-        historyArchivalCoordinator.handleTermination()
-        // During a reset the session journal has already been removed and the
-        // engine must not finalize (and thereby recreate) pre-reset sessions.
-        // Normal termination still finalizes the open session as usual.
+        // Normal termination finalizes the open session synchronously: the
+        // session journal write is atomic and immediate. During a reset the
+        // session journal has already been removed and the engine must not
+        // finalize (and thereby recreate) pre-reset sessions.
         if !isPerformingReset {
             focusSessionBridge?.handleTerminate()
+            // The finalize publication is normally delivered through an async
+            // main-queue callback that is not guaranteed to run before the
+            // process exits. Commit it synchronously here so the combined
+            // snapshot — and therefore HUD, Widget, and the per-day archive —
+            // reflects the ended session and never resurrects a stale
+            // "focusing" state on relaunch.
+            flushFinalFocusPublicationForTermination()
         }
         focusSessionBridge?.stop()
+        // Final archival of today's committed snapshot — now including the
+        // finalized session state — before the process exits; best-effort and
+        // never blocking termination recovery.
+        historyArchivalCoordinator.handleTermination()
         manualFocusMenuBarController.stop()
         HUDWindowPositionController.shared.stop()
     }
