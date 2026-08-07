@@ -461,6 +461,14 @@ extension FocusSessionAppBridge {
                       let project = registry.resolve(projectKey: context.key) else {
                     return false
                 }
+                // Automatic attribution is limited to active projects. An
+                // archived (or otherwise non-active) project stops receiving
+                // new automatic focus on the very next report, exactly like an
+                // exclusion rule: evaluating the final candidate on every
+                // report prevents a stale scan result or an in-flight
+                // recent-git reference from reviving attribution after the
+                // user archived the project. Manual sessions are untouched.
+                if project.state != .active { return true }
                 // Freeze the rules once per report so a rule change mid-event
                 // cannot produce a torn decision, and only match against
                 // canonical directories that still exist (a moved repository

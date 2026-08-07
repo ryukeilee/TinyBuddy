@@ -449,8 +449,24 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
             // scans.  Consolidate those matches immediately.  Otherwise the
             // next scan can choose a different Set element and publish a
             // project under the wrong owner (or leave duplicate rows forever).
+            //
+            // Two candidate rows must never be auto-consolidated here:
+            // - An explicitly archived project.  Merging it away as a source
+            //   would silently revert the user's archive decision, and the
+            //   redirect would route the repository's future observations into
+            //   an active identity, bypassing the archived state.
+            // - A row carrying a different fingerprint.  A shared alias can
+            //   legitimately belong to two distinct repositories over time
+            //   (one moved away, another took over the path); folding them
+            //   together would destroy the other repository's identity and
+            //   misattribute its history.  Such collisions stay separate rows.
             let sourceIndices = candidateIndices.filter { $0 != resolvedIndex &&
-                working.projects[$0].state != .removed
+                working.projects[$0].state != .removed &&
+                working.projects[$0].state != .archived &&
+                !hasConflictingFingerprint(
+                    working.projects[$0],
+                    observationFingerprint: fingerprint
+                )
             }
             if !sourceIndices.isEmpty {
                 guard working.revision < Int64.max,
@@ -860,6 +876,17 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
             }
             return left.id < right.id
         }.first
+    }
+
+    /// A row with a different fingerprint is evidence of a different
+    /// repository. A `nil` fingerprint (legacy row) never conflicts and may be
+    /// consolidated so the durable row gains the observed evidence.
+    private func hasConflictingFingerprint(
+        _ project: TinyBuddyProject,
+        observationFingerprint: String
+    ) -> Bool {
+        guard let stored = project.repositoryFingerprint else { return false }
+        return stored.lowercased() != observationFingerprint.lowercased()
     }
 
     private func terminalTarget(

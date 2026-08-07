@@ -570,6 +570,149 @@ final class ProjectIdentityTests: XCTestCase {
         XCTAssertEqual(registry.automaticContext(for: duplicate.id.rawValue)?.key, target.id.rawValue)
     }
 
+    func testObservationNeverMergesArchivedProjectAsSource() throws {
+        // The archived project's old path is taken over by a different
+        // repository.  An observation of the new repository must resolve to
+        // its own identity without silently tombstoning the archived row and
+        // routing its future observations through an active identity.
+        var archived = project(id: "archived", name: "Legacy Repo", alias: "/old/.git")
+        archived.state = .archived
+        archived.repositoryFingerprint = "roots:legacy"
+        let active = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "active"),
+            kind: .gitRepository,
+            displayName: "Current Repo",
+            repositoryFingerprint: "roots:current",
+            aliases: ["/current/.git"]
+        )
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(
+            projects: [archived, active]
+        ))
+        let registry = TinyBuddyProjectRegistry(store: store)
+        let token = registry.beginScan()
+
+        // The current repo now lives at the archived repo's old path.
+        let observed = try resolved(registry.observe(observation(
+            fingerprint: "roots:current",
+            alias: "/old/.git",
+            name: "Current Repo"
+        ), token: token))
+        XCTAssertEqual(observed.id, active.id)
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 2,
+                       "the archived identity must not be merged away")
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == archived.id }?.state, .archived)
+        XCTAssertEqual(registry.currentSnapshot.redirects.count, 0)
+        XCTAssertEqual(registry.resolve(projectKey: "roots:current")?.id, active.id)
+        XCTAssertEqual(registry.resolve(projectKey: "roots:legacy")?.id, archived.id)
+        XCTAssertNil(registry.automaticContext(for: archived.id.rawValue))
+        XCTAssertNotNil(registry.automaticContext(for: active.id.rawValue))
+
+        // When the archived repository returns to its old path, it resolves
+        // back to the archived identity (never re-activated, never merged
+        // into the active row), and the active row stays intact.
+        let returnToken = registry.beginScan()
+        let returned = try resolved(registry.observe(observation(
+            fingerprint: "roots:legacy",
+            alias: "/old/.git",
+            name: "Legacy Repo"
+        ), token: returnToken))
+        XCTAssertEqual(returned.id, archived.id)
+        XCTAssertEqual(returned.state, .archived)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == active.id }?.state, .active)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == active.id }?.repositoryFingerprint, "roots:current")
+    }
+
+    func testObservationKeepsDistinctActiveRepositoriesSharingOnePath() throws {
+        // Without any archive involvement, two different repositories that
+        // claimed the same path at different times must not be folded into
+        // one identity by an alias match; their fingerprints differ.
+        let first = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "first"),
+            kind: .gitRepository,
+            displayName: "First",
+            repositoryFingerprint: "roots:first",
+            aliases: ["/shared/.git"]
+        )
+        let second = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "second"),
+            kind: .gitRepository,
+            displayName: "Second",
+            repositoryFingerprint: "roots:second",
+            aliases: ["/elsewhere/.git"]
+        )
+        let store = ProjectRegistryMemoryStore(TinyBuddyProjectRegistrySnapshot(
+            projects: [first, second]
+        ))
+        let registry = TinyBuddyProjectRegistry(store: store)
+        let token = registry.beginScan()
+
+        // Second moved into the path first used by First.
+        let secondObserved = try resolved(registry.observe(observation(
+            fingerprint: "roots:second",
+            alias: "/shared/.git",
+            name: "Second"
+        ), token: token))
+        XCTAssertEqual(secondObserved.id, second.id)
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 2)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == first.id }?.state, .active)
+        XCTAssertEqual(registry.currentSnapshot.projects.first { $0.id == first.id }?.repositoryFingerprint, "roots:first")
+        XCTAssertEqual(registry.currentSnapshot.redirects.count, 0)
+
+        // First's own re-observation still lands on First.
+        let secondToken = registry.beginScan()
+        let firstAgain = try resolved(registry.observe(observation(
+            fingerprint: "roots:first",
+            alias: "/moved/.git",
+            name: "First"
+        ), token: secondToken))
+        XCTAssertEqual(firstAgain.id, first.id)
+        XCTAssertEqual(registry.currentSnapshot.projects.count, 2)
+        XCTAssertEqual(registry.resolve(projectKey: "roots:first")?.id, first.id)
+        XCTAssertEqual(registry.resolve(projectKey: "roots:second")?.id, second.id)
+    }
+
+    func testRestoreReconnectsLatestIdentityAndAttribution() throws {
+        let store = ProjectRegistryMemoryStore()
+        let stableID = TinyBuddyProjectID(rawValue: "stable")
+        let registry = TinyBuddyProjectRegistry(store: store, idProvider: { stableID })
+        let token = registry.beginScan()
+
+        let project = try resolved(registry.observe(observation(
+            fingerprint: "roots:repo",
+            alias: "/repo/.git",
+            name: "Repo"
+        ), token: token))
+        guard case .saved = registry.archive(id: project.id) else {
+            return XCTFail("archive should save")
+        }
+        XCTAssertNil(registry.automaticContext(for: project.id.rawValue))
+
+        // A scan started before the archive must not re-activate the project.
+        let staleToken = registry.beginScan()
+        guard case .saved = registry.restore(id: project.id) else {
+            return XCTFail("restore should save")
+        }
+        XCTAssertNotNil(registry.automaticContext(for: project.id.rawValue))
+        XCTAssertEqual(registry.observe(observation(
+            fingerprint: "roots:repo",
+            alias: "/repo/.git",
+            name: "Repo"
+        ), token: staleToken), .ignoredStale)
+
+        // A fresh scan after restore refreshes identity evidence and keeps the
+        // project active; automatic attribution resolves to the canonical id
+        // and the latest display name.
+        let freshToken = registry.beginScan()
+        let refreshed = try resolved(registry.observe(observation(
+            fingerprint: "roots:repo",
+            alias: "/moved/repo/.git",
+            name: "Repo"
+        ), token: freshToken))
+        XCTAssertEqual(refreshed.state, .active)
+        XCTAssertTrue(refreshed.aliases.contains("/moved/repo/.git"))
+        XCTAssertEqual(registry.automaticContext(for: "roots:repo")?.key, stableID.rawValue)
+    }
+
     private func observation(
         fingerprint: String,
         alias: String,

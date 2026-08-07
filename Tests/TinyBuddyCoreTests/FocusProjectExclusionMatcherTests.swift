@@ -280,6 +280,124 @@ extension FocusProjectExclusionMatcherTests {
     }
 }
 
+// MARK: - Archived projects stop new automatic attribution
+
+extension FocusProjectExclusionMatcherTests {
+    /// Mirrors the gate the app builds in FocusSessionAppBridge.createStandard:
+    /// resolve the candidate through the registry, suppress non-active
+    /// (archived) projects, then apply the live exclusion rules.
+    @MainActor
+    private func makeArchiveAwareGate(
+        registry: TinyBuddyProjectRegistry,
+        patterns: @escaping () -> [String] = { [] },
+        fileExists: @escaping (String) -> Bool = { _ in true }
+    ) -> @MainActor (FocusProjectContext) -> Bool {
+        { context in
+            guard let project = registry.resolve(projectKey: context.key) else { return false }
+            if project.state != .active { return true }
+            return FocusProjectExclusionMatcher.isExcluded(
+                canonicalPaths: Array(project.aliases).filter(fileExists),
+                patterns: patterns()
+            )
+        }
+    }
+
+    @MainActor
+    func testArchivedProjectStopsNewAutomaticAttributionUntilRestore() {
+        let clock = FakeClock(t0)
+        let store = MemoryStore()
+        let engine = makeExclusionEngine(clock: clock, store: store)
+        let registry = makeRegistry(aliases: ["/Users/me/work/repoA"])
+        let projectID = try! XCTUnwrap(registry.currentSnapshot.projects.first?.id)
+        let gate = makeArchiveAwareGate(registry: registry)
+        let coordinator = FocusSessionCoordinator(
+            engine: engine,
+            policy: FocusAttributionPolicy(gitAttributionWindow: nil),
+            clock: clock,
+            exclusionGate: gate
+        )
+        coordinator.reportForegroundApp(
+            bundleID: "com.apple.dt.Xcode", displayName: "Xcode", isCodeEditor: true)
+
+        // Archive before any activity: git activity in the repo must NOT start
+        // a session, even though the in-flight recent-git reference exists.
+        guard case .saved = registry.archive(id: projectID) else {
+            return XCTFail("archive should save")
+        }
+        coordinator.reportGitActivity(
+            repoKey: projectID.rawValue, displayName: "Repo", automated: false)
+        coordinator.reportUserInput()
+        XCTAssertNil(coordinator.currentFocusProject(),
+                     "an archived project must not start a new automatic session")
+        XCTAssertEqual(engine.allSessions.count, 0)
+
+        // Restore reconnects automatic focus on the very next event.
+        guard case .saved = registry.restore(id: projectID) else {
+            return XCTFail("restore should save")
+        }
+        coordinator.reportGitActivity(
+            repoKey: projectID.rawValue, displayName: "Repo", automated: false)
+        coordinator.reportUserInput()
+        XCTAssertEqual(coordinator.currentFocusProject()?.key, projectID.rawValue,
+                       "restore must reconnect automatic attribution to the latest identity")
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions.first?.project.key, projectID.rawValue)
+    }
+
+    @MainActor
+    func testArchiveDoesNotTruncateOrSwitchAnExistingSession() {
+        let clock = FakeClock(t0)
+        let store = MemoryStore()
+        let engine = makeExclusionEngine(clock: clock, store: store)
+        let registry = makeRegistry(aliases: ["/Users/me/work/repoA"])
+        let projectID = try! XCTUnwrap(registry.currentSnapshot.projects.first?.id)
+        let gate = makeArchiveAwareGate(registry: registry)
+        let coordinator = FocusSessionCoordinator(
+            engine: engine,
+            policy: FocusAttributionPolicy(gitAttributionWindow: nil),
+            clock: clock,
+            exclusionGate: gate
+        )
+        coordinator.reportForegroundApp(
+            bundleID: "com.apple.dt.Xcode", displayName: "Xcode", isCodeEditor: true)
+
+        // Establish an automatic session in the active project.
+        coordinator.reportGitActivity(
+            repoKey: projectID.rawValue, displayName: "Repo", automated: false)
+        coordinator.reportUserInput()
+        XCTAssertEqual(engine.allSessions.count, 1)
+        let established = try! XCTUnwrap(engine.allSessions.first)
+        XCTAssertEqual(established.project.key, projectID.rawValue)
+
+        // Archive mid-session, then keep typing: the existing session is
+        // neither truncated nor switched to another project, and no parallel
+        // record appears — the same "gate stops new attribution" semantic as
+        // an exclusion rule.
+        clock.advance(by: 120)
+        guard case .saved = registry.archive(id: projectID) else {
+            return XCTFail("archive should save")
+        }
+        let durationBefore = established.activeDuration(now: clock.now)
+        coordinator.reportGitActivity(
+            repoKey: projectID.rawValue, displayName: "Repo", automated: false)
+        coordinator.reportUserInput()
+        clock.advance(by: 60)
+        coordinator.reportUserInput()
+
+        XCTAssertEqual(engine.allSessions.count, 1,
+                       "archiving must not create a second session")
+        XCTAssertEqual(engine.allSessions.first?.project.key, projectID.rawValue,
+                       "archiving must not switch the existing session's project")
+        XCTAssertGreaterThanOrEqual(
+            engine.allSessions.first?.activeDuration(now: clock.now) ?? 0,
+            durationBefore,
+            "archiving must not truncate the existing session's elapsed time")
+        XCTAssertFalse(
+            engine.allSessions.first?.isOpen == false,
+            "archiving must not end the existing session")
+    }
+}
+
 // MARK: - Session invariants on rule change
 
 extension FocusProjectExclusionMatcherTests {

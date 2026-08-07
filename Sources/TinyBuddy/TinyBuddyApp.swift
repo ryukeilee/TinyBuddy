@@ -747,19 +747,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.pendingCommittedGitActivity = nil
             return
         }
+        // Attribution is limited to active projects (the same rule as
+        // `TinyBuddyProjectRegistry.automaticContext`): a project archived
+        // between the scan and this commit must not receive new automatic
+        // focus. The pending delta is consumed either way so a permanently
+        // archived project does not retry the same stale report forever; a
+        // later restore reconnects attribution through the next committed
+        // activity.
         guard let fingerprint = projectDiscoveryStore.loadRecentRepositoryFingerprint(),
-              let project = projectRegistry?.resolve(projectKey: fingerprint) else {
+              let project = projectRegistry?.automaticContext(for: fingerprint) else {
+            pendingFocusGitChange = false
+            self.pendingCommittedGitActivity = nil
             return
         }
         pendingFocusGitChange = false
         self.pendingCommittedGitActivity = nil
-        focusSessionBridge?.reportGitActivity(
-            project: FocusProjectContext(
-                key: project.id.rawValue,
-                displayName: project.displayName
-            ),
-            at: Date()
-        )
+        focusSessionBridge?.reportGitActivity(project: project, at: Date())
     }
 
     /// The Settings report reads the same committed payload as the Widget.
