@@ -12,7 +12,7 @@ TinyBuddy is a macOS 14 companion HUD built with SwiftUI, Swift Package Manager,
 ## Requirements
 
 - macOS 14 or later
-- Xcode with Swift 5.9 toolchain
+- Xcode 16 or later with the Swift 6 toolchain
 - Optional: `xcodegen` to regenerate `TinyBuddy.xcodeproj` from `project.yml`
 - Apple signing configured locally if you need signed Release install and widget registration flows
 

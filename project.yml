@@ -8,7 +8,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: JYL9G28DP3
     CODE_SIGN_STYLE: Automatic
-    SWIFT_VERSION: "5.9"
+    SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
 targets:
   TinyBuddyCore:
