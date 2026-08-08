@@ -46,6 +46,10 @@ public enum TinyBuddyCalibrationOutcome: Equatable, Sendable {
 public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
     public typealias MonotonicProvider = () -> TimeInterval
 
+    /// Serializes full calibration operations so concurrently captured time
+    /// contexts cannot be committed out of observation order. State reads use
+    /// the separate `lock` and remain safe from provider re-entry.
+    private let calibrationLock = NSLock()
     private let lock = NSLock()
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let userDefaults: UserDefaults
@@ -54,9 +58,20 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
     private let logger: Logger
 
     /// Callback invoked when calibration detects a meaningful change.
-    /// Set this once, before calling `calibrate()`.
-    public var onChange: (@Sendable (TinyBuddyCalibrationOutcome) -> Void)?
+    public var onChange: (@Sendable (TinyBuddyCalibrationOutcome) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return changeHandler
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            changeHandler = newValue
+        }
+    }
 
+    private var changeHandler: (@Sendable (TinyBuddyCalibrationOutcome) -> Void)?
     private var lastContinuity: TinyBuddyTimeContinuityRecord
 
     // MARK: - Init
@@ -74,7 +89,7 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
         self.userDefaults = userDefaults
         self.monotonicProvider = monotonicProvider
         self.discontinuityThreshold = max(0.1, discontinuityThreshold)
-        self.onChange = onChange
+        self.changeHandler = onChange
         self.lastContinuity = TinyBuddyTimeContinuityRecord.load(
             userDefaults: userDefaults
         )
@@ -102,39 +117,62 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
     /// Thread-safe.
     @discardableResult
     public func calibrate() -> TinyBuddyCalibrationOutcome {
-        lock.lock()
-        defer { lock.unlock() }
-
+        calibrationLock.lock()
         guard let context = timeEnvironment.capture() else {
+            calibrationLock.unlock()
             logger.error("Calibrator: got nil time context")
             let outcome = TinyBuddyCalibrationOutcome.invalid
-            onChange?(outcome)
+            notifyChange(outcome)
             return outcome
         }
 
-        return calibrateLocked(with: context)
+        let currentMonotonic = monotonicProvider()
+        lock.lock()
+        let result = calibrateLocked(
+            with: context,
+            currentMonotonic: currentMonotonic
+        )
+        let handler = result.shouldNotify ? changeHandler : nil
+        lock.unlock()
+        calibrationLock.unlock()
+
+        handler?(result.outcome)
+        return result.outcome
     }
 
     /// Captures the current time context and returns it together with the
     /// calibration outcome in one call.  Convenience for callers that need
     /// both values synchronously.
     public func calibratedContext() -> (TinyBuddyTimeContext?, TinyBuddyCalibrationOutcome) {
-        lock.lock()
-        defer { lock.unlock() }
-
+        calibrationLock.lock()
         guard let context = timeEnvironment.capture() else {
+            calibrationLock.unlock()
             return (nil, .invalid)
         }
 
-        let outcome = calibrateLocked(with: context)
-        return (context, outcome)
+        let currentMonotonic = monotonicProvider()
+        lock.lock()
+        let result = calibrateLocked(
+            with: context,
+            currentMonotonic: currentMonotonic
+        )
+        let handler = result.shouldNotify ? changeHandler : nil
+        lock.unlock()
+        calibrationLock.unlock()
+
+        handler?(result.outcome)
+        return (context, result.outcome)
     }
 
     /// Overrides the continuity record (e.g. after app reset or first launch).
     /// Does **not** trigger `onChange`.
     public func resetContinuity() {
+        calibrationLock.lock()
         lock.lock()
-        defer { lock.unlock() }
+        defer {
+            lock.unlock()
+            calibrationLock.unlock()
+        }
 
         lastContinuity = TinyBuddyTimeContinuityRecord(
             lastObservedDayIdentifier: "",
@@ -149,8 +187,18 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
     /// time scope; the generation bump lets cross-process readers detect
     /// that something changed even if the day/timezone look the same.
     public func bumpGeneration() {
+        calibrationLock.lock()
         lock.lock()
-        defer { lock.unlock() }
+        defer {
+            lock.unlock()
+            calibrationLock.unlock()
+        }
+
+        guard lastContinuity.calibrationGeneration >= 0,
+              lastContinuity.calibrationGeneration < Int64.max else {
+            logger.error("Calibrator: refusing to advance an invalid generation")
+            return
+        }
 
         lastContinuity.calibrationGeneration += 1
         lastContinuity.lastCalibrationDate = Date()
@@ -159,10 +207,24 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
 
     // MARK: - Internal
 
+    private func notifyChange(_ outcome: TinyBuddyCalibrationOutcome) {
+        lock.lock()
+        let handler = changeHandler
+        lock.unlock()
+        handler?(outcome)
+    }
+
     private func calibrateLocked(
-        with context: TinyBuddyTimeContext
-    ) -> TinyBuddyCalibrationOutcome {
+        with context: TinyBuddyTimeContext,
+        currentMonotonic: TimeInterval
+    ) -> (outcome: TinyBuddyCalibrationOutcome, shouldNotify: Bool) {
         let previousGeneration = lastContinuity.calibrationGeneration
+        guard previousGeneration >= 0,
+              previousGeneration < Int64.max,
+              lastContinuity.discontinuityCount >= 0 else {
+            logger.error("Calibrator: refusing to update invalid continuity counters")
+            return (.invalid, true)
+        }
         let previousDay = lastContinuity.lastObservedDayIdentifier
         let previousZone = lastContinuity.lastObservedTimeZoneIdentifier
         let currentDay = context.dayIdentifier
@@ -173,7 +235,6 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
         // This keeps the calibrator consistent with the time environment and
         // avoids mixing fixed test times with real `Date()` values.
         let now = context.now
-        let currentMonotonic = monotonicProvider()
 
         // ---- Clock discontinuity detection via monotonic clock ----
         //
@@ -226,6 +287,10 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
         let outcome: TinyBuddyCalibrationOutcome
 
         if clockJumped {
+            guard updated.discontinuityCount < Int64.max else {
+                logger.error("Calibrator: refusing to overflow the discontinuity count")
+                return (.invalid, true)
+            }
             updated.discontinuityCount += 1
             outcome = .discontinuityDetected(
                 previousDay: previousDay,
@@ -254,13 +319,12 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
         lastContinuity = updated
         updated.save(userDefaults: userDefaults)
 
-        // ---- Emit callback for meaningful changes ----
+        // ---- Determine whether to emit after releasing the state lock ----
+        let shouldNotify: Bool
         switch outcome {
         case .stable:
             // Only emit on the first ever calibration (initial continuity).
-            if previousDay.isEmpty {
-                onChange?(outcome)
-            }
+            shouldNotify = previousDay.isEmpty
         case .dayChanged, .discontinuityDetected, .timeZoneChanged:
             let dayChangedStr = previousDay != currentDay
                 ? "day=\(previousDay)->\(currentDay)" : ""
@@ -271,11 +335,11 @@ public final class TinyBuddyTimeCalibrator: @unchecked Sendable {
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
             logger.notice("Calibration triggered: \(detail, privacy: .public)")
-            onChange?(outcome)
+            shouldNotify = true
         case .invalid:
-            break
+            shouldNotify = false
         }
 
-        return outcome
+        return (outcome, shouldNotify)
     }
 }

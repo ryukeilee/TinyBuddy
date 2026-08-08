@@ -7,6 +7,39 @@ private final class TestObserver: @unchecked Sendable {
     var lastOutcome: TinyBuddyCalibrationOutcome?
 }
 
+private final class TimeCalibratorReference: @unchecked Sendable {
+    var value: TinyBuddyTimeCalibrator?
+}
+
+private final class SequencedTimeContextProvider: @unchecked Sendable {
+    let firstCaptureStarted = DispatchSemaphore(value: 0)
+    let allowFirstCapture = DispatchSemaphore(value: 0)
+
+    private let lock = NSLock()
+    private let firstContext: TinyBuddyTimeContext
+    private let secondContext: TinyBuddyTimeContext
+    private var captureCount = 0
+
+    init(first: TinyBuddyTimeContext, second: TinyBuddyTimeContext) {
+        firstContext = first
+        secondContext = second
+    }
+
+    func capture() -> TinyBuddyTimeContext {
+        lock.lock()
+        captureCount += 1
+        let index = captureCount
+        lock.unlock()
+
+        if index == 1 {
+            firstCaptureStarted.signal()
+            allowFirstCapture.wait()
+            return firstContext
+        }
+        return secondContext
+    }
+}
+
 final class TinyBuddyTimeCalibratorTests: XCTestCase {
     private var utc: TimeZone { TimeZone(secondsFromGMT: 0)! }
 
@@ -230,6 +263,118 @@ final class TinyBuddyTimeCalibratorTests: XCTestCase {
         }
     }
 
+    // MARK: - Re-entrant Dependencies
+
+    func testProvidersAndCallbackCanSynchronouslyReadContinuityRecord() {
+        let defaults = makeDefaults()
+        let now = makeDate(year: 2026, month: 7, day: 22, hour: 12)
+        let context = TinyBuddyTimeContext(
+            now: now,
+            timeZone: utc,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: Calendar(identifier: .gregorian)
+        )!
+        let reference = TimeCalibratorReference()
+        let captureCompleted = expectation(description: "capture completed")
+        let monotonicCompleted = expectation(description: "monotonic provider completed")
+        let callbackCompleted = expectation(description: "callback completed")
+        let calibrationCompleted = expectation(description: "calibration completed")
+
+        let environment = TinyBuddyTimeEnvironment(capture: {
+            _ = reference.value?.continuityRecord
+            captureCompleted.fulfill()
+            return context
+        })
+        let calibrator = TinyBuddyTimeCalibrator(
+            timeEnvironment: environment,
+            userDefaults: defaults,
+            monotonicProvider: {
+                _ = reference.value?.continuityRecord
+                monotonicCompleted.fulfill()
+                return 1_000
+            },
+            onChange: { _ in
+                _ = reference.value?.continuityRecord
+                callbackCompleted.fulfill()
+            }
+        )
+        reference.value = calibrator
+
+        DispatchQueue.global().async {
+            _ = calibrator.calibrate()
+            calibrationCompleted.fulfill()
+        }
+
+        wait(
+            for: [
+                captureCompleted,
+                monotonicCompleted,
+                callbackCompleted,
+                calibrationCompleted
+            ],
+            timeout: 2
+        )
+        XCTAssertEqual(calibrator.continuityRecord.calibrationGeneration, 1)
+    }
+
+    func testConcurrentCalibrationsCommitContextsInCaptureOrder() {
+        let defaults = makeDefaults()
+        let firstDate = makeDate(year: 2026, month: 7, day: 22, hour: 23)
+        let secondDate = makeDate(year: 2026, month: 7, day: 23, hour: 1)
+        let firstContext = TinyBuddyTimeContext(
+            now: firstDate,
+            timeZone: utc,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: Calendar(identifier: .gregorian)
+        )!
+        let secondContext = TinyBuddyTimeContext(
+            now: secondDate,
+            timeZone: utc,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: Calendar(identifier: .gregorian)
+        )!
+        let provider = SequencedTimeContextProvider(
+            first: firstContext,
+            second: secondContext
+        )
+        let calibrator = TinyBuddyTimeCalibrator(
+            timeEnvironment: TinyBuddyTimeEnvironment(capture: provider.capture),
+            userDefaults: defaults,
+            monotonicProvider: { 1_000 }
+        )
+        let firstCompleted = DispatchSemaphore(value: 0)
+        let secondCompleted = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            _ = calibrator.calibrate()
+            firstCompleted.signal()
+        }
+        XCTAssertEqual(
+            provider.firstCaptureStarted.wait(timeout: .now() + 1),
+            .success
+        )
+
+        DispatchQueue.global().async {
+            _ = calibrator.calibrate()
+            secondCompleted.signal()
+        }
+        let secondCompletedBeforeFirst = secondCompleted.wait(
+            timeout: .now() + 0.25
+        ) == .success
+
+        provider.allowFirstCapture.signal()
+        XCTAssertEqual(firstCompleted.wait(timeout: .now() + 2), .success)
+        if !secondCompletedBeforeFirst {
+            XCTAssertEqual(secondCompleted.wait(timeout: .now() + 2), .success)
+        }
+
+        XCTAssertEqual(
+            calibrator.continuityRecord.lastObservedDayIdentifier,
+            "2026-07-23"
+        )
+        XCTAssertEqual(calibrator.continuityRecord.calibrationGeneration, 2)
+    }
+
     // MARK: - Invalid
 
     func testInvalidTimeContext() {
@@ -254,6 +399,63 @@ final class TinyBuddyTimeCalibratorTests: XCTestCase {
         } else {
             XCTFail("onChange expected .invalid")
         }
+    }
+
+    func testMaximumGenerationFailsWithoutOverflowing() {
+        let defaults = makeDefaults()
+        let now = makeDate(year: 2026, month: 7, day: 22, hour: 12)
+        let seed = TinyBuddyTimeContinuityRecord(
+            lastObservedDayIdentifier: "2026-07-22",
+            lastObservedTimeZoneIdentifier: "GMT",
+            calibrationGeneration: Int64.max,
+            lastCalibrationDate: now.addingTimeInterval(-60)
+        )
+        seed.save(userDefaults: defaults)
+        let observer = TestObserver()
+        let calibrator = TinyBuddyTimeCalibrator(
+            timeEnvironment: makeTimeEnvironment(now: now, timeZone: utc),
+            userDefaults: defaults,
+            onChange: { outcome in
+                observer.onChangeCallCount += 1
+                observer.lastOutcome = outcome
+            }
+        )
+
+        XCTAssertEqual(calibrator.calibrate(), .invalid)
+        XCTAssertEqual(observer.onChangeCallCount, 1)
+        XCTAssertEqual(observer.lastOutcome, .invalid)
+        XCTAssertEqual(calibrator.continuityRecord, seed)
+        XCTAssertEqual(
+            TinyBuddyTimeContinuityRecord.load(userDefaults: defaults),
+            seed
+        )
+    }
+
+    func testMaximumDiscontinuityCountFailsWithoutOverflowing() {
+        let defaults = makeDefaults()
+        let now = makeDate(year: 2026, month: 7, day: 22, hour: 12)
+        let seed = TinyBuddyTimeContinuityRecord(
+            lastObservedDayIdentifier: "2026-07-22",
+            lastObservedTimeZoneIdentifier: "GMT",
+            calibrationGeneration: 7,
+            lastCalibrationDate: now.addingTimeInterval(-600),
+            discontinuityCount: Int64.max,
+            lastMonotonicTime: 10_000
+        )
+        seed.save(userDefaults: defaults)
+        let calibrator = TinyBuddyTimeCalibrator(
+            timeEnvironment: makeTimeEnvironment(now: now, timeZone: utc),
+            userDefaults: defaults,
+            monotonicProvider: { 10_100 },
+            discontinuityThreshold: 5
+        )
+
+        XCTAssertEqual(calibrator.calibrate(), .invalid)
+        XCTAssertEqual(calibrator.continuityRecord, seed)
+        XCTAssertEqual(
+            TinyBuddyTimeContinuityRecord.load(userDefaults: defaults),
+            seed
+        )
     }
 
     // MARK: - First Calibration
@@ -310,6 +512,31 @@ final class TinyBuddyTimeCalibratorTests: XCTestCase {
     }
 
     // MARK: - Bump Generation
+
+    func testBumpGenerationRefusesMaximumGeneration() {
+        let defaults = makeDefaults()
+        let seed = TinyBuddyTimeContinuityRecord(
+            lastObservedDayIdentifier: "2026-07-22",
+            lastObservedTimeZoneIdentifier: "GMT",
+            calibrationGeneration: Int64.max
+        )
+        seed.save(userDefaults: defaults)
+        let calibrator = TinyBuddyTimeCalibrator(
+            timeEnvironment: makeTimeEnvironment(
+                now: makeDate(year: 2026, month: 7, day: 22, hour: 12),
+                timeZone: utc
+            ),
+            userDefaults: defaults
+        )
+
+        calibrator.bumpGeneration()
+
+        XCTAssertEqual(calibrator.continuityRecord, seed)
+        XCTAssertEqual(
+            TinyBuddyTimeContinuityRecord.load(userDefaults: defaults),
+            seed
+        )
+    }
 
     func testBumpGenerationAdvancesGeneration() {
         let defaults = makeDefaults()
