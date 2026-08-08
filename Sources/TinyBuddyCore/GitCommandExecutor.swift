@@ -133,10 +133,14 @@ public final class GitCommandExecutor: @unchecked Sendable {
             }
         }
 
-        // Validate read-only restriction.
+        // Validate the complete invocation, not just the subcommand name.
+        // Several nominally read-oriented Git commands also have mutating
+        // forms (`config key value`, `symbolic-ref <name> <ref>`,
+        // `reflog expire`, ...). A name-only allowlist let those forms bypass
+        // the read-only contract.
         let subcommand = arguments.first ?? ""
         if configuration.readOnly && !subcommand.isEmpty {
-            guard readOnlyCommands.contains(subcommand) else {
+            guard isReadOnlyInvocation(arguments) else {
                 throw GitCommandError.commandNotAllowed(command: subcommand)
             }
         }
@@ -151,7 +155,7 @@ public final class GitCommandExecutor: @unchecked Sendable {
 
         let process = Process()
         let processID = UUID()
-        let timeout = timeoutSeconds ?? configuration.defaultTimeoutSeconds
+        let timeout = max(0, timeoutSeconds ?? configuration.defaultTimeoutSeconds)
 
         process.executableURL = gitExecutableURL
         process.arguments = arguments
@@ -174,36 +178,47 @@ public final class GitCommandExecutor: @unchecked Sendable {
         }
         process.environment = env
 
-        // Output pipes with size limits.
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        // Redirect both streams to private temporary files. Reading a Pipe to
+        // EOF before waiting made the timeout start only after the child had
+        // already exited, and reading stdout/stderr sequentially could deadlock
+        // when the child filled the other pipe. Files let both streams drain
+        // independently while the parent enforces the real wall-clock bound.
+        let captureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBuddyGitCommand-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: captureDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: captureDirectory) }
+        let outputURL = captureDirectory.appendingPathComponent("stdout")
+        let errorURL = captureDirectory.appendingPathComponent("stderr")
+        try Data().write(to: outputURL, options: .atomic)
+        try Data().write(to: errorURL, options: .atomic)
+        let outputHandle = try FileHandle(forWritingTo: outputURL)
+        let errorHandle = try FileHandle(forWritingTo: errorURL)
+        defer {
+            try? outputHandle.close()
+            try? errorHandle.close()
+        }
+        process.standardOutput = outputHandle
+        process.standardError = errorHandle
 
-        // Register for cancellation.
+        let processExited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in processExited.signal() }
+
+        // Register before launch so cancellation cannot miss a process between
+        // `run()` and registration. If cancellation lands in that narrow
+        // pre-launch window, terminate immediately after the spawn succeeds.
         registerProcess(processID, process)
         defer { unregisterProcess(processID) }
 
         let startTime = ProcessInfo.processInfo.systemUptime
-
         try process.run()
+        if isCancelled(processID), process.isRunning {
+            process.terminate()
+        }
 
-        // Read output in a bounded way.
-        let maxBytes = configuration.maxOutputBytes
-        let outputResult = Self.readPipeBounded(
-            outputPipe.fileHandleForReading,
-            maxBytes: maxBytes
-        )
-        let errorResult = Self.readPipeBounded(
-            errorPipe.fileHandleForReading,
-            maxBytes: maxBytes
-        )
-
-        // Wait with timeout.
-        let processExited = DispatchSemaphore(value: 0)
         var didTimeout = false
-        process.terminationHandler = { _ in processExited.signal() }
-
         let waitResult = processExited.wait(timeout: .now().advanced(by: .seconds(timeout)))
         if waitResult == .timedOut {
             didTimeout = true
@@ -220,10 +235,18 @@ public final class GitCommandExecutor: @unchecked Sendable {
         let duration = ProcessInfo.processInfo.systemUptime - startTime
         let terminationStatus = process.terminationStatus
         let wasSignalled = process.terminationReason == .uncaughtSignal
+        let wasCancelled = isCancelled(processID)
 
-        // Close remaining handles.
-        try? outputPipe.fileHandleForReading.close()
-        try? errorPipe.fileHandleForReading.close()
+        try outputHandle.close()
+        try errorHandle.close()
+
+        // Enforce one combined capture budget. Read stdout first for command
+        // results and use the remainder for stderr; truncation still records
+        // that either file contained more data than was retained.
+        let maxBytes = max(0, configuration.maxOutputBytes)
+        let outputResult = try Self.readFileBounded(outputURL, maxBytes: maxBytes)
+        let remainingBytes = max(0, maxBytes - Int64(outputResult.data.count))
+        let errorResult = try Self.readFileBounded(errorURL, maxBytes: remainingBytes)
 
         let outputString = String(data: outputResult.data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -235,20 +258,21 @@ public final class GitCommandExecutor: @unchecked Sendable {
             standardError: errorString,
             terminationStatus: terminationStatus,
             didTimeout: didTimeout,
-            wasCancelled: false,
+            wasCancelled: wasCancelled,
             outputTruncated: outputResult.truncated || errorResult.truncated,
             duration: duration
         )
 
-        // Throw on fatal outcomes; successful exit returns result normally.
+        // Cancellation is the caller's intent even when Process reports the
+        // resulting SIGTERM as an uncaught signal.
+        if wasCancelled {
+            throw GitCommandError.cancelled
+        }
         if didTimeout {
             throw GitCommandError.timeout(seconds: timeout)
         }
         if wasSignalled {
             throw GitCommandError.terminatedBySignal(signal: terminationStatus)
-        }
-        if isCancelled(processID) {
-            throw GitCommandError.cancelled
         }
 
         return result
@@ -259,9 +283,7 @@ public final class GitCommandExecutor: @unchecked Sendable {
         let snapshot = activeProcessesSnapshot()
         for (id, process) in snapshot {
             markCancelled(id)
-            if process.isRunning {
-                process.terminate()
-            }
+            requestTermination(of: process)
         }
     }
 
@@ -269,8 +291,20 @@ public final class GitCommandExecutor: @unchecked Sendable {
     public func cancel(id: UUID) {
         guard let process = processForID(id) else { return }
         markCancelled(id)
-        if process.isRunning {
-            process.terminate()
+        requestTermination(of: process)
+    }
+
+    private func requestTermination(of process: Process) {
+        guard process.isRunning else { return }
+        let processIdentifier = process.processIdentifier
+        process.terminate()
+        // A Git helper may ignore SIGTERM. Keep cancellation bounded just like
+        // timeout handling instead of making the caller wait for the original
+        // (possibly long) command timeout.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            guard process.isRunning,
+                  process.processIdentifier == processIdentifier else { return }
+            Darwin.kill(processIdentifier, SIGKILL)
         }
     }
 
@@ -361,12 +395,64 @@ public final class GitCommandExecutor: @unchecked Sendable {
         "grep", "name-rev", "show-branch", "count-objects",
         "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
         "var", "verify-commit", "verify-pack", "verify-tag",
-        "whatchanged", "range-diff", "credential", "for-each-repo",
-        "interpret-trailers", "multi-pack-index", "reflog",
-        "diff-tree", "diff-index", "diff-files",
-        "stripspace", "unpack-file", "upload-pack",
-        "ref-log", "tag-name", "mailinfo",
+        "whatchanged", "range-diff", "interpret-trailers", "multi-pack-index",
+        "reflog", "diff-tree", "diff-index", "diff-files", "stripspace",
+        "upload-pack", "ref-log", "tag-name",
     ]
+
+    private func isReadOnlyInvocation(_ arguments: [String]) -> Bool {
+        guard let command = arguments.first,
+              readOnlyCommands.contains(command) else {
+            return false
+        }
+        let commandArguments = Array(arguments.dropFirst())
+        switch command {
+        case "config":
+            return Self.isReadOnlyConfigInvocation(commandArguments)
+        case "symbolic-ref":
+            let forbidden = ["--delete", "-d", "-m", "--reason"]
+            guard !commandArguments.contains(where: { argument in
+                forbidden.contains { argument == $0 || argument.hasPrefix($0 + "=") }
+            }) else { return false }
+            return commandArguments.filter { !$0.hasPrefix("-") }.count <= 1
+        case "reflog":
+            let action = commandArguments.first { !$0.hasPrefix("-") }
+            return action == nil || action == "show" || action == "exists"
+        case "multi-pack-index":
+            return commandArguments.contains("verify")
+                && !commandArguments.contains(where: { ["write", "expire", "repack"].contains($0) })
+        case "interpret-trailers":
+            return !commandArguments.contains(where: {
+                $0 == "--in-place" || $0.hasPrefix("--in-place=")
+            })
+        default:
+            return true
+        }
+    }
+
+    private static func isReadOnlyConfigInvocation(_ arguments: [String]) -> Bool {
+        let writeOptions = [
+            "--add", "--replace-all", "--unset", "--unset-all",
+            "--rename-section", "--remove-section", "--edit", "-e"
+        ]
+        guard !arguments.contains(where: { argument in
+            writeOptions.contains { argument == $0 || argument.hasPrefix($0 + "=") }
+        }) else { return false }
+
+        let readActions = [
+            "--get", "--get-all", "--get-regexp", "--get-urlmatch",
+            "--get-color", "--get-colorbool", "--list", "-l"
+        ]
+        if arguments.contains(where: { argument in
+            readActions.contains { argument == $0 || argument.hasPrefix($0 + "=") }
+        }) {
+            return true
+        }
+
+        // `git config` and `git config <name>` are reads. Two or more bare
+        // values form the write syntax `git config <name> <value>`.
+        return arguments.filter { !$0.hasPrefix("-") }.count <= 1
+    }
 
     // MARK: Process Registration & Cancellation
 
@@ -418,17 +504,29 @@ public final class GitCommandExecutor: @unchecked Sendable {
         let truncated: Bool
     }
 
-    private static func readPipeBounded(
-        _ handle: FileHandle,
+    private static func readFileBounded(
+        _ url: URL,
         maxBytes: Int64
-    ) -> BoundedReadResult {
-        let data = handle.readDataToEndOfFile()
-        guard data.count > maxBytes else {
-            return BoundedReadResult(data: data, truncated: false)
+    ) throws -> BoundedReadResult {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let fileSize = max(0, (attributes[.size] as? NSNumber)?.int64Value ?? 0)
+        let boundedLimit = max(0, maxBytes)
+        let requestedBytes = min(fileSize, boundedLimit)
+        let requestedCount = requestedBytes >= Int64(Int.max)
+            ? Int.max
+            : Int(requestedBytes)
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data: Data
+        if requestedCount == 0 {
+            data = Data()
+        } else {
+            data = try handle.read(upToCount: requestedCount) ?? Data()
         }
         return BoundedReadResult(
-            data: data.prefix(Int(maxBytes)),
-            truncated: true
+            data: data,
+            truncated: fileSize > Int64(data.count)
         )
     }
 }

@@ -3,6 +3,23 @@ import XCTest
 import Foundation
 
 final class GitCommandExecutorTests: XCTestCase {
+    private final class ErrorSpy: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedError: GitCommandError?
+
+        var error: GitCommandError? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedError
+        }
+
+        func record(_ error: GitCommandError) {
+            lock.lock()
+            storedError = error
+            lock.unlock()
+        }
+    }
+
     // MARK: - Basic Execution
 
     func testExecutesVersionSuccessfully() throws {
@@ -100,6 +117,28 @@ final class GitCommandExecutorTests: XCTestCase {
         }
     }
 
+    func testReadOnlyBlocksMutatingFormsOfDualPurposeCommands() {
+        let executor = makeExecutor()
+        let invocations = [
+            ["config", "user.name", "Mutated Name"],
+            ["config", "--unset", "user.name"],
+            ["symbolic-ref", "HEAD", "refs/heads/other"],
+            ["reflog", "expire", "--all"],
+            ["multi-pack-index", "write"],
+            ["interpret-trailers", "--in-place", "message.txt"],
+            ["mailinfo", "message.txt", "patch.txt"],
+        ]
+
+        for invocation in invocations {
+            XCTAssertThrowsError(try executor.execute(arguments: invocation)) { error in
+                guard case GitCommandError.commandNotAllowed(let command) = error else {
+                    return XCTFail("Expected commandNotAllowed for \(invocation), got \(error)")
+                }
+                XCTAssertEqual(command, invocation[0])
+            }
+        }
+    }
+
     func testReadOnlyAllowsReadCommands() throws {
         try runGitTest { executor in
             // Read-only commands should work.
@@ -172,6 +211,61 @@ final class GitCommandExecutorTests: XCTestCase {
         }
     }
 
+    func testSimultaneousLargeStandardOutputAndErrorAreBoundedWithoutDeadlock() throws {
+        try withTemporaryExecutableScript(
+            """
+            #!/bin/bash
+            i=0
+            while [ "$i" -lt 5000 ]; do
+              printf 'stdout-%08d-abcdefghijklmnopqrstuvwxyz\\n' "$i"
+              printf 'stderr-%08d-abcdefghijklmnopqrstuvwxyz\\n' "$i" >&2
+              i=$((i + 1))
+            done
+            """
+        ) { executableURL in
+            let maxBytes: Int64 = 1024
+            let executor = GitCommandExecutor(
+                gitExecutableURL: executableURL,
+                configuration: GitCommandExecutor.Configuration(maxOutputBytes: maxBytes)
+            )
+
+            let result = try executor.execute(arguments: ["version"], timeoutSeconds: 5)
+
+            XCTAssertEqual(result.terminationStatus, 0)
+            XCTAssertTrue(result.outputTruncated)
+            XCTAssertLessThanOrEqual(
+                result.standardOutput.utf8.count + result.standardError.utf8.count,
+                Int(maxBytes)
+            )
+        }
+    }
+
+    // MARK: - Timeout
+
+    func testTimeoutBoundsACommandThatProducesNoOutput() throws {
+        try withTemporaryExecutableScript(
+            """
+            #!/bin/bash
+            exec /bin/sleep 10
+            """
+        ) { executableURL in
+            let executor = GitCommandExecutor(gitExecutableURL: executableURL)
+            let startedAt = ProcessInfo.processInfo.systemUptime
+
+            XCTAssertThrowsError(
+                try executor.execute(arguments: ["version"], timeoutSeconds: 1)
+            ) { error in
+                XCTAssertEqual(error as? GitCommandError, .timeout(seconds: 1))
+            }
+
+            XCTAssertLessThan(
+                ProcessInfo.processInfo.systemUptime - startedAt,
+                4,
+                "the timeout must run concurrently with the child, not after reading output to EOF"
+            )
+        }
+    }
+
     // MARK: - Non-Zero Exit
 
     func testNonZeroExitReturnsResultDoesNotThrow() throws {
@@ -207,17 +301,24 @@ final class GitCommandExecutorTests: XCTestCase {
     // MARK: - Process Cancellation
 
     func testCancelAllProcessesStopsRunningCommand() throws {
-        try runGitTest { executor in
+        try withTemporaryExecutableScript(
+            """
+            #!/bin/bash
+            trap '' TERM
+            exec /bin/sleep 10
+            """
+        ) { executableURL in
+            let executor = GitCommandExecutor(gitExecutableURL: executableURL)
             let finished = XCTestExpectation(description: "finished")
+            let errorSpy = ErrorSpy()
 
             DispatchQueue.global().async {
                 do {
-                    let _ = try executor.execute(
-                        arguments: ["log", "--all"],
-                        timeoutSeconds: 30
-                    )
+                    _ = try executor.execute(arguments: ["version"], timeoutSeconds: 30)
+                } catch let error as GitCommandError {
+                    errorSpy.record(error)
                 } catch {
-                    // Expected to be cancelled — not a test failure.
+                    XCTFail("Unexpected cancellation error: \(error)")
                 }
                 finished.fulfill()
             }
@@ -226,9 +327,10 @@ final class GitCommandExecutorTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.2)
             executor.cancelAll()
 
-            // Verify the operation completes quickly (within 5s) after cancellation.
+            // Cancellation should win over Process's SIGTERM classification.
             let result = XCTWaiter().wait(for: [finished], timeout: 5)
             XCTAssertEqual(result, .completed, "Cancelled command should finish within deadline")
+            XCTAssertEqual(errorSpy.error, .cancelled)
         }
     }
 
@@ -436,6 +538,24 @@ final class GitCommandExecutorTests: XCTestCase {
             }
         }
         return nil
+    }
+
+    private func withTemporaryExecutableScript(
+        _ source: String,
+        _ block: (URL) throws -> Void
+    ) throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TinyBuddyGitExecutorScript-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let executableURL = directory.appendingPathComponent("git")
+        try source.write(to: executableURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
+        try block(executableURL)
     }
 
     /// Runs a test block with a Git executor. Skips the test if Git is not available.
