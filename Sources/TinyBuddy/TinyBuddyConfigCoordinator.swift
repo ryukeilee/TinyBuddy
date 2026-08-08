@@ -41,14 +41,14 @@ final class TinyBuddyConfigCoordinator {
         scanRootsProvider: @escaping ScanRootsProvider,
         rebuildRepositoryChangeMonitor: @escaping RepositoryChangeMonitorRebuilder = {},
         rescheduleTimer: @escaping TimerRescheduler = {},
-        loginItemManager: TinyBuddyLoginItemManager = .shared,
+        loginItemManager: TinyBuddyLoginItemManager? = nil,
         notificationCenter: NotificationCenter = .default
     ) {
         self.configStore = configStore
         self.scanRootsProvider = scanRootsProvider
         self.rebuildRepositoryChangeMonitor = rebuildRepositoryChangeMonitor
         self.rescheduleTimer = rescheduleTimer
-        self.loginItemManager = loginItemManager
+        self.loginItemManager = loginItemManager ?? .shared
         self.notificationCenter = notificationCenter
     }
 

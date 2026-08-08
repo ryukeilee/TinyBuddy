@@ -22,6 +22,25 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertTrue(project.contains("LSMultipleInstancesProhibited: true"))
     }
 
+    func testXcodeAndSwiftPackageUseSwift6LanguageMode() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let project = try String(
+            contentsOf: repositoryURL.appendingPathComponent("project.yml"),
+            encoding: .utf8
+        )
+        let package = try String(
+            contentsOf: repositoryURL.appendingPathComponent("Package.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(project.contains("SWIFT_VERSION: \"6.0\""))
+        XCTAssertTrue(package.contains("// swift-tools-version: 6.0"))
+        XCTAssertTrue(package.contains(".swiftLanguageMode(.v6)"))
+    }
+
     func testOptionalGitPreRefreshWarnsAndReturnsSuccessWhenRefreshFails() throws {
         let script = try buildAndRunScript()
         let function = try XCTUnwrap(

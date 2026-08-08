@@ -58,14 +58,15 @@ final class GitScanRootSettingsViewModel: ObservableObject {
     init(
         store: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
         configStore: TinyBuddyConfigStore = TinyBuddyConfigStore(),
-        loginItemManager: TinyBuddyLoginItemManager = .shared,
+        loginItemManager: TinyBuddyLoginItemManager? = nil,
         notificationCenter: NotificationCenter = .default
     ) {
+        let resolvedLoginItemManager = loginItemManager ?? .shared
         self.store = store
         self.configStore = configStore
-        self.loginItemManager = loginItemManager
+        self.loginItemManager = resolvedLoginItemManager
         self.notificationCenter = notificationCenter
-        self.launchAtLoginEnabled = loginItemManager.isEnabled
+        self.launchAtLoginEnabled = resolvedLoginItemManager.isEnabled
         reloadAuthorizations()
         reloadExclusionRules()
         authorizationsDidChangeObserver = notificationCenter.addObserver(

@@ -15,9 +15,10 @@ import WidgetKit
 /// covered by that same pending dispatch. The actual WidgetKit reload runs
 /// once per window, so a burst of N requests produces exactly one reload.
 ///
-/// Must only be invoked from the main actor (every production call site is).
-/// The injected scheduler is what runs the merged dispatch, which keeps the
-/// merge behaviour deterministically testable.
+/// Calls may originate from lifecycle or refresh callbacks on different
+/// executors. Scheduling state is protected by a lock; the injected scheduler
+/// decides where the eventual WidgetKit reload runs (the production scheduler
+/// uses the main queue).
 public final class TinyBuddyWidgetReloadCoordinator: @unchecked Sendable {
     public static let shared = TinyBuddyWidgetReloadCoordinator()
 
@@ -25,8 +26,8 @@ public final class TinyBuddyWidgetReloadCoordinator: @unchecked Sendable {
     private let reload: () -> Void
     private let scheduler: (@escaping @Sendable () -> Void, TimeInterval) -> Void
 
+    private let lock = NSLock()
     private var isDispatchScheduled = false
-    private var pendingRequestCount = 0
 
     /// - Parameters:
     ///   - coalescingInterval: Requests that arrive within this window of a
@@ -50,17 +51,27 @@ public final class TinyBuddyWidgetReloadCoordinator: @unchecked Sendable {
     /// Requests a Widget timeline reload. Multiple calls within the coalescing
     /// window merge into one actual `reloadAllTimelines()`.
     public func requestReload() {
-        pendingRequestCount += 1
-        guard !isDispatchScheduled else { return }
+        lock.lock()
+        guard !isDispatchScheduled else {
+            lock.unlock()
+            return
+        }
         isDispatchScheduled = true
+        lock.unlock()
+
         scheduler({ [weak self] in
             self?.dispatchPendingReload()
         }, coalescingInterval)
     }
 
     private func dispatchPendingReload() {
+        lock.lock()
+        guard isDispatchScheduled else {
+            lock.unlock()
+            return
+        }
         isDispatchScheduled = false
-        pendingRequestCount = 0
+        lock.unlock()
         reload()
     }
 }

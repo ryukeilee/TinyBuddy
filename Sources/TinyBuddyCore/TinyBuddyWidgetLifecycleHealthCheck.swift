@@ -45,9 +45,9 @@ public final class TinyBuddyWidgetLifecycleHealthCheck: @unchecked Sendable {
         self.timeEnvironment = timeEnvironment
     }
 
-    /// Runs all health checks and returns results.  Catches and reports
-    /// unexpected errors from individual checks without aborting the
-    /// remaining ones.
+    /// Runs all nonthrowing health checks and returns their explicit results.
+    /// Each check translates unavailable or malformed state into a failed
+    /// `CheckResult`, so one failure never aborts the remaining checks.
     public func runAll() -> [CheckResult] {
         var results: [CheckResult] = []
         let checks: [() -> CheckResult] = [
@@ -58,16 +58,7 @@ public final class TinyBuddyWidgetLifecycleHealthCheck: @unchecked Sendable {
             checkTimeContinuity,
         ]
         for check in checks {
-            let result: CheckResult
-            do {
-                result = check()
-            } catch {
-                result = CheckResult(
-                    check: "unexpectedError",
-                    passed: false,
-                    detail: "\(type(of: error)): \(error.localizedDescription)"
-                )
-            }
+            let result = check()
             if !result.passed {
                 Self.logger.warning(
                     "health check failed: check=\(result.check, privacy: .public) detail=\(result.detail, privacy: .public)"

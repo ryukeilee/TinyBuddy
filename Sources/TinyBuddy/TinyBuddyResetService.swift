@@ -4,7 +4,7 @@ import TinyBuddyCore
 /// User-visible reset scopes. Every scope is limited to data owned by
 /// TinyBuddy; no selected Git directory, repository, or Git metadata is ever
 /// enumerated or modified.
-enum TinyBuddyResetLevel: String, CaseIterable {
+enum TinyBuddyResetLevel: String, CaseIterable, Sendable {
     case runtimeState
     case settings
     case allAppData

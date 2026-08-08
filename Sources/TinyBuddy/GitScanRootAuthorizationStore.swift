@@ -615,7 +615,6 @@ final class GitScanRootAuthorizationController {
         requestAuthorizationResult().didChangeAuthorization
     }
 
-    @discardableResult
     func requestAuthorizationIfNeeded() {
         guard !store.hasAuthorizedRoots else {
             return

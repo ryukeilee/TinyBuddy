@@ -160,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let resetService: TinyBuddyResetService
     private let resetRecoveryError: TinyBuddyResetError?
     private var authorizationCommandObservers: [NSObjectProtocol] = []
+    private var terminationSignalSource: DispatchSourceSignal?
     private var isPerformingReset = false
     private lazy var resetExecutionCoordinator = TinyBuddyResetExecutionCoordinator(
         quiesceRuntime: { [weak self] in
@@ -463,11 +464,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// per-day archive. SIGKILL cannot be intercepted; its recovery is
     /// handled by the launch-time session journal reconciliation.
     private func installTerminationSignalHandlers() {
-        signal(SIGTERM) { _ in
-            DispatchQueue.main.async {
+        guard terminationSignalSource == nil else { return }
+
+        // A raw POSIX signal callback may only call async-signal-safe APIs;
+        // dispatching a closure or touching AppKit from that callback can
+        // deadlock in allocator/runtime state interrupted by SIGTERM. Ignore
+        // the default disposition and let a retained DispatchSource deliver
+        // the event safely on the main queue instead.
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
                 NSApp.terminate(nil)
             }
         }
+        terminationSignalSource = source
+        source.resume()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1031,17 +1043,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func registerSettingsChangeObserver() {
         authorizationCommandObservers.append(
-            notificationCenter.addObserver(
-                forName: .tinyBuddySettingsDidChange,
-                object: nil,
-                queue: .main
-            ) { [weak self] notification in
-                Task { @MainActor [weak self] in
-                    if notification.userInfo?[GitScanRootAuthorizationCommand.exclusionsDidChangeKey] as? Bool == true {
-                        self?.configCoordinator.reloadPersistedConfig()
-                    } else {
-                        self?.configCoordinator.proposeScanRootsChange()
-                    }
+            observeAuthorizationCommand(
+                named: .tinyBuddySettingsDidChange,
+                payload: { notification in
+                    notification.userInfo?[GitScanRootAuthorizationCommand.exclusionsDidChangeKey]
+                        as? Bool == true
+                }
+            ) { [weak self] exclusionsDidChange in
+                if exclusionsDidChange {
+                    self?.configCoordinator.reloadPersistedConfig()
+                } else {
+                    self?.configCoordinator.proposeScanRootsChange()
                 }
             }
         )
@@ -1052,21 +1064,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // coordinator's single coalesced path. The manager call inside propose
         // is idempotent, so this cannot double-register.
         authorizationCommandObservers.append(
-            observeAuthorizationCommand(named: .tinyBuddyLaunchAtLoginChangeRequested) { [weak self] notification in
-                self?.handleLaunchAtLoginChangeRequested(notification)
+            observeAuthorizationCommand(
+                named: .tinyBuddyLaunchAtLoginChangeRequested,
+                payload: { notification in
+                    notification.userInfo?[TinyBuddyLoginItemCommand.enabledKey] as? Bool ?? false
+                }
+            ) { [weak self] enabled in
+                self?.handleLaunchAtLoginChangeRequested(enabled: enabled)
             }
         )
         // Any observed actual-state change (launch refresh, activation refresh,
         // settings view onAppear) folds back into the persisted intent.
         authorizationCommandObservers.append(
-            observeAuthorizationCommand(named: .tinyBuddyLoginItemStatusDidChange) { [weak self] _ in
+            observeAuthorizationCommand(named: .tinyBuddyLoginItemStatusDidChange) { [weak self] in
                 self?.configCoordinator.reconcileLaunchAtLoginIntent()
             }
         )
     }
 
-    private func handleLaunchAtLoginChangeRequested(_ notification: Notification) {
-        let enabled = notification.userInfo?[TinyBuddyLoginItemCommand.enabledKey] as? Bool ?? false
+    private func handleLaunchAtLoginChangeRequested(enabled: Bool) {
         do {
             try configCoordinator.proposeLaunchAtLoginChange(enabled)
         } catch {
@@ -1113,6 +1129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         historyArchivalCoordinator.handleTermination()
         manualFocusMenuBarController.stop()
         HUDWindowPositionController.shared.stop()
+        terminationSignalSource?.cancel()
+        terminationSignalSource = nil
+        signal(SIGTERM, SIG_DFL)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -1151,8 +1170,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let identifierPayload: @Sendable (Notification) -> String? = { notification in
+            notification.userInfo?[GitScanRootAuthorizationCommand.authorizationIdentifierKey]
+                as? String
+        }
         authorizationCommandObservers = [
-            observeAuthorizationCommand(named: .gitScanRootAuthorizationRequested) { [weak self] _ in
+            observeAuthorizationCommand(named: .gitScanRootAuthorizationRequested) { [weak self] in
                 self?.handleAuthorizationRequest(
                     result: self?.gitScanRootAuthorizationController.requestAuthorizationResult()
                         ?? GitScanRootAuthorizationRequestResult(
@@ -1161,7 +1184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         )
                 )
             },
-            observeAuthorizationCommand(named: .gitScanRootAuthorizationAddRequested) { [weak self] _ in
+            observeAuthorizationCommand(named: .gitScanRootAuthorizationAddRequested) { [weak self] in
                 self?.handleAuthorizationRequest(
                     result: self?.gitScanRootAuthorizationController.requestAuthorizationResult()
                         ?? GitScanRootAuthorizationRequestResult(
@@ -1170,7 +1193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         )
                 )
             },
-            observeAuthorizationCommand(named: .gitScanRootAuthorizationRepairRequested) { [weak self] _ in
+            observeAuthorizationCommand(named: .gitScanRootAuthorizationRepairRequested) { [weak self] in
                 self?.handleAuthorizationRequest(
                     result: GitScanRootAuthorizationRequestResult(
                         didChangeAuthorization: self?.gitScanRootAuthorizationController.requestReauthorizationForFirstUnavailableRoot() ?? false,
@@ -1178,34 +1201,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 )
             },
-            observeAuthorizationCommand(named: .gitScanRootAuthorizationReauthorizationRequested) { [weak self] notification in
-                guard let identifier = notification.userInfo?[GitScanRootAuthorizationCommand.authorizationIdentifierKey] as? String else {
-                    return
-                }
+            observeAuthorizationCommand(
+                named: .gitScanRootAuthorizationReauthorizationRequested,
+                payload: identifierPayload
+            ) { [weak self] identifier in
+                guard let identifier else { return }
                 self?.handleAuthorizationChange(
                     didChange: self?.gitScanRootAuthorizationController.requestReauthorization(for: identifier) ?? false
                 )
             },
-            observeAuthorizationCommand(named: .gitScanRootAuthorizationRemovalRequested) { [weak self] notification in
-                guard let identifier = notification.userInfo?[GitScanRootAuthorizationCommand.authorizationIdentifierKey] as? String else {
-                    return
-                }
+            observeAuthorizationCommand(
+                named: .gitScanRootAuthorizationRemovalRequested,
+                payload: identifierPayload
+            ) { [weak self] identifier in
+                guard let identifier else { return }
                 self?.handleAuthorizationChange(
                     didChange: self?.gitScanRootAuthorizationController.removeAuthorization(id: identifier) ?? false
                 )
             },
-            observeAuthorizationCommand(named: .gitScanRootAuthorizationRemoveAllRequested) { [weak self] _ in
+            observeAuthorizationCommand(named: .gitScanRootAuthorizationRemoveAllRequested) { [weak self] in
                 self?.handleAuthorizationChange(
                     didChange: self?.gitScanRootAuthorizationController.removeAllAuthorizations() ?? false
                 )
             },
-            observeAuthorizationCommand(named: .gitActivityRefreshRequested) { [weak self] _ in
+            observeAuthorizationCommand(named: .gitActivityRefreshRequested) { [weak self] in
                 self?.gitActivityRefreshCoordinator.handleManualRefresh()
             },
-            observeAuthorizationCommand(named: .tinyBuddyResetRequested) { [weak self] notification in
-                guard let level = notification.object as? TinyBuddyResetLevel else {
-                    return
-                }
+            observeAuthorizationCommand(
+                named: .tinyBuddyResetRequested,
+                payload: { $0.object as? TinyBuddyResetLevel }
+            ) { [weak self] level in
+                guard let level else { return }
                 self?.performReset(level)
             }
         ]
@@ -1253,36 +1279,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         authorizationCommandObservers.append(
-            notificationCenter.addObserver(
-                forName: .gitActivityRefreshStatusDidChange,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                guard let self else { return }
-                guard TinyBuddyVersionUpgradeTracker.isPostUpgradeRebuildRequired() else {
-                    return
-                }
-                TinyBuddyVersionUpgradeTracker.clearPostUpgradeRebuildRequired()
-                tinyBuddyStartupLogger.notice(
-                    "Post-upgrade rebuild completed; reloading widget timelines"
-                )
-                TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+            observeAuthorizationCommand(named: .gitActivityRefreshStatusDidChange) { [weak self] in
+                self?.handlePostUpgradeRefreshCompletion()
             }
         )
     }
 
-    private func observeAuthorizationCommand(
+    private func handlePostUpgradeRefreshCompletion() {
+        guard TinyBuddyVersionUpgradeTracker.isPostUpgradeRebuildRequired() else {
+            return
+        }
+        TinyBuddyVersionUpgradeTracker.clearPostUpgradeRebuildRequired()
+        tinyBuddyStartupLogger.notice(
+            "Post-upgrade rebuild completed; reloading widget timelines"
+        )
+        TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+    }
+
+    /// Notification itself is not Sendable. Extract only a typed Sendable
+    /// command value before entering the main-actor closure so Swift 6 does
+    /// not transfer Foundation's mutable userInfo container across isolation.
+    private func observeAuthorizationCommand<Payload: Sendable>(
         named name: Notification.Name,
-        handler: @escaping @MainActor (Notification) -> Void
+        payload: @escaping @Sendable (Notification) -> Payload,
+        handler: @escaping @MainActor @Sendable (Payload) -> Void
     ) -> NSObjectProtocol {
         notificationCenter.addObserver(
             forName: name,
             object: nil,
             queue: .main
         ) { notification in
+            let value = payload(notification)
             MainActor.assumeIsolated {
-                handler(notification)
+                handler(value)
             }
+        }
+    }
+
+    private func observeAuthorizationCommand(
+        named name: Notification.Name,
+        handler: @escaping @MainActor @Sendable () -> Void
+    ) -> NSObjectProtocol {
+        observeAuthorizationCommand(named: name, payload: { _ in () }) { _ in
+            handler()
         }
     }
 

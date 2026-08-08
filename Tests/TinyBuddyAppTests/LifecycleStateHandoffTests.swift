@@ -54,9 +54,12 @@ final class LifecycleStateHandoffTests: XCTestCase {
         let primaryGuard = try XCTUnwrap(launchBlock.range(of: "guard role == .primary"))
         XCTAssertGreaterThan(installCall.lowerBound, primaryGuard.lowerBound)
 
-        // The handler itself must route through the normal AppKit termination
-        // flow so `applicationWillTerminate` runs its persistence steps.
-        XCTAssertTrue(source.contains("signal(SIGTERM)"))
+        // Delivery must use a retained DispatchSource on the main queue. A raw
+        // POSIX callback cannot safely call Dispatch or AppKit because neither
+        // is async-signal-safe.
+        XCTAssertTrue(source.contains("signal(SIGTERM, SIG_IGN)"))
+        XCTAssertTrue(source.contains("DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)"))
+        XCTAssertFalse(source.contains("signal(SIGTERM) {"))
         XCTAssertTrue(source.contains("NSApp.terminate(nil)"))
     }
 
