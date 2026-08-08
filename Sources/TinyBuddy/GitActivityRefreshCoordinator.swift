@@ -377,6 +377,11 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private var pendingRefreshRequest: PendingRefreshRequest?
     private var directoryRecoveryRemainingAttempts = 0
     private var hasExhaustedDirectoryRecovery = false
+    /// Advanced whenever a refresh succeeds while recovery retries are queued.
+    /// A queued retry that observes a newer generation was cancelled by that
+    /// success and must neither decrement the (already reset) budget nor mark
+    /// recovery as exhausted.
+    private var directoryRecoveryGeneration = 0
 
     private static let schedulingLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.ryukeili.TinyBuddy",
@@ -1002,6 +1007,9 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         if succeeded {
             directoryRecoveryRemainingAttempts = 0
             hasExhaustedDirectoryRecovery = false
+            // Any retry already scheduled by a prior failure is now obsolete:
+            // it must not consume the reset budget or mark recovery exhausted.
+            directoryRecoveryGeneration &+= 1
         }
 
         if let pendingRequest = pendingRefreshRequest {
@@ -1308,7 +1316,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                           let currentCommitPreparation = self.prepareActivityCommitIfCurrent(
                               refreshExecution: refreshExecution,
                               lifecycleGeneration: lifecycleGeneration,
-                              refreshedAt: completionContext.now
+                              refreshedAt: completionContext.now,
+                              expectedDayIdentifier: completionContext.dayIdentifier
                           ) else {
                         return
                     }
@@ -1574,7 +1583,10 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         finishRefresh(refreshExecution, succeeded: false)
     }
 
-    private func prepareActivityCommit(refreshedAt: Date) -> ActivityCommitPreparation {
+    private func prepareActivityCommit(
+        refreshedAt: Date,
+        expectedDayIdentifier: String
+    ) -> ActivityCommitPreparation {
         let currentActivityRead = activityStore.loadTodaySnapshotRead()
         let currentSnapshot = currentActivityRead.snapshot
         guard currentSnapshot.focusBlockCount != nil,
@@ -1589,7 +1601,11 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         }
 
         let fallbackSnapshot = dailyStatsStore.loadSnapshot()
-        guard fallbackSnapshot.stats.dayIdentifier == activeTimeContext.dayIdentifier else {
+        // The expected day is captured on the main thread by the caller and
+        // passed down: `prepareActivityCommit` runs on the refresh queue while
+        // `activeTimeContext` may be replaced on the main thread, so reading it
+        // here would be an unsynchronized cross-thread access.
+        guard fallbackSnapshot.stats.dayIdentifier == expectedDayIdentifier else {
             return .failed(
                 GitActivityRefreshDiagnostic(
                     source: .gitActivityRefresh,
@@ -1598,7 +1614,6 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
                 )
             )
         }
-        let expectedDayIdentifier = fallbackSnapshot.stats.dayIdentifier
         let previouslyCommittedRead = combinedSnapshotStore.readValidated(
             expectedDayIdentifier: expectedDayIdentifier
         )
@@ -1687,7 +1702,8 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private func prepareActivityCommitIfCurrent(
         refreshExecution: RefreshExecution,
         lifecycleGeneration: Int,
-        refreshedAt: Date
+        refreshedAt: Date,
+        expectedDayIdentifier: String
     ) -> ActivityCommitPreparation? {
         activityCommitLock.lock()
         defer { activityCommitLock.unlock() }
@@ -1696,7 +1712,10 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
               activityCommitRefreshIdentifier == refreshExecution.identifier else {
             return nil
         }
-        return prepareActivityCommit(refreshedAt: refreshedAt)
+        return prepareActivityCommit(
+            refreshedAt: refreshedAt,
+            expectedDayIdentifier: expectedDayIdentifier
+        )
     }
 
     private func beginRefreshExecution() -> RefreshExecution {
@@ -1787,8 +1806,14 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         }
         directoryRecoveryRemainingAttempts -= 1
         let scheduledRemaining = directoryRecoveryRemainingAttempts
+        let recoveryGeneration = directoryRecoveryGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + minimumRefreshSpacing) { [weak self] in
             guard let self else {
+                return
+            }
+            // A successful refresh cancelled this retry: do not consume the
+            // reset budget, reschedule, or mark recovery exhausted.
+            guard self.directoryRecoveryGeneration == recoveryGeneration else {
                 return
             }
             let currentMonotonicTime = self.monotonicTimeProvider()
