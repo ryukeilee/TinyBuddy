@@ -469,14 +469,21 @@ public final class TinyBuddyProjectRegistry: @unchecked Sendable {
                 )
             }
             if !sourceIndices.isEmpty {
-                guard working.revision < Int64.max,
-                      working.generation < Int64.max else { return .rejectedInvalid }
+                guard working.revision < Int64.max else { return .rejectedInvalid }
                 mergeSources(
                     sourceIndices.sorted(by: { working.projects[$0].id < working.projects[$1].id }),
                     into: resolvedIndex,
                     in: &working
                 )
-                working = advanced(working, generation: working.generation + 1)
+                // This consolidation is evidence produced by the current scan,
+                // not an explicit user decision. Advancing the scan generation
+                // here invalidated this scan's own token: the next observation
+                // (or finishSuccessfulScan) was rejected, so a complete scan
+                // that repaired a duplicate could never finish availability
+                // reconciliation. Redirect tombstones make same-generation
+                // concurrent observations safe; explicit mutations still
+                // advance the generation and invalidate stale scans.
+                working = advanced(working, generation: working.generation)
                 guard store.save(working) else { return .persistenceFailed }
                 snapshot = working
             }

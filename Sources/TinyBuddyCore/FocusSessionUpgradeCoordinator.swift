@@ -87,26 +87,34 @@ public final class FocusSessionUpgradeCoordinator: @unchecked Sendable {
     ) -> FocusSessionRecalculationPreview? {
         lock.lock()
         guard case .idle = phase else {
+            let currentPhase = phase
             lock.unlock()
-            logger.debug("Upgrade already in progress (phase=\(String(describing: self.phase)))")
+            logger.debug("Upgrade already in progress (phase=\(String(describing: currentPhase)))")
             return nil
         }
 
         let oldRuleSet = registry.currentRuleSet
 
-        // Pause the engine.
+        // Pause the engine. Every callback is invoked after releasing the
+        // coordinator lock: clients commonly read `currentPhase` from their
+        // callback, which previously deadlocked on this non-recursive lock.
         phase = .paused(oldRuleSet: oldRuleSet)
         lock.unlock()
+        setEnginePaused?(true)
         notifyPhaseChange()
 
-        setEnginePaused?(true)
-
+        // Either callback may synchronously cancel the preparation. Do not
+        // continue staging recovery state after cancellation, and in
+        // particular do not re-pause an engine that cancellation just resumed.
         lock.lock()
-        defer { lock.unlock() }
+        guard case .paused = phase else {
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
 
         guard let provider = currentSessionProvider else {
-            phase = .failed(reason: "currentSessionProvider not configured")
-            notifyPhaseChange()
+            failUpgrade(reason: "currentSessionProvider not configured")
             return nil
         }
 
@@ -129,13 +137,21 @@ public final class FocusSessionUpgradeCoordinator: @unchecked Sendable {
             archiveRevision: revision
         )
 
-        if !registry.saveUpgradeState(recoveryState) {
-            phase = .failed(reason: "Failed to persist upgrade recovery state")
-            notifyPhaseChange()
+        guard registry.saveUpgradeState(recoveryState) else {
+            failUpgrade(reason: "Failed to persist upgrade recovery state")
             return nil
         }
 
+        lock.lock()
+        guard case .paused = phase else {
+            // Cancellation may race the preview work. Never resurrect a
+            // cancelled upgrade or leave its newly staged recovery journal.
+            lock.unlock()
+            _ = registry.clearUpgradeState()
+            return nil
+        }
         phase = .previewReady(preview: preview)
+        lock.unlock()
         notifyPhaseChange()
 
         return preview
@@ -148,8 +164,9 @@ public final class FocusSessionUpgradeCoordinator: @unchecked Sendable {
     public func confirmUpgrade() -> FocusSessionRecalculationResult? {
         lock.lock()
         guard case .previewReady(let preview) = phase else {
+            let currentPhase = phase
             lock.unlock()
-            logger.debug("confirmUpgrade called but phase is \(String(describing: self.phase))")
+            logger.debug("confirmUpgrade called but phase is \(String(describing: currentPhase))")
             return nil
         }
         phase = .upgrading
@@ -183,9 +200,15 @@ public final class FocusSessionUpgradeCoordinator: @unchecked Sendable {
             return nil
         }
 
-        // Use the old archive revision + 1 for the new archive.
+        // Use the old archive revision + 1 for the new archive. A malformed or
+        // exhausted persisted revision must fail closed instead of trapping.
         let recovery = registry.loadUpgradeState()
-        let newRevision = (recovery?.archiveRevision ?? 0) + 1
+        let archiveRevision = recovery?.archiveRevision ?? 0
+        guard archiveRevision >= 0, archiveRevision < Int64.max else {
+            failUpgrade(reason: "Archive revision exhausted")
+            return nil
+        }
+        let newRevision = archiveRevision + 1
 
         guard apply(result.allSessions, newRevision) else {
             failUpgrade(reason: "Atomic session apply failed")
@@ -224,38 +247,45 @@ public final class FocusSessionUpgradeCoordinator: @unchecked Sendable {
     /// the caller is responsible for restoring from backup.
     public func rollbackUpgrade() -> Bool {
         lock.lock()
-        defer { lock.unlock() }
-
         guard case .previewReady(let preview) = phase else {
-            logger.debug("rollbackUpgrade called but phase is \(String(describing: self.phase))")
+            let currentPhase = phase
+            lock.unlock()
+            logger.debug("rollbackUpgrade called but phase is \(String(describing: currentPhase))")
             return false
         }
-
-        // Clear upgrade state.
-        registry.clearUpgradeState()
-
-        // Restore the old rule set as current.
-        if !registry.rollbackToPrevious() {
-            // Even if rollback fails in registry, the old rule set is still
-            // available from the preview.
-        }
-
         phase = .rolledBack(previousRuleSet: preview.oldRuleSet)
+        lock.unlock()
+
+        // Registry I/O and client callbacks must never run while holding the
+        // coordinator lock; both can synchronously re-enter this object.
+        _ = registry.clearUpgradeState()
+
+        // No rule set has been registered during preview, so the captured old
+        // rule is still current. Calling `rollbackToPrevious()` here could
+        // incorrectly restore an unrelated rule from an earlier upgrade.
         notifyPhaseChange()
-
-        // Resume the engine.
         setEnginePaused?(false)
-
         return true
     }
 
     /// Cancels the upgrade without applying changes. Resumes the engine.
     public func cancelUpgrade() {
         lock.lock()
-        defer { lock.unlock() }
-
-        registry.clearUpgradeState()
+        // Once application has started, cancellation cannot safely race the
+        // atomic session write. The caller may cancel preparation or preview,
+        // but an in-flight apply must run to its committed/failed terminal
+        // state so recovery metadata and engine state remain coherent.
+        switch phase {
+        case .paused, .previewReady:
+            break
+        default:
+            lock.unlock()
+            return
+        }
         phase = .idle
+        lock.unlock()
+
+        _ = registry.clearUpgradeState()
         notifyPhaseChange()
         setEnginePaused?(false)
     }

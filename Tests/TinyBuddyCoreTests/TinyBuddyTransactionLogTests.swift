@@ -524,6 +524,57 @@ final class TinyBuddyTransactionCoordinatorTests: XCTestCase {
 
     // MARK: - Session Save
 
+    func testTransactionVersionExhaustionFailsClosedWithoutAppending() {
+        let tempDir = tempURL("coordinator-version-exhausted")
+        let log = TinyBuddyTransactionLog(
+            fileURL: tempDir.appendingPathComponent("transaction.log")
+        )
+        XCTAssertEqual(
+            log.append(TinyBuddyTransactionLogEntry(
+                transactionID: UUID(),
+                domain: .configSnapshot,
+                state: .committed,
+                version: Int64.max,
+                payloadHash: "exhausted",
+                diagnosticKey: "test.exhausted"
+            )),
+            .saved
+        )
+        let coordinator = makeCoordinator(tempDir: tempDir)
+
+        let outcome = coordinator.saveConfig(
+            TinyBuddyAppConfig(configVersion: 1, dayIdentifier: "2026-07-20"),
+            expectedVersion: Int64.max
+        )
+
+        XCTAssertEqual(outcome, .persistenceFailed)
+        XCTAssertEqual(log.readAll().count, 1)
+    }
+
+    func testMultiDomainTransactionRequiresBoundedExpectedVersionForEveryOperation() {
+        let coordinator = makeCoordinator(tempDir: tempURL("coordinator-multi-version-guard"))
+        let operation = TinyBuddyTransactionOperation(
+            domain: .focusSession,
+            payloadHash: "session-hash",
+            execute: { true }
+        )
+
+        XCTAssertEqual(
+            coordinator.performMultiDomainTransaction(
+                operations: [operation],
+                expectedVersions: [:]
+            ),
+            .persistenceFailed
+        )
+        XCTAssertEqual(
+            coordinator.performMultiDomainTransaction(
+                operations: [operation],
+                expectedVersions: [.focusSession: Int64.max]
+            ),
+            .persistenceFailed
+        )
+    }
+
     func testSaveSessionsSuccess() {
         let tempDir = tempURL("coordinator-sessions")
         let sessionFileURL = tempDir.appendingPathComponent("sessions.json")
@@ -881,14 +932,14 @@ final class TinyBuddyTransactionCoordinatorTests: XCTestCase {
             diagnosticKey: "test.crash"
         ))
 
-        // Recover
+        // Recover. A prepare record alone cannot prove that its domain write
+        // reached durable storage, so it must remain unresolved rather than
+        // being falsely reported as committed.
         let result = coordinator.recover()
-        // The prepared transaction should be found and resolved
         XCTAssertEqual(result.preparedTransactions, [txID])
-        // The log should be compacted after recovery
-        // The prepared entries were auto-committed during recovery
-        let remaining = log.readAll()
-        _ = remaining
+        XCTAssertTrue(result.committedTransactions.isEmpty)
+        XCTAssertTrue(result.rolledBackTransactions.isEmpty)
+        XCTAssertEqual(log.readAll().map(\.state), [.prepared])
     }
 
     func testRecoveryIsIdempotent() {

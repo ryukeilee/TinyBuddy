@@ -671,6 +671,54 @@ final class ProjectIdentityTests: XCTestCase {
         XCTAssertEqual(registry.resolve(projectKey: "roots:second")?.id, second.id)
     }
 
+    func testCompleteReconciliationFinishesAfterObservationRepairsDuplicateIdentity() throws {
+        let canonical = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "canonical"),
+            kind: .gitRepository,
+            displayName: "Canonical",
+            repositoryFingerprint: "roots:shared",
+            aliases: ["/canonical/.git"]
+        )
+        let legacy = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "legacy"),
+            kind: .gitRepository,
+            displayName: "Legacy",
+            repositoryFingerprint: nil,
+            aliases: ["/legacy/.git"]
+        )
+        let missing = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "missing"),
+            kind: .gitRepository,
+            displayName: "Missing",
+            repositoryFingerprint: "roots:missing",
+            aliases: ["/missing/.git"]
+        )
+        let registry = TinyBuddyProjectRegistry(store: ProjectRegistryMemoryStore(
+            TinyBuddyProjectRegistrySnapshot(projects: [canonical, legacy, missing])
+        ))
+        let manifest = TinyBuddyProjectDiscoveryManifest(observations: [observation(
+            fingerprint: "roots:shared",
+            alias: "/legacy/.git",
+            name: "Canonical"
+        )])
+
+        let reconciliation = try XCTUnwrap(TinyBuddyProjectDiscoveryReconciler.reconcile(
+            manifest,
+            registry: registry,
+            completeScan: true,
+            at: now
+        ))
+
+        XCTAssertTrue(reconciliation.didCompleteAvailabilityReconciliation)
+        XCTAssertEqual(reconciliation.observedProjectIDs, Set([canonical.id]))
+        XCTAssertEqual(registry.resolve(id: legacy.id)?.id, canonical.id)
+        XCTAssertEqual(
+            registry.currentSnapshot.projects.first { $0.id == legacy.id }?.state,
+            .removed
+        )
+        XCTAssertEqual(registry.resolve(id: missing.id)?.state, .temporarilyUnavailable)
+    }
+
     func testRestoreReconnectsLatestIdentityAndAttribution() throws {
         let store = ProjectRegistryMemoryStore()
         let stableID = TinyBuddyProjectID(rawValue: "stable")

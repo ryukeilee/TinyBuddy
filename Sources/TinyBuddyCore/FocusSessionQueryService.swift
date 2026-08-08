@@ -26,6 +26,11 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         version: Int
     ) async -> FocusSessionQueryPage? {
         guard version >= currentQueryVersion else { return nil }
+        // A caller-controlled non-positive page size previously produced an
+        // invalid array range and could trap the query actor. Treat it as an
+        // empty request, and calculate the upper bound without overflowing
+        // when a very large limit is supplied.
+        guard limit > 0 else { return .empty }
 
         let sessions = sessionProvider()
         let filtered = applyFilters(sessions, query: query)
@@ -42,11 +47,11 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         let startIndex: Int
         var cursorMissed = false
         if let cursor = cursor {
-            if let index = sorted.firstIndex { session in
+            if let index = sorted.firstIndex(where: { session in
                 session.startedAt < cursor.lastStartedAt
                     || (session.startedAt == cursor.lastStartedAt
                         && session.id.uuidString > cursor.lastID.uuidString)
-            } {
+            }) {
                 startIndex = index
             } else {
                 // The cursor key no longer matches the current result set
@@ -68,7 +73,8 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
             return FocusSessionQueryPage.empty
         }
 
-        let endIndex = min(startIndex + limit, totalCount)
+        let pageCount = min(limit, totalCount - startIndex)
+        let endIndex = startIndex + pageCount
         let page = Array(sorted[startIndex ..< endIndex])
         let hasMore = endIndex < totalCount
 

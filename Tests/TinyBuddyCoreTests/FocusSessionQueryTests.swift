@@ -284,6 +284,45 @@ final class FocusSessionQueryTests: XCTestCase {
         XCTAssertNil(page.nextCursor)
     }
 
+    func testNonPositiveLimitReturnsEmptyPageInsteadOfTrapping() async throws {
+        let start = try date("2026-07-20T10:00:00Z")
+        let service = makeService(sessions: [
+            session(project: alpha, day: "2026-07-20", start: start)
+        ])
+
+        for limit in [0, -1, Int.min] {
+            let result = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: nil,
+                limit: limit,
+                version: 0
+            )
+            let page = try XCTUnwrap(result)
+            XCTAssertTrue(page.sessions.isEmpty)
+            XCTAssertFalse(page.hasMore)
+            XCTAssertNil(page.nextCursor)
+        }
+    }
+
+    func testMaximumLimitDoesNotOverflowPageBoundary() async throws {
+        let base = try date("2026-07-20T12:00:00Z")
+        let service = makeService(sessions: makeOrderedSessions(
+            count: 3,
+            project: alpha,
+            base: base
+        ))
+
+        let result = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: Int.max,
+            version: 0
+        )
+        let page = try XCTUnwrap(result)
+        XCTAssertEqual(page.sessions.count, 3)
+        XCTAssertFalse(page.hasMore)
+    }
+
     // ======================================================================
     // MARK: - Filters
     // ======================================================================

@@ -130,47 +130,26 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
 
     // MARK: - Recovery
 
-    /// Performs crash recovery by replaying the transaction log. Any
-    /// `prepared` transactions are resolved based on whether their data
-    /// is durable.
+    /// Replays the transaction log and reports its durable states. Prepared
+    /// entries remain explicitly unresolved: an intact prepare record alone is
+    /// not proof that the corresponding domain write reached storage, so crash
+    /// recovery must never report it as committed without verification.
     @discardableResult
     public func recover() -> TinyBuddyTransactionRecoveryResult {
         lock.lock()
         defer { lock.unlock() }
 
         let recovery = transactionLog.recover()
-        var committed: [UUID] = []
-        var rolledBack: [UUID] = []
-
-        for transactionID in recovery.preparedTransactions {
-            // Check if the transaction's data is durable by looking at the
-            // highest committed version for each domain. If the version in
-            // the log is <= the highest committed version, the data is durable.
-            // Otherwise, we need to roll back.
-            //
-            // In practice, this check is done by the caller since the coordinator
-            // doesn't know which domains were involved in the transaction.
-            // For now, we mark prepared transactions as needing resolution.
-            // The caller should call `resolvePreparedTransaction` for each.
-            //
-            // For automatic recovery, we assume the data is durable if the
-            // transaction was prepared and the log entry is intact.
-            // This is a conservative approach: if the data is not durable,
-            // the next read will detect the inconsistency and trigger repair.
-            committed.append(transactionID)
-        }
-
-        // Compact the log after recovery
         let compactedCount = transactionLog.compact()
 
         logger.info(
-            "Recovery complete: \(committed.count) committed, \(rolledBack.count) rolled back, \(compactedCount) compacted"
+            "Recovery complete: \(recovery.preparedTransactions.count) unresolved, \(recovery.committedTransactions.count) committed, \(recovery.rolledBackTransactions.count) rolled back, \(compactedCount) compacted"
         )
 
         return TinyBuddyTransactionRecoveryResult(
             preparedTransactions: recovery.preparedTransactions,
-            committedTransactions: committed,
-            rolledBackTransactions: rolledBack,
+            committedTransactions: recovery.committedTransactions,
+            rolledBackTransactions: recovery.rolledBackTransactions,
             compactedCount: compactedCount
         )
     }
@@ -208,7 +187,9 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
             )
         }
 
-        let nextVersion = currentVersion + 1
+        guard let nextVersion = nextTransactionVersion(after: currentVersion) else {
+            return .persistenceFailed
+        }
         let payloadHash = Self.hashSessions(archive.sessions)
         let context = TinyBuddyTransactionContext(
             domain: domain,
@@ -286,7 +267,9 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
             )
         }
 
-        let nextVersion = currentVersion + 1
+        guard let nextVersion = nextTransactionVersion(after: currentVersion) else {
+            return .persistenceFailed
+        }
         let payloadHash = Self.hashProjects(snapshot.projects)
         let context = TinyBuddyTransactionContext(
             domain: domain,
@@ -346,7 +329,9 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
             )
         }
 
-        let nextVersion = currentVersion + 1
+        guard let nextVersion = nextTransactionVersion(after: currentVersion) else {
+            return .persistenceFailed
+        }
         let payloadHash = Self.hashConfig(config)
         let context = TinyBuddyTransactionContext(
             domain: domain,
@@ -416,7 +401,9 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
             )
         }
 
-        let nextVersion = currentVersion + 1
+        guard let nextVersion = nextTransactionVersion(after: currentVersion) else {
+            return .persistenceFailed
+        }
         let payloadHash = Self.hashSnapshot(snapshot)
         let context = TinyBuddyTransactionContext(
             domain: domain,
@@ -470,6 +457,11 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        guard operations.allSatisfy({ expectedVersions[$0.domain] != nil }) else {
+            logger.error("Refusing multi-domain transaction without an expected version for every operation")
+            return .persistenceFailed
+        }
+
         // Check optimistic concurrency for all domains
         for (domain, expectedVersion) in expectedVersions {
             let currentVersion = transactionLog.highestCommittedVersion(for: domain)
@@ -483,7 +475,9 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
 
         // Use the highest version across all domains + 1
         let maxVersion = expectedVersions.values.max() ?? 0
-        let nextVersion = maxVersion + 1
+        guard let nextVersion = nextTransactionVersion(after: maxVersion) else {
+            return .persistenceFailed
+        }
         let transactionID = UUID()
         let startedAt = Date()
 
@@ -559,6 +553,14 @@ public final class TinyBuddyTransactionCoordinator: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    private func nextTransactionVersion(after version: Int64) -> Int64? {
+        guard version >= 0, version < Int64.max else {
+            logger.error("Refusing to advance an invalid or exhausted transaction version")
+            return nil
+        }
+        return version + 1
+    }
 
     private static func hashSessions(_ sessions: [FocusSession]) -> String {
         var hasher = Hasher()
