@@ -417,7 +417,10 @@ public final class GitCommandExecutor: @unchecked Sendable {
             return commandArguments.filter { !$0.hasPrefix("-") }.count <= 1
         case "reflog":
             let action = commandArguments.first { !$0.hasPrefix("-") }
-            return action == nil || action == "show" || action == "exists"
+            // `expire` and `delete` are the only mutating reflog subcommands.
+            // Everything else is a read: `show`, `exists`, or the bare
+            // `<ref>` shorthand for `show <ref>`.
+            return action != "expire" && action != "delete"
         case "multi-pack-index":
             return commandArguments.contains("verify")
                 && !commandArguments.contains(where: { ["write", "expire", "repack"].contains($0) })
@@ -450,8 +453,29 @@ public final class GitCommandExecutor: @unchecked Sendable {
         }
 
         // `git config` and `git config <name>` are reads. Two or more bare
-        // values form the write syntax `git config <name> <value>`.
-        return arguments.filter { !$0.hasPrefix("-") }.count <= 1
+        // values form the write syntax `git config <name> <value>`. Option
+        // values that follow a value-taking option (`--file <path>`,
+        // `--blob <oid>`, `--type <type>`, `--default <value>`) are not
+        // config values and must not count toward the bare-value tally.
+        var bareValueCount = 0
+        var index = 0
+        let valueTakingOptions: Set<String> = ["--file", "--blob", "--type", "--default"]
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument.hasPrefix("-") {
+                if valueTakingOptions.contains(argument),
+                   index + 1 < arguments.count {
+                    // Skip the option and its consumed value.
+                    index += 2
+                } else {
+                    index += 1
+                }
+                continue
+            }
+            bareValueCount += 1
+            index += 1
+        }
+        return bareValueCount <= 1
     }
 
     // MARK: Process Registration & Cancellation

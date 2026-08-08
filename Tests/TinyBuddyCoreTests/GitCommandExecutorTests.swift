@@ -153,6 +153,144 @@ final class GitCommandExecutorTests: XCTestCase {
         }
     }
 
+    func testReadOnlyAllowsConfigFileReadForm() throws {
+        // `git config --file <path> <name>` reads a key from an explicit
+        // config file. The `<path>` is the value of the `--file` option, not
+        // a bare config value, so the invocation must be treated as a read.
+        let executor = makeExecutor()
+        let configPath = "/tmp/tinybuddy-config-read-test-\(UUID().uuidString).cfg"
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        do {
+            let result = try executor.execute(
+                arguments: ["config", "--file", configPath, "user.name"]
+            )
+            // Missing file is a normal git error result, not a policy rejection.
+            XCTAssertNotEqual(result.terminationStatus, 0)
+        } catch let error as GitCommandError {
+            guard case .commandNotAllowed = error else {
+                return XCTFail("Unexpected error for config --file read: \(error)")
+            }
+            XCTFail("config --file <path> <name> is a read but was rejected")
+        } catch {
+            XCTFail("Unexpected error for config --file read: \(error)")
+        }
+
+        // The write form `config --file <path> <name> <value>` must still be
+        // rejected even though `--file` consumes one argument.
+        XCTAssertThrowsError(
+            try executor.execute(
+                arguments: ["config", "--file", configPath, "user.name", "value"]
+            )
+        ) { error in
+            guard case GitCommandError.commandNotAllowed(let command) = error else {
+                return XCTFail("Expected commandNotAllowed for config --file write, got \(error)")
+            }
+            XCTAssertEqual(command, "config")
+        }
+    }
+
+    func testReadOnlyAllowsConfigDefaultReadForm() throws {
+        // `git config --default <value> <name>` reads a key and falls back to
+        // `<value>` when the key is missing. `<value>` is consumed by the
+        // `--default` option and must not count toward the bare-value tally;
+        // otherwise the read form is mistaken for `config <name> <value>`.
+        let executor = makeExecutor()
+        let fallback = "tinybuddy-fallback-\(UUID().uuidString)"
+
+        do {
+            let result = try executor.execute(
+                arguments: ["config", "--default", fallback, "tinybuddy.missing-key-\(UUID().uuidString)"]
+            )
+            XCTAssertEqual(result.terminationStatus, 0)
+            XCTAssertTrue(result.standardOutput.contains(fallback))
+        } catch let error as GitCommandError {
+            guard case .commandNotAllowed = error else {
+                return XCTFail("Unexpected error for config --default read: \(error)")
+            }
+            XCTFail("config --default <value> <name> is a read but was rejected")
+        } catch {
+            XCTFail("Unexpected error for config --default read: \(error)")
+        }
+    }
+
+    func testReadOnlyAllowsConfigTypeReadForm() throws {
+        // `git config --type <type> <name>` reads a key with an explicit type.
+        // `<type>` is consumed by the `--type` option and must not count toward
+        // the bare-value tally.
+        let executor = makeExecutor()
+
+        do {
+            let result = try executor.execute(
+                arguments: ["config", "--type", "bool", "core.ignorecase"]
+            )
+            // A missing or unreadable value is a normal git result, not a
+            // policy rejection.
+            XCTAssertEqual(result.terminationStatus, 0)
+        } catch let error as GitCommandError {
+            guard case .commandNotAllowed = error else {
+                return XCTFail("Unexpected error for config --type read: \(error)")
+            }
+            XCTFail("config --type <type> <name> is a read but was rejected")
+        } catch {
+            XCTFail("Unexpected error for config --type read: \(error)")
+        }
+
+        // The write form `config --type <type> <name> <value>` must still be
+        // rejected even though `--type` consumes one argument.
+        XCTAssertThrowsError(
+            try executor.execute(
+                arguments: ["config", "--type", "bool", "user.name", "true"]
+            )
+        ) { error in
+            guard case GitCommandError.commandNotAllowed(let command) = error else {
+                return XCTFail("Expected commandNotAllowed for config --type write, got \(error)")
+            }
+            XCTAssertEqual(command, "config")
+        }
+    }
+
+    func testReadOnlyAllowsReflogRefReadShorthand() throws {
+        // `git reflog <ref>` is the read shorthand for `git reflog show <ref>`.
+        let executor = makeExecutor()
+        let invocations: [[String]] = [
+            ["reflog", "HEAD"],
+            ["reflog", "show", "HEAD"],
+            ["reflog", "exists", "HEAD"],
+        ]
+        for invocation in invocations {
+            do {
+                let result = try executor.execute(arguments: invocation)
+                // HEAD@{0} may not exist in this repo; a normal git error is fine.
+                _ = result
+            } catch let error as GitCommandError {
+                guard case .commandNotAllowed = error else {
+                    continue
+                }
+                XCTFail("\(invocation.joined(separator: " ")) is a read but was rejected")
+            } catch {
+                continue
+            }
+        }
+    }
+
+    func testReadOnlyStillBlocksReflogWriteSubcommands() {
+        let executor = makeExecutor()
+        for invocation in [
+            ["reflog", "expire", "--all"],
+            ["reflog", "delete", "HEAD@{0}"],
+        ] {
+            XCTAssertThrowsError(
+                try executor.execute(arguments: invocation)
+            ) { error in
+                guard case GitCommandError.commandNotAllowed(let command) = error else {
+                    return XCTFail("Expected commandNotAllowed for \(invocation), got \(error)")
+                }
+                XCTAssertEqual(command, "reflog")
+            }
+        }
+    }
+
     func testReadOnlyModeDisabledAllowsWriteCommands() throws {
         try runGitTest(configure: { config in
             var cfg = config
