@@ -1199,6 +1199,57 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertTrue(harness.coordinator.isPeriodicRefreshScheduled)
     }
 
+    func testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget() {
+        let harness = makeHarness(
+            authorizedRoots: [],
+            authorizationIssue: .authorizationInvalid,
+            minimumRefreshSpacing: 0.2
+        )
+
+        // Authorization invalid → the launch refresh fails and schedules a
+        // recovery retry on the real main queue after minimumRefreshSpacing
+        // (recovery budget 3 → 2).
+        harness.coordinator.start()
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+
+        // Authorization restored → the replacement refresh succeeds, which
+        // resets the recovery budget to zero and advances the generation.
+        // The status for the second (successful) refresh is published
+        // asynchronously after the script completes, so wait for it.
+        harness.authorizationIssue = nil
+        harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/RecoveredProject")]
+        harness.performAndWaitForScriptRunCount(1) {
+            harness.coordinator.handleAuthorizationChanged()
+        }
+        harness.performAndWaitForStatusCount(2) {}
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+
+        // Let the already-queued recovery retry fire. The generation mismatch
+        // must cancel it: no additional refresh, no budget consumption, and no
+        // "recovery exhausted" marking.
+        let retryWindowElapsed = expectation(description: "queued recovery retry fired")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            retryWindowElapsed.fulfill()
+        }
+        wait(for: [retryWindowElapsed], timeout: 1.0)
+        XCTAssertEqual(harness.scriptRunCount, 1)
+
+        // Authorization becomes invalid again: the recovery budget must still be
+        // usable (not marked exhausted), so another retry is queued.
+        harness.authorizationIssue = .authorizationInvalid
+        harness.authorizedRoots = []
+        harness.coordinator.handleAuthorizationChanged()
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
+
+        // Authorization restored → the fresh recovery retry fires and succeeds.
+        harness.advanceMonotonicTime(by: 0.3)
+        harness.authorizationIssue = nil
+        harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/RecoveredProject")]
+        harness.performAndWaitForScriptRunCount(2) {}
+        harness.waitForNoRefresh()
+        XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
+    }
+
     func testPartialAuthorizationFailureScansValidRootsAndRecordsPartialRecovery() {
         let liveRoot = URL(fileURLWithPath: "/Authorized/LiveProject")
         let harness = makeHarness(
@@ -2664,7 +2715,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         authorizationIssue: GitScanRootAccessIssue? = nil,
         scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh"),
         repositoryMonitoringStartDelay: TimeInterval = 0,
-        foregroundActivationRefreshDelay: TimeInterval = 0
+        foregroundActivationRefreshDelay: TimeInterval = 0,
+        minimumRefreshSpacing: TimeInterval = 60
     ) -> RefreshHarness {
         RefreshHarness(
             testCase: self,
@@ -2673,7 +2725,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
             authorizationIssue: authorizationIssue,
             scriptURL: scriptURL,
             repositoryMonitoringStartDelay: repositoryMonitoringStartDelay,
-            foregroundActivationRefreshDelay: foregroundActivationRefreshDelay
+            foregroundActivationRefreshDelay: foregroundActivationRefreshDelay,
+            minimumRefreshSpacing: minimumRefreshSpacing
         )
     }
 
@@ -2762,7 +2815,8 @@ private final class RefreshHarness: @unchecked Sendable {
         authorizationIssue: GitScanRootAccessIssue? = nil,
         scriptURL: URL? = URL(fileURLWithPath: "/tmp/tinybuddy-test-refresh.sh"),
         repositoryMonitoringStartDelay: TimeInterval = 0,
-        foregroundActivationRefreshDelay: TimeInterval = 0
+        foregroundActivationRefreshDelay: TimeInterval = 0,
+        minimumRefreshSpacing: TimeInterval = 60
     ) {
         self.testCase = testCase
         self.state = State(currentDate: Self.makeDate(second: 0))
@@ -2844,7 +2898,7 @@ private final class RefreshHarness: @unchecked Sendable {
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: refreshStatusStore,
             refreshInterval: 300,
-            minimumRefreshSpacing: 60,
+            minimumRefreshSpacing: minimumRefreshSpacing,
             widgetReloader: { [weak testCase, state] in
                 guard testCase != nil else {
                     return
