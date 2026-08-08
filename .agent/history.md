@@ -1,0 +1,128 @@
+# Maintenance Loop History
+
+用于记录每一次 Maintenance Loop 的结果。请按 `.agent/loop.md` 的 Record 阶段追加条目，并按 Maintain 阶段维护本文件：
+
+- 本文件始终保留最近约 10 条轮次记录。
+- 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/history-archive.md`（归档文件不存在则创建）；归档条目不丢失、不改写。
+- 观察与决策阶段核对历史时，同时读取本文件与 `.agent/history-archive.md`，避免重复处理已完成的问题。
+
+## 2026-08-09：将 Maintenance Loop 升级为通用长期维护版本
+
+**发现的问题及证据**
+- 现有 `.agent/` 维护体系已成功执行多轮闭环（本轮前 3 条记录），机制验证有效；但作为长期重复执行入口存在三个结构性缺口：
+  - `history.md` 无归档机制，只增不减，长期运行必然无限膨胀。
+  - Decide 阶段未要求与已完成问题核对，存在重复处理同根因问题的风险。
+  - 无修改轮次的结束路径未作为长期运行契约显式化。
+- 证据：`loop.md` 原流程为 `Observe → Decide → Execute → Verify → Record` 五阶段；`history.md` 仅追加、无归档说明；rules 中无"同模块需新证据/不重复已完成问题"约束。
+
+**原因分析**
+- 原设计面向单轮执行而非长期反复执行，缺少历史增长控制与问题去重两类长期运行必需机制；本次仅升级 Agent 维护基础设施，不修改任何业务代码。
+
+**修改内容**
+- `.agent/loop.md`
+  - 流程升级为 `Observe → Evidence → Decide → Execute → Verify → Record → Maintain`：新增 Evidence 阶段（证据先于决策、区分事实与猜测、无证据淘汰），新增 Maintain 阶段（历史保留最近约 10 条、旧条目原样归档到 `.agent/history-archive.md`、归档不丢不改、去重查询同时读两个文件）。
+  - Decide 阶段增加问题去重：同模块继续优化必须引用新证据；与已完成问题同根因视为重复不处理。
+  - 入口与目标明确"无修改轮次"：没有高价值可验证问题即以无修改轮次结束，不为了产生修改而修改。
+- `.agent/rules.md`
+  - "必须"中新增：同模块优化需新证据、不得重复已完成问题；无高价值问题允许无修改结束；维护历史保留最近约 10 条并原样归档、不删不改不截断。
+- `.agent/history.md`
+  - 头部更新为 Maintain 阶段契约（保留 10 条、归档规则、去重查询），并追加本轮记录。
+
+**验证结果**
+- 逐文件复查 `loop.md` 阶段编号与入口顺序一致（`Observe → Evidence → Decide → Execute → Verify → Record → Maintain`）。
+- 历史 3 条旧记录原样保留，未触发归档阈值（<10 条）。
+- `git diff --check`：通过。
+- `git status --short` 复查：仅 `.agent/` 下三个文件被修改；`Sources/`、`Tests/`、`Widget/`、`script/` 未触碰；用户/前一轮未提交修改（GitCommandExecutor.swift 等）保持原样。
+
+**剩余风险**
+- 归档触发阈值（10 条）为约定值，由后续轮次按 Maintain 阶段执行；归档文件 `history-archive.md` 在首次归档时创建。
+- 本轮为纯 `.agent/` 基础设施改动，不涉及代码、测试或运行行为，未运行 `swift test`（按 loop.md 中"仅文档或 `.agent/` 基础设施改动"的验证边界执行）。
+
+## 2026-08-09：修复 config 只读验证对 --type/--default 读形式误拒
+
+**发现的问题及证据**
+- `GitCommandExecutor.isReadOnlyConfigInvocation` 的带值选项集合（`valueTakingOptions`）仅含 `--file`/`--blob`，导致另外两个真实合法只读形式被误判为写形式 `git config <name> <value>` 而抛 `commandNotAllowed`：
+  - `git config --default <value> <name>`：`<value>` 被计入裸参数计数（=2）被拒；
+  - `git config --type <type> <name>`：`<type>` 被计入裸参数计数（=2）被拒。
+- 用真实 Git 验证语义：`git config --default "fallback" user.name` 退出 0 并输出读取值；`git config --type bool core.ignorecase` 退出 0 输出 `true`；`git config --comment "note" user.name` 退出 129（`--comment` 仅适用于 add/set/replace，属写专用，应保持拒绝）。
+- 新增测试在修复前运行均按预期失败：`config --default <value> <name> is a read but was rejected`、`config --type <type> <name> is a read but was rejected`。
+- `swift test` 基线（含前一轮改动）：GitCommandExecutorTests 30 个测试全绿。
+
+**原因分析**
+- 上一轮（修复 `--file`/`--blob`）记录中已标注此方向风险：带值选项集合不完整；`--default`/`--type` 的分离参数形式同样属于"选项自身携带的值"，不应计入配置键/值计数。
+
+**修改内容**
+- `Sources/TinyBuddyCore/GitCommandExecutor.swift`
+  - `isReadOnlyConfigInvocation` 的 `valueTakingOptions` 加入 `--type`、`--default`，其携带值在裸参数计数中被跳过；写形式 `git config --type bool <name> <value>` 仍有 2 个真实裸参数，继续被拒绝（安全性不变）。
+- `Tests/TinyBuddyCoreTests/GitCommandExecutorTests.swift`
+  - 新增 `testReadOnlyAllowsConfigDefaultReadForm`：`config --default <value> <name>` 必须执行成功且输出 fallback，不抛 `commandNotAllowed`。
+  - 新增 `testReadOnlyAllowsConfigTypeReadForm`：`config --type <type> <name>` 必须执行成功；并断言写形式 `config --type bool user.name true` 仍抛 `commandNotAllowed`。
+
+**验证结果**
+- 修复前运行两个新测试：均失败，确认缺陷真实存在。
+- 修复后 `swift test --filter GitCommandExecutorTests`：32 个测试（+2）全部通过。
+- `swift test` 全量：1542 个测试（+2），0 失败。
+- `git diff --check`：通过。
+- `git status --short` 复查：仅 GitCommandExecutor.swift、GitCommandExecutorTests.swift 及上一轮遗留的 GitActivityRefreshCoordinatorTests.swift 有改动，`.agent/` 未跟踪；未触碰用户/前一轮修改。
+
+**剩余风险**
+- `--comment` 等写专用选项经真实 Git 验证不应放行，已维持拒绝；若 Git 未来新增读语义的带值选项，需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- 本轮只涉及只读验证逻辑，未改变命令执行、超时或取消路径。
+
+## 2026-08-09：补充恢复重试 generation 取消机制的回归测试
+
+**发现的问题及证据**
+- 提交 `6a9b488`（Fix refresh commit day read and recovery retry budget）在 `Sources/TinyBuddy/GitActivityRefreshCoordinator.swift` 引入 `directoryRecoveryGeneration`：成功刷新时 `&+= 1`，使已排队的恢复重试闭包通过 `guard self.directoryRecoveryGeneration == recoveryGeneration`（1816-1818 行）检测到 generation 不匹配而直接返回，不再消耗已重置的恢复预算、不再错误标记 `hasExhaustedDirectoryRecovery`。
+- 但该排队重试使用真实主队列 `DispatchQueue.main.asyncAfter(deadline: .now() + minimumRefreshSpacing)`（默认 60 秒），现有测试（如 `testInvalidSavedAuthorizationKeepsLowFrequencyRecoveryAndRecoversAutomatically`）时长远小于 60 秒真实时间，排队重试闭包从未真正触发，generation 取消分支无任何测试执行覆盖。
+- `swift test` 基线：`GitActivityRefreshCoordinatorTests` 96 个测试全绿。
+
+**原因分析**
+- 测试 harness（`RefreshHarness`）将 `minimumRefreshSpacing` 硬编码为 60，无法在测试时间内触发排队的恢复重试闭包，导致 `6a9b488` 的核心稳定性修复（成功刷新后取消陈旧恢复重试）缺乏回归保护。
+
+**修改内容**
+- `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift`
+  - `makeHarness` 与 `RefreshHarness.init` 增加 `minimumRefreshSpacing: TimeInterval = 60` 参数（默认值不变，不影响现有测试），并传递给 coordinator。
+  - 新增 `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget`：用短间距（0.2s）触发真实排队重试，验证 ①授权失效后恢复重试排队；②授权恢复成功刷新后 generation 递增、预算重置；③已排队重试触发时因 generation 不匹配被取消（无额外脚本运行）；④再次授权失效时预算仍可重置（未标记耗尽），恢复重试仍能成功。
+
+**验证结果**
+- 新测试单独运行：通过。
+- 反向验证：临时禁用 generation guard（`directoryRecoveryGeneration == recoveryGeneration` 分支改为恒通过）后，新测试如预期失败（`scriptRunCount` 变为 2、outcome 为 failed），证明测试能捕获该回归；随后已还原产品代码（`git diff` 确认 coordinator 无改动）。
+- `swift test --filter GitActivityRefreshCoordinatorTests`：97 个测试全部通过。
+- `swift test` 全量：1537 个测试，0 失败。
+- `git diff --check`：通过。
+
+**剩余风险**
+- 新测试依赖真实主队列计时（0.2s/0.5s 窗口），在极慢 CI 环境可能存在时序脆弱性，但窗口余量较大且与现有测试模式一致。
+- 本轮未修改产品代码，仅补测试；`directoryRecoveryGeneration` 机制本身的正确性未变。
+
+## 2026-08-09：修复 Git 命令只读验证误拒合法只读调用形式
+
+**发现的问题及证据**
+- 提交 `18cff91`（Harden Git command read-only and timeout enforcement）引入的 `GitCommandExecutor.isReadOnlyInvocation` 对两类合法只读命令形式存在误判，在 `readOnly` 模式下抛出 `commandNotAllowed`：
+  - `git config --file <path> <name>`（读取指定配置文件中的键）：`isReadOnlyConfigInvocation` 将 `--file` 选项携带的路径参数计入裸参数计数（`["/path", "name"]` 共 2 个），被误判为写形式 `git config <name> <value>` 而拒绝。
+  - `git reflog <ref>`（`git reflog show <ref>` 的只读简写，如 `git reflog HEAD`）：`reflog` 分支只放行 `show`/`exists`/无 action，`HEAD` 这类 ref 简写被误判为写子命令而拒绝。
+- 用真实 Git 验证语义：`git reflog HEAD` 正常输出并返回 0；`git config --file <不存在路径> user.name` 只是普通错误退出（exit=1），并非命令不允许。
+- `swift test` 基线：1537 个测试全绿。
+
+**原因分析**
+- 裸参数计数没有区分"选项自身携带的值"（`--file <path>`、`--blob <oid>`）与真正的配置键/值；`reflog` 分支按 action 白名单判断，遗漏了 `show` 省略形式。
+
+**修改内容**
+- `Sources/TinyBuddyCore/GitCommandExecutor.swift`
+  - `isReadOnlyConfigInvocation`：改为逐参数扫描，`--file`/`--blob` 及其后一个参数作为选项值跳过，剩余裸参数计数 ≤ 1 视为只读；写形式 `git config <name> <value>` 和 `git config --file <path> <name> <value>` 仍被拒绝。
+  - `reflog` 分支：改为黑名单判断，仅 `expire`/`delete` 两个真实写子命令被拒绝，其余（`show`、`exists`、ref 简写、无参数）放行。
+- `Tests/TinyBuddyCoreTests/GitCommandExecutorTests.swift`
+  - 新增 `testReadOnlyAllowsConfigFileReadForm`（`config --file` 只读形式必须执行，不抛 `commandNotAllowed`）。
+  - 新增 `testReadOnlyAllowsReflogRefReadShorthand`（`reflog HEAD`/`show HEAD`/`exists HEAD` 均不被拒绝）。
+  - 新增 `testReadOnlyStillBlocksReflogWriteSubcommands`（`reflog expire`/`reflog delete` 仍被拒绝）。
+
+**验证结果**
+- 修复前运行新测试：`testReadOnlyAllowsConfigFileReadForm` 与 `testReadOnlyAllowsReflogRefReadShorthand` 按预期失败，确认缺陷真实存在。
+- 修复后运行 `swift test --filter GitCommandExecutorTests`：30 个测试全部通过。
+- `swift test` 全量：1540 个测试（新增 3 个），0 失败。
+- `git diff --check`：通过。
+- 上一轮遗留的 `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift` 修改未被触碰。
+
+**剩余风险**
+- `config` 带值选项只覆盖了 `--file`/`--blob`；Git 未来若增加新的带值选项需要同步维护黑名单，现有写形式仍被正确拒绝，属于保守方向。
+- 本轮只涉及只读验证逻辑，未改变命令执行、超时或取消路径。
