@@ -3,8 +3,8 @@
 用于记录每一次 Maintenance Loop 的结果。请按 `.agent/loop.md` 的 Record 阶段追加条目，并按 Maintain 阶段维护本文件：
 
 - 本文件始终保留最近约 10 条轮次记录。
-- 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/history-archive.md`（归档文件不存在则创建）；归档条目不丢失、不改写。
-- 观察与决策阶段核对历史时，同时读取本文件与 `.agent/history-archive.md`，避免重复处理已完成的问题。
+- 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
+- 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
 ## 2026-08-09：将 Maintenance Loop 升级为通用长期维护版本
 
@@ -155,3 +155,87 @@
 **剩余风险**
 - `git config` 的带值短形式目前仅 `-f`；若 Git 未来新增其他带值短选项或长选项，仍需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。组合短选项形式（如 `-f<path>`）与 `--file=<path>` 一样不产生额外裸参数，本就不受影响。
 - 本轮只涉及只读验证逻辑，未改变命令执行、超时或取消路径。
+
+## Loop 6：2026-08-09：建立 Evidence-driven Maintenance Loop 基础设施（memory.md + 归档目录）
+
+**Loop 编号**
+- Loop 6（本文件第 6 条记录；既有 5 条记录未编号，本轮起按 Record 契约显式编号）。
+
+**日期**
+- 2026-08-09
+
+**观察结果**
+- 现有 `.agent/` 体系（loop.md/rules.md/history.md）已运行多轮，但对照"Evidence-driven Maintenance Loop"目标存在结构性缺口：
+  - `memory.md` 不存在；loop.md 入口与 Observe 阶段未要求读取长期项目知识。
+  - Decide 优先级为 6 级旧版（Bug/稳定性/性能/错误处理/测试缺口/用户体验），缺"数据正确性风险"与"可维护性问题"。
+  - Record 字段缺"Loop 编号"与"观察结果"。
+  - 归档位置约定为 `.agent/history-archive.md`，与目标要求的 `.agent/archive/` 目录不一致。
+  - rules.md 禁止清单未显式列出"删除用户数据/修改凭证"。
+- 工作区干净（`git status --short` 无输出）；仓库基线（Swift 6.0/macOS 14、SwiftPM + XcodeGen、XCTest 双测试目录、TinyBuddyCore 职责边界、组合快照唯一真相、时间模型）经 `Package.swift`、根级 `AGENTS.md`/`CLAUDE.md` 与 loop.md 项目基线核实。
+- 已核实无其他可复用维护体系：`.agents/`、`.codex/`、`.pi/`、`skills/` 为空或仅承载空 skills 目录；`.opencode/` 仅含 opencode 自身运行时状态。
+
+**选择的问题及证据**
+- 选择"完善 `.agent/` 维护体系基础设施"：本次为纯文档设施建立，不进入代码修改路径。
+- 证据：loop.md 入口文本为"先读取本文件和 `.agent/rules.md`"（无 memory.md）；Decide 优先级列表原文为 6 级；Record 字段列表原文 6 项（无 Loop 编号/观察结果）；loop.md/rules.md/history.md 契约文本中的 8 处 `.agent/history-archive.md` 引用与目标归档目录要求不一致；rules.md 禁止清单原文无"删除用户数据/修改凭证"。
+- 完成标准：四个文件自洽、六阶段硬性检查齐备、归档引用统一指向 `.agent/archive/`、业务文件零改动。
+
+**原因分析**
+- 目标要求长期可维护的 Evidence-driven Loop：Observe 必须先读 rules/memory/history，Decide 需覆盖数据正确性与可维护性两类风险，Record 需要跨轮追踪编号，历史需要受控归档。现有体系缺 memory 层与这些契约字段，属结构性缺口而非单点问题；本次仅增补与引用更新，不改动既有契约与历史记录。
+
+**修改内容**
+- `.agent/memory.md`（新建）：长期项目知识种子（技术栈/进程架构/组合快照唯一真相/时间模型/模块边界/构建测试验证约定/已解决的重要问题/避免重复核查信息/体系自身定位）。
+- `.agent/loop.md`：入口与 Observe 要求先读 `memory.md`；Observe 增加"禁止直接修改代码"与必读三项；Decide 优先级并入目标 7 级版本；Record 补齐 Loop 编号与观察结果字段；归档位置统一为 `.agent/archive/`。
+- `.agent/rules.md`：必须清单增加"执行前读 loop/rules/memory/最近 history"；禁止清单显式化"删除用户数据/修改凭证"；归档引用更新为 `.agent/archive/`。
+- `.agent/history.md`：头部归档契约更新为 `.agent/archive/`；追加本条 Loop 6 记录。
+- `.agent/archive/README.md`（新建）：归档目录用途说明。
+
+**验证结果**
+- 逐文件重读 loop.md/rules.md/memory.md/history.md：六阶段流程与硬性检查齐备（Observe 必读三项 + 禁止直接改代码；Evidence 无证据不修改；Decide 7 级优先级；Execute 最小修改；Verify 用项目现有验证流程；Record 九字段）；入口契约要求的文件（loop.md/rules.md/memory.md/最近 history.md/`.agent/archive/`）全部存在；契约文本（loop.md/rules.md/history.md 头部）中的归档引用已全部统一为 `.agent/archive/`，既有历史记录体内的旧引用为当时事实记载，按契约保持不变。
+- `git status --short`：仅 `.agent/**` 下文件变更；`Sources/`、`Tests/`、`Widget/`、`script/`、`docs/`、`AGENTS.md`、`CLAUDE.md`、`project.yml` 零改动。
+- `git diff --check`：通过。
+- 按 loop.md 既有边界（仅 `.agent/` 基础设施改动不跑 `swift test`），本轮不运行测试。
+
+**剩余风险**
+- 归档目录首次落地，尚未实际触发归档动作（history.md 现为 6 条 < 10 条阈值）；后续轮次按 Maintain 阶段执行时以 `.agent/archive/` 为准。
+- 既有 5 条历史记录未编号，Loop 编号从本轮（Loop 6）起显式记录；跨轮去重时以日期+标题为准。
+- 本轮为纯文档基础设施改动，未运行 `swift test`（与既有"仅 `.agent/` 基础设施改动"验证边界一致）。
+
+## Loop 7：2026-08-09：无修改轮次（未发现可验证的高价值问题）
+
+**Loop 编号**
+- Loop 7。
+
+**日期**
+- 2026-08-09
+
+**观察结果**
+- 工作区：`git status --short` 仅 `.agent/history.md`、`.agent/loop.md`、`.agent/rules.md` 已修改（用户/前一轮 Loop 6 基础设施未提交内容），`?? .agent/archive/`、`?? .agent/memory.md` 未跟踪；`Sources/`、`Tests/`、`Widget/`、`script/`、`docs/` 全部干净，无用户在途修改冲突。
+- 最近提交：`943d743`（config `-f` 短形式修复）、`d206124`（Loop 升级）、`31319b5`（恢复重试 generation 测试）、`2732086`（带值选项修复）、`6a9b488`（刷新提交日与恢复预算）、`13b0953`（焦点查询/升级防护）等，活跃区域集中在 Git 只读验证、恢复重试与焦点/快照防护。
+- 历史记录：`history.md` 现有 6 条（Loop 6 起编号），无未完成事项；各轮"剩余风险"均为"Git 若新增带值选项需同步维护 `valueTakingOptions`"一类的维护提示，非可验证缺陷。
+- `rg "TODO|FIXME|HACK|XXX"`：匹配项全部为 `script/` 下 `mktemp` 模板 `XXXXXX`，无真实标记。
+- 高风险代码：`try!`/`fatalError` 无匹配；唯一 `precondition(!days.isEmpty)` 位于 `FocusHistoryAggregation.swift:541`，为 week 聚合内部契约，调用方保证非空，无外部输入触发路径。
+- 测试基线：`swift test --filter GitCommandExecutorTests` 33 个全绿；全量 `swift test` 1543 个测试 0 失败；`swift build` 无编译警告。
+
+**选择的问题及证据**
+- 无。逐项核对后未发现真实可复现且可验证的高价值问题，各候选淘汰理由：
+  - GitCommandExecutor 只读验证：历史 4 轮已处理同根因问题；当前 `valueTakingOptions = {--file, -f, --blob, --type, --default}` 完备，config 各读 action（`--get/--get-all/--get-regexp/--get-urlmatch/--get-color/--get-colorbool/--list`）与 symbolic-ref/reflog/multi-pack-index/interpret-trailers 分支逐一核对无新缺陷，无新失败、新复现或新 Git 语义证据，按规则不重复处理。
+  - multi-pack-index `--object-dir` 带值选项：`verify` 放行、`write/expire/repack` 拒绝，带值参数不影响判断，无缺陷。
+  - `FocusHistoryAggregation` precondition：无复现条件与外部触发证据，内部契约假设。
+  - 测试缺口：无跳过掩盖失败（XCTSkip 均为环境条件），1543 测试全绿。
+
+**原因分析**
+- 最近多轮持续收敛 Git 只读验证边界，该方向已完备；其余模块在当前观察范围（工作区、提交历史、测试、静态信号）内无真实缺陷证据。按 loop.md 契约，无证据即无修改，不为了产生修改而修改。
+
+**修改内容**
+- 无（仅 `.agent/history.md` 追加本条记录，属契约要求的 Record 阶段）。
+
+**验证结果**
+- `swift test --filter GitCommandExecutorTests`：33 个测试通过（基线）。
+- `swift test` 全量：1543 个测试，0 失败。
+- `swift build`：无警告。
+- `git diff --check`：通过（history.md 追加仅新增行）。
+- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件中本条目为唯一新增，用户/前一轮修改原样保留。
+
+**剩余风险**
+- 本轮为无修改轮次，无新增风险；既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- `31319b5` 新增的恢复重试测试依赖真实主队列计时窗口，极慢 CI 下存在既有时序脆弱性，无新失败证据，留待出现实际失败时处理。
