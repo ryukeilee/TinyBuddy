@@ -250,6 +250,44 @@ final class GitCommandExecutorTests: XCTestCase {
         }
     }
 
+    func testReadOnlyAllowsConfigFileShortFormRead() throws {
+        // `git config -f <path> <name>` is the short form of
+        // `git config --file <path> <name>` and reads a key from an explicit
+        // config file. The `<path>` is the value of the `-f` option, not a
+        // bare config value, so the invocation must be treated as a read.
+        let executor = makeExecutor()
+        let configPath = "/tmp/tinybuddy-config-short-test-\(UUID().uuidString).cfg"
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        do {
+            let result = try executor.execute(
+                arguments: ["config", "-f", configPath, "user.name"]
+            )
+            // Missing file is a normal git error result, not a policy rejection.
+            XCTAssertNotEqual(result.terminationStatus, 0)
+        } catch let error as GitCommandError {
+            guard case .commandNotAllowed = error else {
+                return XCTFail("Unexpected error for config -f read: \(error)")
+            }
+            XCTFail("config -f <path> <name> is a read but was rejected")
+        } catch {
+            XCTFail("Unexpected error for config -f read: \(error)")
+        }
+
+        // The write form `config -f <path> <name> <value>` must still be
+        // rejected even though `-f` consumes one argument.
+        XCTAssertThrowsError(
+            try executor.execute(
+                arguments: ["config", "-f", configPath, "user.name", "value"]
+            )
+        ) { error in
+            guard case GitCommandError.commandNotAllowed(let command) = error else {
+                return XCTFail("Expected commandNotAllowed for config -f write, got \(error)")
+            }
+            XCTAssertEqual(command, "config")
+        }
+    }
+
     func testReadOnlyAllowsReflogRefReadShorthand() throws {
         // `git reflog <ref>` is the read shorthand for `git reflog show <ref>`.
         let executor = makeExecutor()

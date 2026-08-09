@@ -454,12 +454,12 @@ public final class GitCommandExecutor: @unchecked Sendable {
 
         // `git config` and `git config <name>` are reads. Two or more bare
         // values form the write syntax `git config <name> <value>`. Option
-        // values that follow a value-taking option (`--file <path>`,
+        // values that follow a value-taking option (`--file <path>` / `-f`,
         // `--blob <oid>`, `--type <type>`, `--default <value>`) are not
         // config values and must not count toward the bare-value tally.
         var bareValueCount = 0
         var index = 0
-        let valueTakingOptions: Set<String> = ["--file", "--blob", "--type", "--default"]
+        let valueTakingOptions: Set<String> = ["--file", "-f", "--blob", "--type", "--default"]
         while index < arguments.count {
             let argument = arguments[index]
             if argument.hasPrefix("-") {
