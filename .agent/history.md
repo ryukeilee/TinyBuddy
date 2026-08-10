@@ -280,3 +280,48 @@
 - 本轮为无修改轮次，无新增风险。留待后续轮次的候选（均低风险、非缺陷）：脚本 focus_block 的 3 行死代码（`local_hour`/`local_minute`/`block_minute`）可随时作为纯清理移除，行为零变化；`FocusSessionQueryService` 的 `page.last!` 与 `TinyBuddyTimeContext(...)!` 属防御性加固，若未来相关 guard 收紧需先处理。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
 - `31319b5` 新增的恢复重试测试依赖真实主队列计时窗口，极慢 CI 下存在既有时序脆弱性，无新失败证据，留待出现实际失败时处理。
+
+## Loop 9：2026-08-11：无修改轮次（仓库状态与 Loop 8 逐字节一致，未发现新的可验证问题）
+
+**Loop 编号**
+- Loop 9。
+
+**日期**
+- 2026-08-11
+
+**观察结果**
+- 工作区：`git status --short` 无输出、`git diff --check` 通过、无未跟踪文件；`git diff origin/main..HEAD` 为空，HEAD（`041980f`）即 Loop 8 提交，仓库业务代码自 Loop 8 以来**逐字节未变**。
+- 最近提交：`041980f`（Record Loop 8 no-op）自上一轮以来是唯一提交，且只改 `.agent/history.md`；业务文件（Sources/Tests/Widget/script）无任何新改动。
+- 历史去重：`history.md` 现有 8 条记录（Loop 6-8 编号，前 5 条未编号）；Loop 8 已对脚本 dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition` 等候选逐条给出淘汰依据，本轮候选若同根因即构成重复。
+- `rg "TODO|FIXME|HACK|XXX"`：Swift/脚本代码无真实待办标记（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）。
+- 高风险模式：`try!`/`fatalError` 无匹配；候选 force-unwrap 现场逐一复核均为安全：
+  - `ManualFocusMenuBarController.swift:81` `engine!`：`if engine == nil { stop() } else if statusItem == nil { start(with: engine!) }`，else 分支已排除 nil，安全。
+  - `TinyBuddyDataValidator.swift:446/454` `previousVersion!`：前置 `guard previousVersion != nil else { return }`，安全。
+  - `TinyBuddyTransactionLog.swift:352` `data(using: .utf8)!`：String 到 UTF-8 的 Data 编码恒成功，惯用法。
+  - `FocusSessionQueryService.swift:82` `page.last!`：Loop 8 候选 C，防护链已验证恒非空。
+  - `FocusNotificationManager.swift:134` `URL(string:)!`：字面量常量 URL，恒有效。
+- `precondition(!days.isEmpty)`（`FocusHistoryAggregation.swift:541`）：Loop 7/8 已评估为内部契约（`isoWeekDayIdentifiers(through:)` 兜底保证至少 1 天），无新证据。
+- 测试基线：`swift test` 全量 **1543 个测试、0 失败**（后台运行，耗时约 212s）；构建随测试编译成功，无失败。
+
+**选择的问题及证据**
+- 无。逐项核对后未发现任何相对 Loop 8 的新证据，各候选淘汰理由：
+  - **脚本 focus_block 区域内 dead code**（`script/update_git_completion_count.sh:716-719` 的 `local_hour`/`local_minute`/`block_minute` 三行已核实仍计算后未使用）：Loop 8 已确认 `focus_block=$((epoch / 1800))` 为**有意**的 UTC 桶设计（提交 `4ecc4a9`，且有 DST fallback 测试锁定语义），dead code 属零行为纯清理。本轮无新失败、新复现、新指标或新用户反馈，同根因重复，按契约不处理。
+  - force-unwrap 四处与 `precondition`：均无复现证据，先前轮次已复核安全，不构成新一轮依据。
+  - 测试缺口：1543 测试全绿，XCTSkip 均为环境条件（Git/App Group 不可用），无失败掩盖。
+- 完成标准：na（无修改轮次）。
+
+**原因分析**
+- 仓库自 Loop 8 无任何业务代码变化，观察范围（工作区、提交历史、静态信号、全量测试）内不存在"新的失败、新复现、新指标或新用户反馈"；所有候选要么与历史已完成问题同根因（dead code、precondition、page.last!），要么经现场复核恒安全（四处 force-unwrap），缺少触发新一轮的证据门槛。按 loop.md 契约"无证据即无修改，不为了产生修改而修改"。
+
+**修改内容**
+- 无（仅 `.agent/history.md` 追加本条记录，属契约要求的 Record 阶段）。
+
+**验证结果**
+- `swift test` 全量：1543 个测试，0 失败（基线，后台运行记录）。
+- `git diff --check`：通过（history.md 追加仅新增行）。
+- `git status --short` 复查：业务文件零改动，`.agent/` 下历史文件中本条目为唯一新增；HEAD == origin/main，工作区干净。
+
+**剩余风险**
+- 本轮为无修改轮次，无新增风险。留待后续轮次（需新证据）：脚本 focus_block 区域 3 行 dead code 可随时作为纯清理移除（行为零变化）；`FocusSessionQueryService` 的 `page.last!` 与 `TinyBuddyTimeContext(...)!` 属防御性加固，若未来相关 guard 收紧需先处理。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- `31319b5` 新增的恢复重试测试依赖真实主队列计时窗口，极慢 CI 下存在既有时序脆弱性，无新失败证据，留待出现实际失败时处理。
