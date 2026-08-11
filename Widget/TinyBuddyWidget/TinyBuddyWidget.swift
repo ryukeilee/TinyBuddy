@@ -99,8 +99,13 @@ struct TinyBuddyProvider: TimelineProvider {
             basedOn: timeContext
         )
         var entries = [entry]
+        let rolloverEntry: TinyBuddyEntry?
         if let rolloverContext {
-            entries.append(makeRolloverEntry(for: rolloverContext))
+            let built = makeRolloverEntry(for: rolloverContext)
+            rolloverEntry = built
+            entries.append(built)
+        } else {
+            rolloverEntry = nil
         }
         // Shared-data writers explicitly reload this timeline when its semantic
         // content changes. A prebuilt midnight entry prevents yesterday's data
@@ -109,16 +114,33 @@ struct TinyBuddyProvider: TimelineProvider {
         //
         // State-aware self-scheduling complements those push reloads: a live
         // focus session advances its whole-minute elapsed metric on the
-        // Widget's own cadence, and a stale/loading snapshot self-heals toward
-        // the authoritative combined snapshot. Stable states stay on `.never`
-        // so an unchanged Widget never asks for a periodic wakeup.
-        let nextRefreshDate = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+        // Widget's own cadence, a stale/loading snapshot self-heals toward
+        // the authoritative combined snapshot, and a neutral placeholder
+        // entry (no activity fields, no focus-history publication — the
+        // prebuilt rollover and first-launch fallback) re-reads the snapshot
+        // on the recovery cadence so committed data starts rendering even
+        // when the app-side reload is missing or failed. Stable states with
+        // data stay on `.never` so an unchanged Widget never asks for a
+        // periodic wakeup.
+        var nextRefreshDate = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
             state: entry.presentation.state,
             isFocusSessionActive: entry.focusHistoryPublication?.isFocusSessionActive == true,
             isFocusSessionPaused: entry.focusHistoryPublication?.isFocusSessionPaused == true,
+            hasRenderableData: entryHasRenderableData(entry),
             now: timeContext.now,
             dayBoundary: timeContext.nextDayBoundary
         )
+        if nextRefreshDate == nil,
+           let rolloverEntry,
+           let probe = TinyBuddyWidgetTimelinePolicy.nextRolloverProbeDate(
+               dayBoundary: timeContext.nextDayBoundary,
+               hasRenderableData: entryHasRenderableData(rolloverEntry)
+           ) {
+            // The rollover entry is a neutral placeholder for the next day.
+            // Re-probe shortly after the boundary so the new day's committed
+            // snapshot replaces it without depending on an app-side reload.
+            nextRefreshDate = probe
+        }
         if let nextRefreshDate {
             Self.logger.notice(
                 "timeline self-scheduled state=\(entry.presentation.state.rawValue, privacy: .public) refresh=\(nextRefreshDate.timeIntervalSince(timeContext.now), privacy: .public)s"
@@ -131,6 +153,16 @@ struct TinyBuddyProvider: TimelineProvider {
             timeline = Timeline(entries: entries, policy: .never)
         }
         completion(timeline)
+    }
+
+    /// Whether an entry carries data the Widget view can render: a Git
+    /// activity field (even zero) or a focus-history publication. A neutral
+    /// placeholder entry (prebuilt rollover, first-launch fallback, or a
+    /// pet-slice-only snapshot) has neither and must self-schedule a
+    /// re-read instead of relying on app-side push reloads.
+    private func entryHasRenderableData(_ entry: TinyBuddyEntry) -> Bool {
+        entry.presentation.showsActivityMetrics
+            || entry.focusHistoryPublication != nil
     }
 
     private func makeRolloverEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {

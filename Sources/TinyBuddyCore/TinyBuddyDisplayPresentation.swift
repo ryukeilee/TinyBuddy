@@ -195,6 +195,12 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         let completionCount = max(0, activitySnapshot.commitCount ?? 0)
         let hasActivitySnapshot = activitySnapshot.focusBlockCount != nil
             || activitySnapshot.commitCount != nil
+        // The Widget's primary focus metric comes from the authoritative
+        // history publication, not the Git activity slice. Keep a valid
+        // history-only snapshot renderable when the optional Git fields have
+        // not been published yet.
+        let hasFocusHistoryMetric = focusHistoryPublication?
+            .snapshot.recentDays.last?.focusDuration != nil
         let state = Self.resolveState(
             snapshot: snapshot,
             focusCount: focusCount,
@@ -241,7 +247,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         self.completionCountText = Self.metricText(completionCount, locale: locale)
         self.recentProjectName = recentProjectName
         self.dataDateText = Self.dataDateText(snapshot.stats.dayIdentifier)
-        self.showsActivityMetrics = hasActivitySnapshot
+        self.showsActivityMetrics = (hasActivitySnapshot || hasFocusHistoryMetric)
             && state != .stale
             && state != .loading
             && state != .authorizationRequired

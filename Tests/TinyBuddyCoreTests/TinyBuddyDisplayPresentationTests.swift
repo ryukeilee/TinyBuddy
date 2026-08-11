@@ -532,6 +532,47 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
         XCTAssertEqual(value.dataDateText, "数据日期 07-18")
     }
 
+    func testFocusHistoryOnlyDataMakesWidgetMetricsVisible() {
+        let historyOnly = presentation(
+            activity: activity(focus: nil, completion: nil),
+            focusHistoryPublication: makePublication(isPaused: false)
+        )
+        XCTAssertEqual(historyOnly.state, .idle)
+        XCTAssertTrue(historyOnly.showsActivityMetrics)
+
+        for size in [TinyBuddyDisplayLayoutSize.compact, .expanded] {
+            let layout = TinyBuddyDisplayLayout(
+                presentation: historyOnly,
+                environment: TinyBuddyDisplayEnvironment(size: size)
+            )
+            XCTAssertTrue(layout.showsMetrics, size.rawValue)
+            XCTAssertFalse(layout.showsMessage, size.rawValue)
+        }
+
+        let empty = presentation(activity: activity(focus: nil, completion: nil))
+        XCTAssertFalse(empty.showsActivityMetrics)
+        XCTAssertFalse(
+            TinyBuddyDisplayLayout(
+                presentation: empty,
+                environment: TinyBuddyDisplayEnvironment(size: .expanded)
+            ).showsMetrics
+        )
+
+        let stale = presentation(
+            activity: activity(focus: nil, completion: nil),
+            focusHistoryPublication: makePublication(isPaused: false),
+            dataAvailability: .stale
+        )
+        XCTAssertEqual(stale.state, .stale)
+        XCTAssertFalse(stale.showsActivityMetrics)
+        XCTAssertFalse(
+            TinyBuddyDisplayLayout(
+                presentation: stale,
+                environment: TinyBuddyDisplayEnvironment(size: .expanded)
+            ).showsMetrics
+        )
+    }
+
     func testLayoutStrategyCoversAllSizesTextScalesAndSystemPreferences() {
         // Partial with incomplete data (no activity counts) → stays .partial
         let value = presentation(

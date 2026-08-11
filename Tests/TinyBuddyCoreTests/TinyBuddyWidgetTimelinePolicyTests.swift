@@ -136,6 +136,78 @@ final class TinyBuddyWidgetTimelinePolicyTests: XCTestCase {
         XCTAssertNil(date)
     }
 
+    // MARK: - Neutral placeholder entries self-heal
+
+    func testNeutralIdleEntryWithoutDataRetriesOnSlowCadence() {
+        // A neutral placeholder (prebuilt rollover, first launch, or a
+        // pet-slice-only snapshot before activity/history are published)
+        // must re-read the authoritative snapshot instead of staying on
+        // `.never` until an app-side reload arrives.
+        let date = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+            state: .idle,
+            isFocusSessionActive: false,
+            isFocusSessionPaused: false,
+            hasRenderableData: false,
+            now: now,
+            dayBoundary: dayBoundary
+        )
+        XCTAssertEqual(
+            date,
+            now.addingTimeInterval(TinyBuddyWidgetTimelinePolicy.staleRecoveryRefreshInterval)
+        )
+    }
+
+    func testIdleEntryWithDataStaysPushOnly() {
+        // A genuinely empty day still renders its zero metrics and must stay
+        // on `.never`; only the no-data placeholder self-schedules.
+        XCTAssertNil(
+            TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .idle,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                hasRenderableData: true,
+                now: now,
+                dayBoundary: dayBoundary
+            )
+        )
+    }
+
+    func testNeutralPlaceholderHonorsDayBoundary() {
+        let lateNow = dayBoundary.addingTimeInterval(-10)
+        XCTAssertNil(
+            TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .idle,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                hasRenderableData: false,
+                now: lateNow,
+                dayBoundary: dayBoundary
+            )
+        )
+    }
+
+    // MARK: - Post-midnight rollover re-probe
+
+    func testNeutralRolloverSchedulesBoundedPostMidnightProbe() {
+        let probe = TinyBuddyWidgetTimelinePolicy.nextRolloverProbeDate(
+            dayBoundary: dayBoundary,
+            hasRenderableData: false
+        )
+        XCTAssertEqual(
+            probe,
+            dayBoundary.addingTimeInterval(TinyBuddyWidgetTimelinePolicy.staleRecoveryRefreshInterval)
+        )
+    }
+
+    func testRolloverWithDataNeedsNoProbe() {
+        XCTAssertNil(
+            TinyBuddyWidgetTimelinePolicy.nextRolloverProbeDate(
+                dayBoundary: dayBoundary,
+                hasRenderableData: true
+            )
+        )
+    }
+
     // MARK: - Determinism
 
     func testPolicyIsDeterministicForIdenticalInput() {

@@ -42,6 +42,45 @@ final class WidgetFallbackRenderingTests: XCTestCase {
         GitTodayActivitySnapshot(focusBlockCount: focusBlocks, commitCount: commits, recentProjectName: project)
     }
 
+    private func makeHistoryPublication(dayIdentifier: String) -> FocusHistoryPublication {
+        let previousDay = FocusHistoryDay(
+            dayIdentifier: "2026-07-23",
+            state: .noSessions,
+            focusDuration: 0,
+            completedSessionCount: 0,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let currentDay = FocusHistoryDay(
+            dayIdentifier: dayIdentifier,
+            state: .sessions,
+            focusDuration: 3_600,
+            completedSessionCount: 1,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let snapshot = FocusHistorySnapshot(
+            state: .available,
+            sourceHealth: .available,
+            recentDays: [previousDay, currentDay],
+            currentWeek: FocusHistoryWeek(
+                startDayIdentifier: "2026-07-20",
+                endDayIdentifier: dayIdentifier,
+                state: .available,
+                focusDuration: 3_600,
+                completedSessionCount: 1,
+                goalCompletionRate: nil,
+                goalMetDayCount: nil,
+                configuredGoalDayCount: nil,
+                projectDistribution: nil
+            ),
+            currentGoalStreakDays: nil
+        )
+        return FocusHistoryPublication(revision: 1, snapshot: snapshot)
+    }
+
     private func verifyPresentation(
         _ presentation: TinyBuddyDisplayPresentation,
         file: StaticString = #filePath,
@@ -67,6 +106,59 @@ final class WidgetFallbackRenderingTests: XCTestCase {
         XCTAssertEqual(presentation.completionCount, 15, "completionCount should come from activity.commitCount")
         XCTAssertNotNil(presentation.recentProjectName)
         XCTAssertNotNil(presentation.dataDateText)
+    }
+
+    func testSharedSnapshotHistoryAndRefreshKeepWidgetMetricsRenderable() throws {
+        let fallback = makeSnapshot(dayIdentifier: dayIdentifier, focusCount: 0, completionCount: 0)
+        let publication = makeHistoryPublication(dayIdentifier: dayIdentifier)
+
+        let historyUpdate = store.updateFocusHistorySlice(
+            publication,
+            fallbackSnapshot: fallback
+        )
+        XCTAssertTrue(historyUpdate.didPersist)
+
+        let historyRead = store.readValidated(expectedDayIdentifier: dayIdentifier)
+        let historySnapshot = try XCTUnwrap(historyRead.snapshot)
+        XCTAssertNil(historySnapshot.activitySnapshot.focusBlockCount)
+        XCTAssertNil(historySnapshot.activitySnapshot.commitCount)
+        let historyPresentation = TinyBuddyDisplayPresentation(
+            snapshot: historySnapshot.snapshot,
+            activitySnapshot: historySnapshot.activitySnapshot,
+            focusHistoryPublication: historySnapshot.focusHistoryPublication
+        )
+        XCTAssertTrue(historyPresentation.showsActivityMetrics)
+        XCTAssertTrue(
+            TinyBuddyDisplayLayout(
+                presentation: historyPresentation,
+                environment: TinyBuddyDisplayEnvironment(size: .expanded)
+            ).showsMetrics
+        )
+
+        let refreshUpdate = store.updateActivitySlice(
+            makeActivity(focusBlocks: 4, commits: 6, project: "TinyBuddy"),
+            activityRevision: 1,
+            fallbackSnapshot: fallback
+        )
+        XCTAssertTrue(refreshUpdate.didPersist)
+
+        let refreshedRead = store.readValidated(expectedDayIdentifier: dayIdentifier)
+        let refreshedSnapshot = try XCTUnwrap(refreshedRead.snapshot)
+        XCTAssertEqual(refreshedSnapshot.activitySnapshot.focusBlockCount, 4)
+        XCTAssertEqual(refreshedSnapshot.activitySnapshot.commitCount, 6)
+        XCTAssertNotNil(refreshedSnapshot.focusHistoryPublication)
+        let refreshedPresentation = TinyBuddyDisplayPresentation(
+            snapshot: refreshedSnapshot.snapshot,
+            activitySnapshot: refreshedSnapshot.activitySnapshot,
+            focusHistoryPublication: refreshedSnapshot.focusHistoryPublication
+        )
+        XCTAssertTrue(refreshedPresentation.showsActivityMetrics)
+        XCTAssertTrue(
+            TinyBuddyDisplayLayout(
+                presentation: refreshedPresentation,
+                environment: TinyBuddyDisplayEnvironment(size: .expanded)
+            ).showsMetrics
+        )
     }
 
     // MARK: - Stale data

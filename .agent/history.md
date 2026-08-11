@@ -325,3 +325,43 @@
 - 本轮为无修改轮次，无新增风险。留待后续轮次（需新证据）：脚本 focus_block 区域 3 行 dead code 可随时作为纯清理移除（行为零变化）；`FocusSessionQueryService` 的 `page.last!` 与 `TinyBuddyTimeContext(...)!` 属防御性加固，若未来相关 guard 收紧需先处理。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
 - `31319b5` 新增的恢复重试测试依赖真实主队列计时窗口，极慢 CI 下存在既有时序脆弱性，无新失败证据，留待出现实际失败时处理。
+
+## Loop 10：2026-08-11：修复 Widget 历史数据与中性占位的自恢复展示
+
+**Loop 编号**
+- Loop 10。
+
+**日期**
+- 2026-08-11
+
+**观察结果**
+- 起始工作区在 `main`，与 `origin/main` 同步，但存在 6 个未提交的 Widget/共享展示改动及其回归测试；本轮未覆盖或回滚这些在途修改。
+- 对照 Loop 9：此前全量基线为 1543 个测试通过，业务文件没有变化；本轮新增改动集中在 `TinyBuddyDisplayPresentation`、`TinyBuddyWidgetTimelinePolicy`、Widget provider 及对应测试。
+- 旧实现仅以 Git activity 字段决定 `showsActivityMetrics`，且稳定 `.idle` 状态始终不自调度；这会使仅有 `FocusHistoryPublication` 的合法快照隐藏 Widget 指标，也会使无数据的首次/跨日占位在缺失 App reload 时永久停留。
+- `git diff --check` 通过；未发现 TODO/FIXME 等新的可验证线索。
+
+**选择的问题及证据**
+- 选择 Widget 在合法历史-only 快照和无数据占位下无法可靠展示/自恢复这一单一跨层问题。
+- 复现条件：activity slice 的两个可选计数均为 `nil`、但 focus-history publication 存在；或 timeline entry 为 neutral `.idle` 且无可渲染数据，App-side reload 缺失。
+- 完成标准：历史-only 快照显示 metrics；有数据的空日保持 push-only；无数据 idle 按慢速 cadence 重读；跨日 neutral rollover 在边界后进行一次有界 probe；自调度不跨越本地日边界。
+
+**原因分析**
+- Widget 的主要 focus 指标来自权威 focus-history publication，而旧的可见性门槛只检查 Git activity 字段；同时 timeline 的 `.never` fallback 没有覆盖“占位尚未具备数据、但后续提交会出现”的可恢复状态。
+
+**修改内容**
+- `Sources/TinyBuddyCore/TinyBuddyDisplayPresentation.swift`：将有效的 focus-history metric 纳入 Widget metrics 可见性判定，同时保留 stale/loading/授权异常的隐藏规则。
+- `Sources/TinyBuddyCore/TinyBuddyWidgetTimelinePolicy.swift`：为无可渲染数据的 neutral idle 增加慢速重试；增加有界的跨日 rollover probe。
+- `Widget/TinyBuddyWidget/TinyBuddyWidget.swift`：识别占位 entry，接入 idle 自恢复与跨日 probe。
+- `Tests/TinyBuddyCoreTests/TinyBuddyDisplayPresentationTests.swift`、`Tests/TinyBuddyCoreTests/TinyBuddyWidgetTimelinePolicyTests.swift`、`Tests/TinyBuddyAppTests/WidgetFallbackRenderingTests.swift`：补充 history-only、占位自恢复、边界和共享快照回归覆盖。
+
+**验证结果**
+- `swift test --filter TinyBuddyWidgetTimelinePolicyTests`：15 个测试通过。
+- `swift test --filter TinyBuddyDisplayPresentationTests`：27 个测试通过。
+- `swift test --filter WidgetFallbackRenderingTests`：11 个测试通过。
+- `swift test`：1550 个测试通过，0 失败。
+- `git diff --check`：通过。
+
+**剩余风险**
+- 本轮未执行 App 安装/启动验证；该验证安排在本轮 Record 后按用户明确授权执行。
+- WidgetKit 实际系统调度仍依赖本机运行环境；源码级测试已覆盖策略与 provider wiring，安装后的运行验证仍需确认。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
