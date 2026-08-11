@@ -360,8 +360,9 @@
 - `swift test --filter WidgetFallbackRenderingTests`：11 个测试通过。
 - `swift test`：1550 个测试通过，0 失败。
 - `git diff --check`：通过。
+- `./script/tb-install.sh`：Xcode Debug 构建成功，Apple Development 签名验证通过，安装并启动成功。
+- 独立 `codesign --verify --deep --strict`：已安装 App 的嵌套签名验证通过；运行中的 `TinyBuddy` executable 路径来自已安装 bundle，且安装产物与构建产物一致。
 
 **剩余风险**
-- 本轮未执行 App 安装/启动验证；该验证安排在本轮 Record 后按用户明确授权执行。
-- WidgetKit 实际系统调度仍依赖本机运行环境；源码级测试已覆盖策略与 provider wiring，安装后的运行验证仍需确认。
+- 未单独实测 WidgetKit 的系统调度；本轮源码测试覆盖 timeline policy/provider wiring，已完成本机签名安装与 App 启动验证。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
