@@ -3,6 +3,94 @@ import Foundation
 import XCTest
 
 final class GitActivityRealRepositoryFixtureTests: XCTestCase {
+    func testPublishesDevelopmentInterruptionSceneWithoutRepositoryPath() throws {
+        let fixture = try RealGitFixture()
+        let repository = try fixture.makeRepository(named: "ResumeProject")
+        try fixture.git(
+            in: repository,
+            ["checkout", "-b", "feature/resume"],
+            environment: fixture.gitDateEnvironment("2024-01-15T09:00:00Z")
+        )
+        try fixture.commit(
+            in: repository,
+            file: "tracked.txt",
+            contents: "committed\n",
+            message: "Build interruption resume",
+            date: "2024-01-15T09:30:00Z"
+        )
+        try "changed\n".write(
+            to: repository.appendingPathComponent("tracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "staged\n".write(
+            to: repository.appendingPathComponent("staged.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try fixture.git(in: repository, ["add", "staged.txt"])
+        try "new\n".write(
+            to: repository.appendingPathComponent("untracked.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let result = try fixture.runScript(
+            scanRoots: [fixture.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_EPOCH": "1705316400"]
+        )
+        let plist = try fixture.readPreferencesPlist()
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertNotNil(
+            plist[DevelopmentInterruptionSnapshotStore.Key.snapshot],
+            "Missing interruption snapshot; keys: \(plist.keys.sorted()); stderr: \(result.standardError)"
+        )
+        let encoded = try XCTUnwrap(
+            plist[DevelopmentInterruptionSnapshotStore.Key.snapshot] as? String
+        )
+        let snapshot = try XCTUnwrap(DevelopmentInterruptionSnapshotStore.decode(encoded))
+
+        XCTAssertEqual(snapshot.repositoryName, "ResumeProject")
+        XCTAssertEqual(snapshot.branchName, "feature/resume")
+        XCTAssertEqual(snapshot.workingTree.stagedCount, 1)
+        XCTAssertEqual(snapshot.workingTree.modifiedCount, 1)
+        XCTAssertEqual(snapshot.workingTree.untrackedCount, 1)
+        XCTAssertEqual(snapshot.workingTree.conflictedCount, 0)
+        XCTAssertEqual(snapshot.recentCommit?.subject, "Build interruption resume")
+        XCTAssertFalse(encoded.contains(repository.path))
+
+        let unchangedResult = try fixture.runScript(
+            scanRoots: [fixture.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_EPOCH": "1705320000"]
+        )
+        let unchangedEncoded = try XCTUnwrap(
+            (try fixture.readPreferencesPlist())[DevelopmentInterruptionSnapshotStore.Key.snapshot]
+                as? String
+        )
+        let unchanged = try XCTUnwrap(
+            DevelopmentInterruptionSnapshotStore.decode(unchangedEncoded)
+        )
+        XCTAssertEqual(unchangedResult.exitCode, 0, unchangedResult.standardError)
+        XCTAssertEqual(unchanged.lastActivityAt, snapshot.lastActivityAt)
+
+        try fixture.git(in: repository, ["add", "untracked.txt"])
+        let changedResult = try fixture.runScript(
+            scanRoots: [fixture.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_EPOCH": "1705323600"]
+        )
+        let changedEncoded = try XCTUnwrap(
+            (try fixture.readPreferencesPlist())[DevelopmentInterruptionSnapshotStore.Key.snapshot]
+                as? String
+        )
+        let changed = try XCTUnwrap(
+            DevelopmentInterruptionSnapshotStore.decode(changedEncoded)
+        )
+        XCTAssertEqual(changedResult.exitCode, 0, changedResult.standardError)
+        XCTAssertEqual(changed.workingTree.stagedCount, 2)
+        XCTAssertEqual(changed.workingTree.untrackedCount, 0)
+        XCTAssertEqual(changed.lastActivityAt, Date(timeIntervalSince1970: 1_705_323_600))
+    }
+
     func testProjectDiscoveryFingerprintSurvivesRepositoryMoveAndRename() throws {
         let fixture = try RealGitFixture()
         let original = try fixture.makeRepository(named: "IdentityBefore")
@@ -75,7 +163,8 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
         try fixture.fileManager.createSymbolicLink(at: symlinkRoot, withDestinationURL: fixture.scanRootURL)
 
         let first = try fixture.runScript(
-            scanRoots: [fixture.scanRootURL, symlinkRoot, fixture.scanRootURL]
+            scanRoots: [fixture.scanRootURL, symlinkRoot, fixture.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_EPOCH": "1705316400"]
         )
         XCTAssertEqual(first.exitCode, 0, first.standardError)
         let firstPlist = try fixture.readPreferencesPlist()
@@ -92,8 +181,19 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
             firstPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String,
             "ProjectAlpha"
         )
+        let firstInterruptionPayload = try XCTUnwrap(
+            firstPlist[DevelopmentInterruptionSnapshotStore.Key.snapshot] as? String
+        )
+        let firstInterruption = try XCTUnwrap(
+            DevelopmentInterruptionSnapshotStore.decode(firstInterruptionPayload)
+        )
+        XCTAssertEqual(firstInterruption.branchName, "review")
+        XCTAssertEqual(firstInterruption.recentCommit?.subject, "review work")
 
-        let repeated = try fixture.runScript(scanRoots: [symlinkRoot, fixture.scanRootURL])
+        let repeated = try fixture.runScript(
+            scanRoots: [symlinkRoot, fixture.scanRootURL],
+            extraEnvironment: ["TINYBUDDY_REFRESH_EPOCH": "1705320000"]
+        )
         let repeatedPlist = try fixture.readPreferencesPlist()
         let repeatedMetrics = try XCTUnwrap(fixture.metrics(from: repeated.standardOutput))
 
@@ -105,6 +205,26 @@ final class GitActivityRealRepositoryFixtureTests: XCTestCase {
             repeatedPlist[GitTodayActivityTrustedSnapshotStore.Key.snapshot] as? String,
             firstSnapshot
         )
+
+        let nextDay = try fixture.runScript(
+            scanRoots: [fixture.scanRootURL],
+            extraEnvironment: [
+                "TINYBUDDY_TODAY": "2024-01-16",
+                "TINYBUDDY_REFRESH_EPOCH": "1705402800"
+            ]
+        )
+        XCTAssertEqual(nextDay.exitCode, 0, nextDay.standardError)
+        let nextDayPayload = try XCTUnwrap(
+            (try fixture.readPreferencesPlist())[
+                DevelopmentInterruptionSnapshotStore.Key.snapshot
+            ] as? String
+        )
+        let nextDayInterruption = try XCTUnwrap(
+            DevelopmentInterruptionSnapshotStore.decode(nextDayPayload)
+        )
+        XCTAssertEqual(nextDayInterruption.branchName, "review")
+        XCTAssertEqual(nextDayInterruption.recentCommit?.subject, "review work")
+        XCTAssertEqual(nextDayInterruption.lastActivityAt, firstInterruption.lastActivityAt)
     }
 
     private func discoveryRows(

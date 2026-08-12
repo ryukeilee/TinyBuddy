@@ -138,6 +138,7 @@ struct PetView: View {
                 }
                 displayStatePanel
                     .focusSection()
+                developmentResumePanel
                 statusButtons
                     .focusSection()
                 manualFocusControlPanel
@@ -386,6 +387,70 @@ struct PetView: View {
         .overlay(panelBorder)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .animation(semanticAnimation, value: presentation.transitionIdentity)
+    }
+
+    @ViewBuilder
+    private var developmentResumePanel: some View {
+        if let snapshot = viewModel.developmentInterruptionSnapshot {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                let interruption = DevelopmentInterruptionPresentation(
+                    snapshot: snapshot,
+                    now: context.date
+                )
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.uturn.backward.circle.fill")
+                            .foregroundStyle(statusAccent)
+                        Text("继续上次开发")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(primaryText)
+                        Spacer(minLength: 4)
+                        Text(interruption.awayDurationText)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(secondaryText)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 5) {
+                        Text(interruption.repositoryName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(primaryText)
+                            .lineLimit(1)
+                        Text("·")
+                            .foregroundStyle(secondaryText)
+                        Label(interruption.branchName, systemImage: "arrow.triangle.branch")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    Text(interruption.workingTreeText)
+                        .font(.caption2)
+                        .foregroundStyle(
+                            snapshot.workingTree.isClean ? secondaryText : statusAccent
+                        )
+                        .lineLimit(2)
+
+                    if let recentCommitText = interruption.recentCommitText {
+                        Label(recentCommitText, systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                            .font(.caption2)
+                            .foregroundStyle(secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(panelFill)
+                .overlay(panelBorder)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    "继续上次开发，\(interruption.repositoryName)，分支 \(interruption.branchName)，\(interruption.workingTreeText)，\(interruption.recentCommitText ?? "暂无提交")，\(interruption.awayDurationText)"
+                )
+            }
+        }
     }
 
     @ViewBuilder

@@ -18,6 +18,7 @@ RECENT_PROJECT_NAME_KEY="tinybuddy.gitTodayRecentProject.projectName"
 RECENT_PROJECT_FINGERPRINT_KEY="tinybuddy.gitTodayRecentProject.repositoryFingerprint.v1"
 PROJECT_DISCOVERY_KEY="tinybuddy.gitProjects.discovery.v1"
 TRUSTED_SNAPSHOT_KEY="tinybuddy.gitTodayActivity.trustedSnapshot"
+DEVELOPMENT_INTERRUPTION_KEY="tinybuddy.developmentInterruption.snapshot.v1"
 SCAN_ROOTS="${TINYBUDDY_GIT_SCAN_ROOTS:-${TINYBUDDY_GIT_SCAN_ROOT:-}}"
 EXCLUDED_PATHS="${TINYBUDDY_GIT_EXCLUDED_PATHS:-}"
 INVALIDATED_ROOTS="${TINYBUDDY_GIT_INVALIDATED_ROOTS:-}"
@@ -99,6 +100,8 @@ total_count=0
 latest_activity_timestamp=""
 recent_project_name=""
 recent_project_fingerprint=""
+recent_repository_identity=""
+recent_reflog_path=""
 readable_reflog_repo_count=0
 successful_reflog_repo_count=0
 failed_reflog_repo_count=0
@@ -1015,7 +1018,7 @@ normalize_activity_events() {
     END {
       for (event_index = 1; event_index <= count; event_index++) {
         if (live[event_index]) {
-          printf "%s\t%s\t%d\t%s\t%s\t%s\n", event_identity[event_index], event_display[event_index], event_epoch[event_index], event_oid[event_index], event_kind[event_index], event_block[event_index]
+          printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", event_identity[event_index], event_display[event_index], event_epoch[event_index], event_oid[event_index], event_kind[event_index], event_block[event_index], event_source[event_index]
         }
       }
     }
@@ -1026,6 +1029,9 @@ reset_activity_snapshot() {
   total_count=0
   latest_activity_timestamp=""
   recent_project_name=""
+  recent_project_fingerprint=""
+  recent_repository_identity=""
+  recent_reflog_path=""
   readable_reflog_repo_count=0
   successful_reflog_repo_count=0
   failed_reflog_repo_count=0
@@ -1692,8 +1698,7 @@ process_repository_list() {
   local event_object_id
   local event_kind
   local event_focus_block
-  local recent_repository_identity=""
-
+  local event_reflog_path
   reset_activity_snapshot
   load_cached_repository_fingerprints
   : > "$validated_repo_list_file"
@@ -1973,7 +1978,7 @@ process_repository_list() {
   done < "$unique_repository_records_file"
 
   normalize_activity_events || return 1
-  while IFS=$'\t' read -r repository_identity display_name event_epoch event_object_id event_kind event_focus_block; do
+  while IFS=$'\t' read -r repository_identity display_name event_epoch event_object_id event_kind event_focus_block event_reflog_path; do
     total_count=$((total_count + 1))
     printf '%s\n' "$event_focus_block" >> "$focus_block_list_file"
 
@@ -1984,6 +1989,7 @@ process_repository_list() {
        { [ "$event_epoch" -eq "$latest_activity_timestamp" ] && { [ -z "$recent_repository_identity" ] || [[ "$repository_identity" < "$recent_repository_identity" ]]; }; }; then
       latest_activity_timestamp="$event_epoch"
       recent_repository_identity="$repository_identity"
+      recent_reflog_path="$event_reflog_path"
       recent_project_name="$display_name"
       recent_project_fingerprint="$(awk -F '\t' -v identity="$repository_identity" '$2 == identity { print $1; exit }' "$project_discovery_records_file")"
     fi
@@ -2077,6 +2083,187 @@ project_discovery_payload() {
       encoded_name="$(printf '%s' "$display_name" | /usr/bin/base64 | tr -d '\n')"
       printf '%s\t%s\t%s\n' "$encoded_fingerprint" "$encoded_alias" "$encoded_name"
     done
+}
+
+development_interruption_payload() {
+  local previous_payload=""
+  local previous_encoded_fingerprint=""
+  local previous_encoded_branch=""
+  local previous_signature=""
+  local previous_activity_epoch=""
+  local previous_captured_epoch=""
+  local selected_repository_identity="$recent_repository_identity"
+  local selected_reflog_path="$recent_reflog_path"
+  local selected_repository_fingerprint="$recent_project_fingerprint"
+  local selected_repository_name="$recent_project_name"
+  local selected_repository_root=""
+  local selected_git_dir=""
+  local fingerprint=""
+  local repository_identity=""
+  local display_name=""
+  local encoded_fingerprint=""
+  local encoded_name=""
+  local branch_name=""
+  local encoded_branch=""
+  local head_value=""
+  local candidate_head_value=""
+  local candidate_branch_name=""
+  local candidate_encoded_branch=""
+  local candidate_identity=""
+  local candidate_repository_root=""
+  local candidate_git_dir=""
+  local candidate_reflog_path=""
+  local candidate_reflog_mtime=""
+  local status_file=""
+  local staged_count=0
+  local modified_count=0
+  local untracked_count=0
+  local conflicted_count=0
+  local commit_hash=""
+  local commit_subject=""
+  local commit_epoch=0
+  local commit_record=""
+  local encoded_commit_hash=""
+  local encoded_commit_subject=""
+  local current_signature=""
+  local activity_epoch=""
+  local captured_epoch="$REFRESH_EPOCH"
+
+  previous_payload="$(read_plist_value "$DEVELOPMENT_INTERRUPTION_KEY")"
+  if [ "$previous_payload" != "$MISSING_PLIST_VALUE" ]; then
+    previous_encoded_fingerprint="$(printf '%s\n' "$previous_payload" | awk -F '\t' 'NR == 1 && $1 == "v1" { print $2 }')"
+    previous_encoded_branch="$(printf '%s\n' "$previous_payload" | awk -F '\t' 'NR == 1 && $1 == "v1" && NF == 13 { print $4 }')"
+    previous_signature="$(printf '%s\n' "$previous_payload" | awk -F '\t' 'NR == 1 && $1 == "v1" && NF == 13 { OFS="\t"; print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }')"
+    previous_activity_epoch="$(printf '%s\n' "$previous_payload" | awk -F '\t' 'NR == 1 && $1 == "v1" && NF == 13 { print $12 }')"
+    previous_captured_epoch="$(printf '%s\n' "$previous_payload" | awk -F '\t' 'NR == 1 && $1 == "v1" && NF == 13 { print $13 }')"
+  fi
+
+  # A day with no new reflog event still refreshes the last valid repository's
+  # branch and working-tree summary. This preserves the interruption scene
+  # across midnight without inventing a new activity timestamp.
+  if [ -z "$selected_repository_identity" ] && [ -n "$previous_encoded_fingerprint" ]; then
+    while IFS=$'\t' read -r fingerprint repository_identity display_name; do
+      encoded_fingerprint="$(printf '%s' "$fingerprint" | /usr/bin/base64 | tr -d '\n')"
+      if [ "$encoded_fingerprint" = "$previous_encoded_fingerprint" ]; then
+        selected_repository_identity="$repository_identity"
+        selected_repository_fingerprint="$fingerprint"
+        selected_repository_name="$display_name"
+        break
+      fi
+    done < "$project_discovery_records_file"
+  fi
+
+  [ -n "$selected_repository_identity" ] || return 1
+  [ -n "$selected_repository_fingerprint" ] || return 1
+  if [ -n "$selected_reflog_path" ]; then
+    selected_repository_root="$(awk -F '\t' -v identity="$selected_repository_identity" -v reflog="$selected_reflog_path" '$1 == identity && $5 == reflog { print $3; exit }' "$unique_repository_records_file")"
+    selected_git_dir="$(awk -F '\t' -v identity="$selected_repository_identity" -v reflog="$selected_reflog_path" '$1 == identity && $5 == reflog { print $4; exit }' "$unique_repository_records_file")"
+  elif [ -n "$previous_encoded_branch" ]; then
+    while IFS=$'\t' read -r candidate_identity _ candidate_repository_root candidate_git_dir candidate_reflog_path candidate_reflog_mtime; do
+      [ "$candidate_identity" = "$selected_repository_identity" ] || continue
+      candidate_head_value="$(sed -n '1p' "$candidate_git_dir/HEAD" 2>/dev/null)" || continue
+      case "$candidate_head_value" in
+        "ref: refs/heads/"*) candidate_branch_name="${candidate_head_value#ref: refs/heads/}" ;;
+        "ref: "*) candidate_branch_name="${candidate_head_value#ref: }" ;;
+        [0-9a-fA-F]*) candidate_branch_name="detached@${candidate_head_value:0:12}" ;;
+        *) continue ;;
+      esac
+      candidate_encoded_branch="$(printf '%s' "$candidate_branch_name" | /usr/bin/base64 | tr -d '\n')"
+      if [ "$candidate_encoded_branch" = "$previous_encoded_branch" ]; then
+        selected_repository_root="$candidate_repository_root"
+        selected_git_dir="$candidate_git_dir"
+        break
+      fi
+    done < "$unique_repository_records_file"
+  fi
+  if [ -z "$selected_repository_root" ] || [ -z "$selected_git_dir" ]; then
+    selected_repository_root="$(awk -F '\t' -v identity="$selected_repository_identity" '$1 == identity { print $3; exit }' "$unique_repository_records_file")"
+    selected_git_dir="$(awk -F '\t' -v identity="$selected_repository_identity" '$1 == identity { print $4; exit }' "$unique_repository_records_file")"
+  fi
+  [ -n "$selected_repository_root" ] || return 1
+  [ -n "$selected_git_dir" ] || return 1
+
+  head_value="$(sed -n '1p' "$selected_git_dir/HEAD" 2>/dev/null)" || return 1
+  case "$head_value" in
+    "ref: refs/heads/"*) branch_name="${head_value#ref: refs/heads/}" ;;
+    "ref: "*) branch_name="${head_value#ref: }" ;;
+    [0-9a-fA-F]*) branch_name="detached@${head_value:0:12}" ;;
+    *) return 1 ;;
+  esac
+  [ -n "$branch_name" ] || return 1
+
+  status_file="$(mktemp)"
+  if ! run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+      "$GIT_BIN" -C "$selected_repository_root" status --porcelain=v1 --untracked-files=all \
+      > "$status_file"; then
+    rm -f "$status_file"
+    return 1
+  fi
+  read -r staged_count modified_count untracked_count conflicted_count < <(
+    awk '
+      BEGIN { staged = 0; modified = 0; untracked = 0; conflicted = 0 }
+      {
+        code = substr($0, 1, 2)
+        if (code == "??") { untracked++; next }
+        if (code == "DD" || code == "AU" || code == "UD" || code == "UA" ||
+            code == "DU" || code == "AA" || code == "UU") { conflicted++; next }
+        if (substr(code, 1, 1) != " ") staged++
+        if (substr(code, 2, 1) != " ") modified++
+      }
+      END { print staged, modified, untracked, conflicted }
+    ' "$status_file"
+  )
+  rm -f "$status_file"
+
+  if commit_record="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+      "$GIT_BIN" -C "$selected_repository_root" log -1 --format='%h%n%s%n%ct')"; then
+    commit_hash="$(printf '%s\n' "$commit_record" | sed -n '1p')"
+    commit_subject="$(printf '%s\n' "$commit_record" | sed -n '2p')"
+    commit_epoch="$(printf '%s\n' "$commit_record" | sed -n '3p')"
+    case "$commit_epoch" in
+      ""|*[!0-9]*) return 1 ;;
+    esac
+  else
+    commit_hash=""
+    commit_subject=""
+    commit_epoch=0
+  fi
+
+  encoded_fingerprint="$(printf '%s' "$selected_repository_fingerprint" | /usr/bin/base64 | tr -d '\n')"
+  encoded_name="$(printf '%s' "$selected_repository_name" | /usr/bin/base64 | tr -d '\n')"
+  encoded_branch="$(printf '%s' "$branch_name" | /usr/bin/base64 | tr -d '\n')"
+  encoded_commit_hash="$(printf '%s' "$commit_hash" | /usr/bin/base64 | tr -d '\n')"
+  encoded_commit_subject="$(printf '%s' "$commit_subject" | /usr/bin/base64 | tr -d '\n')"
+  current_signature="$(printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$encoded_fingerprint" "$encoded_name" "$encoded_branch" \
+    "$staged_count" "$modified_count" "$untracked_count" "$conflicted_count" \
+    "$encoded_commit_hash" "$encoded_commit_subject" "$commit_epoch")"
+
+  case "$previous_activity_epoch" in
+    ""|*[!0-9]*) previous_activity_epoch="" ;;
+  esac
+  case "$previous_captured_epoch" in
+    ""|*[!0-9]*) previous_captured_epoch="" ;;
+  esac
+  if [ "$current_signature" = "$previous_signature" ] &&
+     [ -n "$previous_activity_epoch" ] &&
+     [ "$previous_activity_epoch" -le "$REFRESH_EPOCH" ] &&
+     [ -n "$previous_captured_epoch" ] &&
+    [ "$previous_captured_epoch" -le "$REFRESH_EPOCH" ]; then
+    activity_epoch="$previous_activity_epoch"
+    captured_epoch="$previous_captured_epoch"
+  elif [ "$previous_encoded_fingerprint" = "$encoded_fingerprint" ] &&
+       [ -n "$previous_encoded_fingerprint" ]; then
+    # A branch, index, working-tree, or HEAD summary changed since the prior
+    # valid capture. Treat this refresh as the latest development activity.
+    activity_epoch="$REFRESH_EPOCH"
+  elif [ -n "$latest_activity_timestamp" ]; then
+    activity_epoch="$latest_activity_timestamp"
+  else
+    activity_epoch="$REFRESH_EPOCH"
+  fi
+
+  printf '%s\t%s\t%s\n' "$current_signature" "$activity_epoch" "$captured_epoch"
 }
 
 acquire_snapshot_write_lock() {
@@ -2520,6 +2707,10 @@ if [ "$invalid_repository_count" -gt 0 ] && [ "$successful_reflog_repo_count" -e
 fi
 
 focus_block_count="$(sort -u "$focus_block_list_file" | awk 'END { print NR + 0 }')"
+development_interruption_snapshot=""
+if ! development_interruption_snapshot="$(development_interruption_payload)"; then
+  development_interruption_snapshot=""
+fi
 
 if [ ! -s "$repo_list_file" ]; then
   emit_runtime_diagnostics_once
@@ -2574,6 +2765,9 @@ if [ "$trusted_snapshot_stale" -eq 0 ]; then
   write_plist_string_if_changed "$RECENT_PROJECT_NAME_KEY" "$recent_project_name"
   write_plist_string_if_changed "$RECENT_PROJECT_FINGERPRINT_KEY" "$recent_project_fingerprint"
   write_plist_string_if_changed "$PROJECT_DISCOVERY_KEY" "$(project_discovery_payload)"
+  if [ -n "$development_interruption_snapshot" ]; then
+    write_plist_string_if_changed "$DEVELOPMENT_INTERRUPTION_KEY" "$development_interruption_snapshot"
+  fi
 fi
 # The repository list cache is structural: it may be written even when some
 # repositories are individually invalid (for example a freshly initialized

@@ -7,6 +7,7 @@ import XCTest
 final class PetViewRenderingTests: XCTestCase {
     func testHUDRendersAtStableSizeAcrossRepresentativeAccessibilityEnvironments() throws {
         let viewModel = makeViewModel()
+        XCTAssertEqual(viewModel.developmentInterruptionSnapshot?.repositoryName, "TinyBuddy")
         let cases: [(name: String, colorScheme: ColorScheme, dynamicTypeSize: DynamicTypeSize)] = [
             ("dark-standard", .dark, .large),
             ("light-accessibility", .light, .accessibility1),
@@ -105,6 +106,19 @@ final class PetViewRenderingTests: XCTestCase {
             sharedDefaults: defaults
         )
         _ = onboardingStore.markCompleted()
+        let encode: (String) -> String = { Data($0.utf8).base64EncodedString() }
+        defaults.set([
+            "v1",
+            encode("fingerprint"),
+            encode("TinyBuddy"),
+            encode("feature/resume"),
+            "1", "2", "1", "0",
+            encode("abc1234"),
+            encode("Add interruption recovery"),
+            String(Int(now.timeIntervalSince1970) - 7_200),
+            String(Int(now.timeIntervalSince1970) - 3_600),
+            String(Int(now.timeIntervalSince1970))
+        ].joined(separator: "\t"), forKey: DevelopmentInterruptionSnapshotStore.Key.snapshot)
 
         return PetViewModel(
             onboardingStore: onboardingStore,
@@ -112,6 +126,9 @@ final class PetViewRenderingTests: XCTestCase {
             activityStore: activityStore,
             combinedSnapshotStore: combinedSnapshotStore,
             refreshStatusStore: refreshStatusStore,
+            developmentInterruptionStore: DevelopmentInterruptionSnapshotStore(
+                userDefaults: defaults
+            ),
             notificationCenter: NotificationCenter(),
             timeEnvironment: timeEnvironment,
             widgetReloader: {}

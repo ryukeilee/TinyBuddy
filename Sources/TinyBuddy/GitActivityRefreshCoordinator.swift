@@ -312,6 +312,10 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
     private let gitCommandExecutor: GitCommandExecutor?
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let monotonicTimeProvider: () -> TimeInterval
+    /// Runs `work` after `delay` seconds. Production uses the main queue; tests
+    /// inject a deterministic scheduler so queued directory-recovery retries
+    /// fire on virtual time instead of real time.
+    private let scheduleAfterDelay: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
     private let continuityRecordProvider: () -> TinyBuddyTimeContinuityRecord
     private let powerStateProvider: PowerStateProvider
     private let timeScopePublisher: TimeScopePublisher
@@ -396,6 +400,9 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         gitScanRootStore: GitScanRootAuthorizationStore = GitScanRootAuthorizationStore(),
         refreshInterval: TimeInterval = 5 * 60,
         minimumRefreshSpacing: TimeInterval = 60,
+        scheduleAfterDelay: @escaping @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void = { delay, work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        },
         widgetReloader: @escaping () throws -> Void = {
             TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         },
@@ -483,6 +490,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         self.exclusionRulesProvider = exclusionRulesProvider
         self.timeEnvironment = resolvedTimeEnvironment
         self.monotonicTimeProvider = monotonicTimeProvider
+        self.scheduleAfterDelay = scheduleAfterDelay
         self.powerStateProvider = powerStateProvider
         self.timeScopePublisher = timeScopePublisher
             ?? GitActivityRefreshCoordinator.publishTimeScopeToken
@@ -1807,7 +1815,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         directoryRecoveryRemainingAttempts -= 1
         let scheduledRemaining = directoryRecoveryRemainingAttempts
         let recoveryGeneration = directoryRecoveryGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + minimumRefreshSpacing) { [weak self] in
+        scheduleAfterDelay(minimumRefreshSpacing) { [weak self] in
             guard let self else {
                 return
             }

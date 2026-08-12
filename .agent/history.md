@@ -6,38 +6,6 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## 2026-08-09：将 Maintenance Loop 升级为通用长期维护版本
-
-**发现的问题及证据**
-- 现有 `.agent/` 维护体系已成功执行多轮闭环（本轮前 3 条记录），机制验证有效；但作为长期重复执行入口存在三个结构性缺口：
-  - `history.md` 无归档机制，只增不减，长期运行必然无限膨胀。
-  - Decide 阶段未要求与已完成问题核对，存在重复处理同根因问题的风险。
-  - 无修改轮次的结束路径未作为长期运行契约显式化。
-- 证据：`loop.md` 原流程为 `Observe → Decide → Execute → Verify → Record` 五阶段；`history.md` 仅追加、无归档说明；rules 中无"同模块需新证据/不重复已完成问题"约束。
-
-**原因分析**
-- 原设计面向单轮执行而非长期反复执行，缺少历史增长控制与问题去重两类长期运行必需机制；本次仅升级 Agent 维护基础设施，不修改任何业务代码。
-
-**修改内容**
-- `.agent/loop.md`
-  - 流程升级为 `Observe → Evidence → Decide → Execute → Verify → Record → Maintain`：新增 Evidence 阶段（证据先于决策、区分事实与猜测、无证据淘汰），新增 Maintain 阶段（历史保留最近约 10 条、旧条目原样归档到 `.agent/history-archive.md`、归档不丢不改、去重查询同时读两个文件）。
-  - Decide 阶段增加问题去重：同模块继续优化必须引用新证据；与已完成问题同根因视为重复不处理。
-  - 入口与目标明确"无修改轮次"：没有高价值可验证问题即以无修改轮次结束，不为了产生修改而修改。
-- `.agent/rules.md`
-  - "必须"中新增：同模块优化需新证据、不得重复已完成问题；无高价值问题允许无修改结束；维护历史保留最近约 10 条并原样归档、不删不改不截断。
-- `.agent/history.md`
-  - 头部更新为 Maintain 阶段契约（保留 10 条、归档规则、去重查询），并追加本轮记录。
-
-**验证结果**
-- 逐文件复查 `loop.md` 阶段编号与入口顺序一致（`Observe → Evidence → Decide → Execute → Verify → Record → Maintain`）。
-- 历史 3 条旧记录原样保留，未触发归档阈值（<10 条）。
-- `git diff --check`：通过。
-- `git status --short` 复查：仅 `.agent/` 下三个文件被修改；`Sources/`、`Tests/`、`Widget/`、`script/` 未触碰；用户/前一轮未提交修改（GitCommandExecutor.swift 等）保持原样。
-
-**剩余风险**
-- 归档触发阈值（10 条）为约定值，由后续轮次按 Maintain 阶段执行；归档文件 `history-archive.md` 在首次归档时创建。
-- 本轮为纯 `.agent/` 基础设施改动，不涉及代码、测试或运行行为，未运行 `swift test`（按 loop.md 中"仅文档或 `.agent/` 基础设施改动"的验证边界执行）。
-
 ## 2026-08-09：修复 config 只读验证对 --type/--default 读形式误拒
 
 **发现的问题及证据**
@@ -366,3 +334,49 @@
 **剩余风险**
 - 未单独实测 WidgetKit 的系统调度；本轮源码测试覆盖 timeline policy/provider wiring，已完成本机签名安装与 App 启动验证。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+
+## Loop 11：2026-08-12：消除恢复重试测试的真实计时依赖（注入确定性调度器）
+
+**Loop 编号**
+- Loop 11。
+
+**日期**
+- 2026-08-12
+
+**观察结果**
+- 起始工作区干净（`git status --short` 无输出），HEAD == origin/main（`de3da20`）；业务代码自 Loop 10（`6049a63` Widget 修复）以来逐字节未变，`de3da20` 仅改 `.agent/history.md`。
+- 最近提交：`de3da20`（Record signed local app verification）、`6049a63`（Fix Widget fallback rendering and self-healing）、`d58c31c`/`041980f`（Loop 9/8 no-op）。
+- `rg "TODO|FIXME|HACK|XXX"`：Swift/脚本代码无真实待办标记（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）。
+- 高风险模式：`try!`/`fatalError` 无匹配；force-unwrap 候选仅 `FocusSessionQueryService.swift:82 page.last!`（Loop 8/9 已评估恒安全，无新证据）。
+- **关键发现（新失败证据）**：全量 `swift test` 1550 个测试**偶发 1 失败**——6 次运行中 1 次失败（该次恰与另一个全量测试并行编译，高负载环境），5 次单独运行全绿（16:40 完整日志、4 次串行循环、1 次最终验证）。失败详情最初被过滤管道丢失，无法直接确认失败测试名；无 xctest 崩溃报告（0 unexpected，普通断言失败）。
+- 历史预告：Loop 8/9/10 均记录 `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget`（`6a9b488` 的回归测试）"依赖真实主队列计时窗口（0.2s/0.5s），极慢 CI 下存在既有时序脆弱性，留待出现实际失败时处理"。
+
+**选择的问题及证据**
+- 选择"消除恢复重试回归测试的真实计时依赖"这一稳定性问题（Loop 优先级第 2 位）。
+- 复现条件：全量测试与另一构建/测试进程并行、或慢环境（真实主队列 `asyncAfter` 0.2s/0.5s 窗口调度延迟导致超时）。本次已实际观察到 1 次全量失败，且 coordinator 的恢复重试排队（`scheduleRecoveryRetryIfNeeded`）是全测试套件中唯一经真实主队列计时驱动的恢复路径，与历史三次预告的脆弱测试吻合。
+- 影响范围：CI/慢机下偶发全量失败，掩盖真实回归信号。
+- 完成标准：恢复重试排队改为可注入延迟执行器（默认主队列行为不变）；该测试改用 `DeterministicScheduler` 虚拟时间驱动；目标测试重复运行 100% 确定；`GitActivityRefreshCoordinatorTests` 97 个测试与全量 1550 个测试全绿。
+
+**原因分析**
+- `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget` 用真实主队列 `asyncAfter(deadline: .now() + 0.5)` 等待已排队重试触发、用 0.2s `minimumRefreshSpacing` 让重试在测试时间内触发，验证 generation 取消与预算恢复。高负载下主队列调度延迟使等待窗口（timeout 1.0s）超时或断言窗口漂移，产生 flaky。项目已有 `DeterministicScheduler`（`Tests/TinyBuddyAppTests/Helpers/`，支持 `schedule(after:)` 与虚拟时间推进），但此前未接线到 coordinator。
+
+**修改内容**
+- `Sources/TinyBuddy/GitActivityRefreshCoordinator.swift`
+  - 新增可注入延迟执行器 `scheduleAfterDelay: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void`（属性 + init 参数，默认 `DispatchQueue.main.asyncAfter`，产品行为不变）。
+  - `scheduleRecoveryRetryIfNeeded` 的恢复重试排队由 `DispatchQueue.main.asyncAfter(...)` 改为 `scheduleAfterDelay(minimumRefreshSpacing) { ... }`。
+- `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift`
+  - `RefreshHarness` 新增 `let scheduler = DeterministicScheduler()`，并在 coordinator 构造时注入 `scheduleAfterDelay`。
+  - `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget`：移除真实 `asyncAfter(0.5)` 等待，改为 `scheduler.advanceTime(by: 0.2)` 确定性触发已排队的恢复重试（步骤 3 验证 generation 取消，步骤 5 验证恢复后重试成功）。
+
+**验证结果**
+- `swift test --filter GitActivityRefreshCoordinatorTests`：97 个测试通过（0 失败）。
+- 目标测试重复运行 10 次：全部通过（确定性，无真实计时依赖）。
+- `swift test` 全量：1550 个测试，0 失败。
+- `git diff --check`：通过。
+- `git status --short` 复查：仅 `Sources/TinyBuddy/GitActivityRefreshCoordinator.swift` 与 `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift` 两处改动（+28/-13），无越界修改；`.agent/` 下追加 Loop 11 记录并归档最旧 1 条。
+
+**剩余风险**
+- 偶发失败详情未能直接捕获（过滤管道丢失），无法 100% 证实失败测试即此测试；但该测试是 coordinator 中唯一经真实计时驱动的恢复重试路径，且历史三次预告同一风险，本次修复消除了该路径的全部真实计时依赖，逻辑上覆盖了观察到的失败模式。若后续再次出现偶发失败，优先检查其余真实计时依赖（如 `DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口）。
+- 其他测试未注入 `scheduleAfterDelay`，默认仍走主队列，行为不变；RefreshHarness 注入 scheduler 后，其他依赖恢复重试排队的测试隔离性反而更好（重试只在 `advanceTime` 时触发）。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- `.agent/` 首次实际触发归档：`history.md` 现保留 10 条，最旧 1 条（2026-08-09 Loop 升级）原样移入 `.agent/archive/history-2026-08-12.md`。

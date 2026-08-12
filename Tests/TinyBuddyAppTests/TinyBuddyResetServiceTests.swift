@@ -67,11 +67,12 @@ final class TinyBuddyResetServiceTests: XCTestCase {
 
         XCTAssertEqual(result, .success(TinyBuddyResetResult(
             level: .runtimeState,
-            removedPreferenceKeyCount: 12,
+            removedPreferenceKeyCount: 13,
             removedFileCount: 7
         )))
         XCTAssertNil(sharedDefaults.object(forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot))
         XCTAssertNil(sharedDefaults.object(forKey: "tinybuddy.dailyStats.dayIdentifier"))
+        XCTAssertNil(sharedDefaults.object(forKey: DevelopmentInterruptionSnapshotStore.Key.snapshot))
         XCTAssertNil(standardDefaults.object(forKey: GitTodayCommitCountStore.Key.count))
         XCTAssertEqual(standardDefaults.string(forKey: GitScanRootAuthorizationStore.Constants.bookmarkDataKey), "bookmark")
         XCTAssertEqual(sharedDefaults.string(forKey: TinyBuddyConfigStore.Key.configPayload), "config")
@@ -322,6 +323,10 @@ final class TinyBuddyResetServiceTests: XCTestCase {
         sharedDefaults.set("snapshot", forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot)
         sharedDefaults.set("2026-07-20", forKey: "tinybuddy.dailyStats.dayIdentifier")
         sharedDefaults.set(3, forKey: "tinybuddy.dailyStats.focusCount")
+        sharedDefaults.set(
+            "development-scene",
+            forKey: DevelopmentInterruptionSnapshotStore.Key.snapshot
+        )
         standardDefaults.set("2026-07-20", forKey: GitTodayCommitCountStore.Key.dayIdentifier)
         standardDefaults.set(4, forKey: GitTodayCommitCountStore.Key.count)
         // Focus reminder runtime state, publication hand-offs, and

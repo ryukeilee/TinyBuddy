@@ -92,6 +92,7 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var displayPresentation: TinyBuddyDisplayPresentation
     @Published private(set) var refreshDiagnostics: RefreshDiagnostics
     @Published private(set) var hiddenSnapshotDiagnosticSummary: TinyBuddyHiddenSnapshotDiagnosticSummary?
+    @Published private(set) var developmentInterruptionSnapshot: DevelopmentInterruptionSnapshot?
     /// The same revision-bound session history that the Widget and Settings
     /// report consume. HUD rendering never re-derives it from raw sessions.
     @Published private(set) var focusHistoryPublication: FocusHistoryPublication?
@@ -130,6 +131,7 @@ final class PetViewModel: ObservableObject {
     private let activityStore: GitTodayActivityStore
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
+    private let developmentInterruptionStore: DevelopmentInterruptionSnapshotStore
     private let notificationCenter: NotificationCenter
     private let timeEnvironment: TinyBuddyTimeEnvironment
     private let widgetReloader: () throws -> Void
@@ -155,6 +157,7 @@ final class PetViewModel: ObservableObject {
         activityStore: GitTodayActivityStore = GitTodayActivityStore(),
         combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
+        developmentInterruptionStore: DevelopmentInterruptionSnapshotStore = DevelopmentInterruptionSnapshotStore(),
         notificationCenter: NotificationCenter = .default,
         timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
         widgetReloader: @escaping () throws -> Void = {
@@ -169,6 +172,11 @@ final class PetViewModel: ObservableObject {
         let session = PetSession(store: store)
         let combinedSnapshotStore = combinedSnapshotStore ?? store.makeCombinedSnapshotStore()
         let timeContext = timeEnvironment.capture()
+        let interruptionReadDate = timeContext?.now ?? Date()
+        _ = developmentInterruptionStore.clearIfExpired(at: interruptionReadDate)
+        let developmentInterruptionSnapshot = developmentInterruptionStore.load(
+            at: interruptionReadDate
+        )
         let latestRefreshStatus = Self.displayRefreshStatus(
             refreshStatusStore.load(),
             timeContext: timeContext
@@ -236,6 +244,7 @@ final class PetViewModel: ObservableObject {
         self.activityStore = activityStore
         self.combinedSnapshotStore = combinedSnapshotStore
         self.refreshStatusStore = refreshStatusStore
+        self.developmentInterruptionStore = developmentInterruptionStore
         self.notificationCenter = notificationCenter
         self.timeEnvironment = timeEnvironment
         self.widgetReloader = widgetReloader
@@ -253,6 +262,7 @@ final class PetViewModel: ObservableObject {
             timeContext: timeContext
         )
         self.hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
+        self.developmentInterruptionSnapshot = developmentInterruptionSnapshot
         self.focusHistoryPublication = combinedHUDState.committedSnapshot?.focusHistoryPublication
         recordHUDConsumptionIfMatching(
             snapshot: snapshot,
@@ -301,6 +311,7 @@ final class PetViewModel: ObservableObject {
                 self.isGitActivityRefreshing = false
                 self.latestRefreshStatus = refreshStatus
                 self.updateRefreshDiagnostics(for: refreshStatus)
+                self.reloadDevelopmentInterruption(at: timeContext?.now)
                 let previousHistory = self.focusHistoryPublication
                 let didChange = self.reloadCommittedHUDState()
                 // A refresh-status notification is also emitted for retries
@@ -602,6 +613,7 @@ final class PetViewModel: ObservableObject {
             latestRefreshStatus = nil
         }
         updateRefreshDiagnostics(for: latestRefreshStatus)
+        reloadDevelopmentInterruption()
         let previousHistory = focusHistoryPublication
         let didChange = reloadHUDState()
         if didChange || previousHistory != focusHistoryPublication {
@@ -659,6 +671,7 @@ final class PetViewModel: ObservableObject {
             timeContext: timeContext
         )
         updateRefreshDiagnostics(for: latestRefreshStatus)
+        reloadDevelopmentInterruption(at: timeContext?.now)
 
         let combinedHUDState = Self.publishAndLoadCombinedSnapshot(
             store: store,
@@ -683,6 +696,15 @@ final class PetViewModel: ObservableObject {
             reloadWidgetIfPossible()
         }
         updateHiddenSnapshotDiagnosticSummary()
+    }
+
+    private func reloadDevelopmentInterruption(at date: Date? = nil) {
+        let now = date ?? timeEnvironment.capture()?.now ?? Date()
+        _ = developmentInterruptionStore.clearIfExpired(at: now)
+        let nextSnapshot = developmentInterruptionStore.load(at: now)
+        if developmentInterruptionSnapshot != nextSnapshot {
+            developmentInterruptionSnapshot = nextSnapshot
+        }
     }
 
     private static func makeRefreshDiagnostics(

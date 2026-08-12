@@ -327,6 +327,7 @@ final class TinyBuddyResetService {
         GitTodayRecentProjectStore.Key.projectID,
         TinyBuddyProjectDiscoveryStore.Key.manifest,
         TinyBuddyProjectDiscoveryStore.Key.recentRepositoryFingerprint,
+        DevelopmentInterruptionSnapshotStore.Key.snapshot,
         GitActivityRefreshStatusStore.Key.refreshedAt,
         GitActivityRefreshStatusStore.Key.trigger,
         GitActivityRefreshStatusStore.Key.outcome,

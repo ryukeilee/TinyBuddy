@@ -680,7 +680,7 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(fingerprintsCache.split(separator: "\n").count, 1)
     }
 
-    func testScriptReusesCachedFingerprintsWithoutGitInvocationOnUnchangedRepositories() throws {
+    func testScriptReusesCachedFingerprintsWithOneBoundedInterruptionRead() throws {
         let harness = try ScriptHarness()
         let repositoryCount = 20
         for index in 0..<repositoryCount {
@@ -714,7 +714,12 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(incrementalResult.exitCode, 0, incrementalResult.standardError)
         XCTAssertEqual(incrementalMetrics["recomputed_repository_count"], "0")
         XCTAssertEqual(incrementalMetrics["fingerprint_cache_hit_count"], "20")
-        XCTAssertEqual(try harness.gitInvocationCount(from: gitProbe.logURL), firstInvocationCount)
+        // Fingerprints remain cache hits for every repository. Only the one
+        // selected interruption repository receives a bounded status read.
+        XCTAssertEqual(
+            try harness.gitInvocationCount(from: gitProbe.logURL),
+            firstInvocationCount + 1
+        )
         XCTAssertEqual(plist["tinybuddy.gitTodayCommitCount.count"] as? Int, repositoryCount)
 
         let fingerprintsCache = try String(
@@ -754,9 +759,10 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         // focus blocks (minutes 0-20 and 30-50), yielding 5 hours * 2 blocks.
         XCTAssertEqual(plist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 10)
         XCTAssertEqual(metrics["recomputed_repository_count"], "1")
-        // One fingerprint resolution plus one bounded cat-file identity pass,
-        // instead of one git process per event.
-        XCTAssertEqual(try harness.gitInvocationCount(from: gitProbe.logURL), 2)
+        // One fingerprint resolution, one bounded cat-file identity pass, and
+        // one bounded working-tree summary read for interruption recovery —
+        // still constant rather than one git process per event.
+        XCTAssertEqual(try harness.gitInvocationCount(from: gitProbe.logURL), 3)
     }
 
     func testScriptKeepsCountsAccurateWhenRepositoryIdentityReadFailsTransiently() throws {

@@ -1207,8 +1207,8 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         )
 
         // Authorization invalid → the launch refresh fails and schedules a
-        // recovery retry on the real main queue after minimumRefreshSpacing
-        // (recovery budget 3 → 2).
+        // recovery retry on the deterministic scheduler after
+        // minimumRefreshSpacing (recovery budget 3 → 2).
         harness.coordinator.start()
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
 
@@ -1224,14 +1224,10 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForStatusCount(2) {}
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
 
-        // Let the already-queued recovery retry fire. The generation mismatch
-        // must cancel it: no additional refresh, no budget consumption, and no
-        // "recovery exhausted" marking.
-        let retryWindowElapsed = expectation(description: "queued recovery retry fired")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            retryWindowElapsed.fulfill()
-        }
-        wait(for: [retryWindowElapsed], timeout: 1.0)
+        // Fire the already-queued recovery retry deterministically. The
+        // generation mismatch must cancel it: no additional refresh, no budget
+        // consumption, and no "recovery exhausted" marking.
+        harness.scheduler.advanceTime(by: 0.2)
         XCTAssertEqual(harness.scriptRunCount, 1)
 
         // Authorization becomes invalid again: the recovery budget must still be
@@ -1241,11 +1237,14 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.coordinator.handleAuthorizationChanged()
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .failed)
 
-        // Authorization restored → the fresh recovery retry fires and succeeds.
+        // Authorization restored → the fresh recovery retry fires
+        // deterministically and succeeds.
         harness.advanceMonotonicTime(by: 0.3)
         harness.authorizationIssue = nil
         harness.authorizedRoots = [URL(fileURLWithPath: "/Authorized/RecoveredProject")]
-        harness.performAndWaitForScriptRunCount(2) {}
+        harness.performAndWaitForScriptRunCount(2) {
+            harness.scheduler.advanceTime(by: 0.2)
+        }
         harness.waitForNoRefresh()
         XCTAssertEqual(harness.lastRefreshStatus?.outcome, .succeeded)
     }
@@ -2806,6 +2805,11 @@ private final class RefreshHarness: @unchecked Sendable {
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private var statusObserver: NSObjectProtocol?
 
+    /// Deterministic clock driving queued directory-recovery retries. Kept on
+    /// the harness so tests fire retries on virtual time instead of waiting on
+    /// real-time main-queue delays (which are flaky under load).
+    let scheduler = DeterministicScheduler()
+
     let coordinator: GitActivityRefreshCoordinator
 
     init(
@@ -2899,6 +2903,9 @@ private final class RefreshHarness: @unchecked Sendable {
             refreshStatusStore: refreshStatusStore,
             refreshInterval: 300,
             minimumRefreshSpacing: minimumRefreshSpacing,
+            scheduleAfterDelay: { [scheduler] delay, work in
+                scheduler.schedule(after: delay, action: work)
+            },
             widgetReloader: { [weak testCase, state] in
                 guard testCase != nil else {
                     return
