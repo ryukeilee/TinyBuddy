@@ -6,37 +6,6 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## 2026-08-09：修复 config 只读验证对 --type/--default 读形式误拒
-
-**发现的问题及证据**
-- `GitCommandExecutor.isReadOnlyConfigInvocation` 的带值选项集合（`valueTakingOptions`）仅含 `--file`/`--blob`，导致另外两个真实合法只读形式被误判为写形式 `git config <name> <value>` 而抛 `commandNotAllowed`：
-  - `git config --default <value> <name>`：`<value>` 被计入裸参数计数（=2）被拒；
-  - `git config --type <type> <name>`：`<type>` 被计入裸参数计数（=2）被拒。
-- 用真实 Git 验证语义：`git config --default "fallback" user.name` 退出 0 并输出读取值；`git config --type bool core.ignorecase` 退出 0 输出 `true`；`git config --comment "note" user.name` 退出 129（`--comment` 仅适用于 add/set/replace，属写专用，应保持拒绝）。
-- 新增测试在修复前运行均按预期失败：`config --default <value> <name> is a read but was rejected`、`config --type <type> <name> is a read but was rejected`。
-- `swift test` 基线（含前一轮改动）：GitCommandExecutorTests 30 个测试全绿。
-
-**原因分析**
-- 上一轮（修复 `--file`/`--blob`）记录中已标注此方向风险：带值选项集合不完整；`--default`/`--type` 的分离参数形式同样属于"选项自身携带的值"，不应计入配置键/值计数。
-
-**修改内容**
-- `Sources/TinyBuddyCore/GitCommandExecutor.swift`
-  - `isReadOnlyConfigInvocation` 的 `valueTakingOptions` 加入 `--type`、`--default`，其携带值在裸参数计数中被跳过；写形式 `git config --type bool <name> <value>` 仍有 2 个真实裸参数，继续被拒绝（安全性不变）。
-- `Tests/TinyBuddyCoreTests/GitCommandExecutorTests.swift`
-  - 新增 `testReadOnlyAllowsConfigDefaultReadForm`：`config --default <value> <name>` 必须执行成功且输出 fallback，不抛 `commandNotAllowed`。
-  - 新增 `testReadOnlyAllowsConfigTypeReadForm`：`config --type <type> <name>` 必须执行成功；并断言写形式 `config --type bool user.name true` 仍抛 `commandNotAllowed`。
-
-**验证结果**
-- 修复前运行两个新测试：均失败，确认缺陷真实存在。
-- 修复后 `swift test --filter GitCommandExecutorTests`：32 个测试（+2）全部通过。
-- `swift test` 全量：1542 个测试（+2），0 失败。
-- `git diff --check`：通过。
-- `git status --short` 复查：仅 GitCommandExecutor.swift、GitCommandExecutorTests.swift 及上一轮遗留的 GitActivityRefreshCoordinatorTests.swift 有改动，`.agent/` 未跟踪；未触碰用户/前一轮修改。
-
-**剩余风险**
-- `--comment` 等写专用选项经真实 Git 验证不应放行，已维持拒绝；若 Git 未来新增读语义的带值选项，需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- 本轮只涉及只读验证逻辑，未改变命令执行、超时或取消路径。
-
 ## 2026-08-09：补充恢复重试 generation 取消机制的回归测试
 
 **发现的问题及证据**
@@ -380,3 +349,44 @@
 - 其他测试未注入 `scheduleAfterDelay`，默认仍走主队列，行为不变；RefreshHarness 注入 scheduler 后，其他依赖恢复重试排队的测试隔离性反而更好（重试只在 `advanceTime` 时触发）。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
 - `.agent/` 首次实际触发归档：`history.md` 现保留 10 条，最旧 1 条（2026-08-09 Loop 升级）原样移入 `.agent/archive/history-2026-08-12.md`。
+
+## Loop 12：2026-08-13：无修改轮次（main 最新开发中断恢复改动经全量回归验证通过，未发现新的可验证问题）
+
+**Loop 编号**
+- Loop 12。
+
+**日期**
+- 2026-08-13
+
+**观察结果**
+- 工作区：`git status --short` 无输出、`git diff --check` 通过、无未跟踪文件。
+- 分支：`agent/optimize-agent-validation` 领先 main 仅 1 个提交 `408b238`（"Optimize agent validation strategy"，只改 `AGENTS.md`，+9/-3，已推送 origin）；main 最新提交 `aec839c`（"Add development interruption recovery"，15 文件 +884/-57）已在分支历史中，是本轮观察的主要对象。
+- `aec839c` 静态审查（开发中断恢复功能）：
+  - 跨进程格式契约一致：脚本写入 App Group plist 的 `tinybuddy.developmentInterruption.snapshot.v1`，v1 制表符分隔 13 字段（fingerprint/name/branch base64 + staged/modified/untracked/conflicted + commit hash/subject base64 + commit/activity/captured epoch），App `DevelopmentInterruptionSnapshotStore.decode` 逐字段校验（base64 长度上限、计数 0…1,000,000、epoch 有限性与未来容忍 5 分钟、捕获时间不早于活动时间），与脚本写入逐项对应。
+  - 生命周期：7 天过期窗口 + 主 App 启动 `clearIfExpired`；刷新失败路径不写入（保留旧值），脚本签名不变时保留原 activity epoch（跨午夜不虚构新活动时间），签名变化且同 fingerprint 时以刷新时间为新活动时间，语义自洽。
+  - 测试覆盖：`DevelopmentInterruptionSnapshotTests`（解码/拒绝畸形与未来快照/7 天过期清理）、`GitActivityRealRepositoryFixtureTests.testPublishesDevelopmentInterruptionSceneWithoutRepositoryPath`（真实仓库、无仓库路径泄漏）、`GitActivityRefreshScriptTests.testScriptReusesCachedFingerprintsWithOneBoundedInterruptionRead`（缓存复用 + 有界读取）。
+- 静态信号：`rg "TODO|FIXME|HACK|XXX"` 无真实待办（仅 `mktemp` 模板 `XXXXXX`）；`try!`/`fatalError` 无匹配；force-unwrap 无新候选（Loop 8/9 已复核）。
+- 脚本基线：`/bin/bash -n script/update_git_completion_count.sh` 通过。
+- 测试基线：`swift test` 全量 **1554 个测试、0 失败**（后台运行，约 237s）；这是 `aec839c`（Loop 11 之后、无记录在案验证证据的 884 行跨进程改动）的首次全量回归验证。
+
+**选择的问题及证据**
+- 无。逐项核对后未发现相对 Loop 11 的新证据，候选淘汰理由：
+  - **开发中断恢复（`aec839c`）**：格式契约、边界（base64/计数/epoch/未来容忍）、生命周期（过期/失败路径/跨午夜保留）、隐私（只持久化 fingerprint 与展示名，无仓库路径）交叉审查未发现缺陷；新增专项测试 + 全量 1554 测试全绿，无新失败、新复现、新指标或新用户反馈，不构成修改依据。
+  - 脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`：与 Loop 8/9 已评估项同根因，无新证据，不重复处理。
+- 完成标准：na（无修改轮次）。
+
+**原因分析**
+- 本轮实质价值是首次对 `aec839c` 的 884 行跨进程改动（脚本采集 ↔ App 解码 ↔ HUD 面板 ↔ 重置清理）做全量回归验证：1554 测试全绿、静态审查未发现契约或边界缺陷。按 loop.md 契约"无证据即无修改，不为了产生修改而修改"。
+
+**修改内容**
+- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条，属契约要求的 Record/Maintain 阶段）。
+
+**验证结果**
+- `swift test` 全量：1554 个测试，0 失败（基线，后台运行记录）。
+- `/bin/bash -n script/update_git_completion_count.sh`：通过。
+- `git diff --check`：通过（history.md 追加仅新增行）。
+- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件为本轮唯一新增。
+
+**剩余风险**
+- 本轮为无修改轮次，无新增风险。开发中断恢复面板的端到端运行行为（真实安装 + 启动展示）由用户授权的本机签名安装运行另行验证；其展示层已有 `PetViewRenderingTests` 覆盖，脚本/解码契约有真实仓库测试覆盖。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
