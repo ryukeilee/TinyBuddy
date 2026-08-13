@@ -6,64 +6,6 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## 2026-08-09：补充恢复重试 generation 取消机制的回归测试
-
-**发现的问题及证据**
-- 提交 `6a9b488`（Fix refresh commit day read and recovery retry budget）在 `Sources/TinyBuddy/GitActivityRefreshCoordinator.swift` 引入 `directoryRecoveryGeneration`：成功刷新时 `&+= 1`，使已排队的恢复重试闭包通过 `guard self.directoryRecoveryGeneration == recoveryGeneration`（1816-1818 行）检测到 generation 不匹配而直接返回，不再消耗已重置的恢复预算、不再错误标记 `hasExhaustedDirectoryRecovery`。
-- 但该排队重试使用真实主队列 `DispatchQueue.main.asyncAfter(deadline: .now() + minimumRefreshSpacing)`（默认 60 秒），现有测试（如 `testInvalidSavedAuthorizationKeepsLowFrequencyRecoveryAndRecoversAutomatically`）时长远小于 60 秒真实时间，排队重试闭包从未真正触发，generation 取消分支无任何测试执行覆盖。
-- `swift test` 基线：`GitActivityRefreshCoordinatorTests` 96 个测试全绿。
-
-**原因分析**
-- 测试 harness（`RefreshHarness`）将 `minimumRefreshSpacing` 硬编码为 60，无法在测试时间内触发排队的恢复重试闭包，导致 `6a9b488` 的核心稳定性修复（成功刷新后取消陈旧恢复重试）缺乏回归保护。
-
-**修改内容**
-- `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift`
-  - `makeHarness` 与 `RefreshHarness.init` 增加 `minimumRefreshSpacing: TimeInterval = 60` 参数（默认值不变，不影响现有测试），并传递给 coordinator。
-  - 新增 `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget`：用短间距（0.2s）触发真实排队重试，验证 ①授权失效后恢复重试排队；②授权恢复成功刷新后 generation 递增、预算重置；③已排队重试触发时因 generation 不匹配被取消（无额外脚本运行）；④再次授权失效时预算仍可重置（未标记耗尽），恢复重试仍能成功。
-
-**验证结果**
-- 新测试单独运行：通过。
-- 反向验证：临时禁用 generation guard（`directoryRecoveryGeneration == recoveryGeneration` 分支改为恒通过）后，新测试如预期失败（`scriptRunCount` 变为 2、outcome 为 failed），证明测试能捕获该回归；随后已还原产品代码（`git diff` 确认 coordinator 无改动）。
-- `swift test --filter GitActivityRefreshCoordinatorTests`：97 个测试全部通过。
-- `swift test` 全量：1537 个测试，0 失败。
-- `git diff --check`：通过。
-
-**剩余风险**
-- 新测试依赖真实主队列计时（0.2s/0.5s 窗口），在极慢 CI 环境可能存在时序脆弱性，但窗口余量较大且与现有测试模式一致。
-- 本轮未修改产品代码，仅补测试；`directoryRecoveryGeneration` 机制本身的正确性未变。
-
-## 2026-08-09：修复 Git 命令只读验证误拒合法只读调用形式
-
-**发现的问题及证据**
-- 提交 `18cff91`（Harden Git command read-only and timeout enforcement）引入的 `GitCommandExecutor.isReadOnlyInvocation` 对两类合法只读命令形式存在误判，在 `readOnly` 模式下抛出 `commandNotAllowed`：
-  - `git config --file <path> <name>`（读取指定配置文件中的键）：`isReadOnlyConfigInvocation` 将 `--file` 选项携带的路径参数计入裸参数计数（`["/path", "name"]` 共 2 个），被误判为写形式 `git config <name> <value>` 而拒绝。
-  - `git reflog <ref>`（`git reflog show <ref>` 的只读简写，如 `git reflog HEAD`）：`reflog` 分支只放行 `show`/`exists`/无 action，`HEAD` 这类 ref 简写被误判为写子命令而拒绝。
-- 用真实 Git 验证语义：`git reflog HEAD` 正常输出并返回 0；`git config --file <不存在路径> user.name` 只是普通错误退出（exit=1），并非命令不允许。
-- `swift test` 基线：1537 个测试全绿。
-
-**原因分析**
-- 裸参数计数没有区分"选项自身携带的值"（`--file <path>`、`--blob <oid>`）与真正的配置键/值；`reflog` 分支按 action 白名单判断，遗漏了 `show` 省略形式。
-
-**修改内容**
-- `Sources/TinyBuddyCore/GitCommandExecutor.swift`
-  - `isReadOnlyConfigInvocation`：改为逐参数扫描，`--file`/`--blob` 及其后一个参数作为选项值跳过，剩余裸参数计数 ≤ 1 视为只读；写形式 `git config <name> <value>` 和 `git config --file <path> <name> <value>` 仍被拒绝。
-  - `reflog` 分支：改为黑名单判断，仅 `expire`/`delete` 两个真实写子命令被拒绝，其余（`show`、`exists`、ref 简写、无参数）放行。
-- `Tests/TinyBuddyCoreTests/GitCommandExecutorTests.swift`
-  - 新增 `testReadOnlyAllowsConfigFileReadForm`（`config --file` 只读形式必须执行，不抛 `commandNotAllowed`）。
-  - 新增 `testReadOnlyAllowsReflogRefReadShorthand`（`reflog HEAD`/`show HEAD`/`exists HEAD` 均不被拒绝）。
-  - 新增 `testReadOnlyStillBlocksReflogWriteSubcommands`（`reflog expire`/`reflog delete` 仍被拒绝）。
-
-**验证结果**
-- 修复前运行新测试：`testReadOnlyAllowsConfigFileReadForm` 与 `testReadOnlyAllowsReflogRefReadShorthand` 按预期失败，确认缺陷真实存在。
-- 修复后运行 `swift test --filter GitCommandExecutorTests`：30 个测试全部通过。
-- `swift test` 全量：1540 个测试（新增 3 个），0 失败。
-- `git diff --check`：通过。
-- 上一轮遗留的 `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift` 修改未被触碰。
-
-**剩余风险**
-- `config` 带值选项只覆盖了 `--file`/`--blob`；Git 未来若增加新的带值选项需要同步维护黑名单，现有写形式仍被正确拒绝，属于保守方向。
-- 本轮只涉及只读验证逻辑，未改变命令执行、超时或取消路径。
-
 ## 2026-08-09：修复 config 只读验证对 `-f`（`--file` 短形式）读形式误拒
 
 **发现的问题及证据**
@@ -390,3 +332,83 @@
 **剩余风险**
 - 本轮为无修改轮次，无新增风险。开发中断恢复面板的端到端运行行为（真实安装 + 启动展示）由用户授权的本机签名安装运行另行验证；其展示层已有 `PetViewRenderingTests` 覆盖，脚本/解码契约有真实仓库测试覆盖。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+
+## Loop 13：2026-08-13：无修改轮次（main 最新提交为纯文档变更，内容与实现一致，未发现新的可验证问题）
+
+**Loop 编号**
+- Loop 13。
+
+**日期**
+- 2026-08-13
+
+**观察结果**
+- 工作区：`git status --short` 无输出、无未跟踪文件；HEAD == origin/main == `2027e5a`，仓库干净。
+- 分支：main 与 origin/main 同步；其余 agent/codex 工作分支（`agent/focus-source-tracking`、`codex/reduce-resident-energy-wakeups` 等）未合并，不属于 main 当前状态，本轮不观察。
+- 最近提交：自 Loop 12（`f6e86b2`）以来唯一新提交是 `2027e5a`（"Document development interruption recovery channel"，仅改 `.agent/memory.md` +1、`AGENTS.md` +8/-3、`CLAUDE.md` +10/-4，共 +12/-7）——纯文档变更，业务代码零变化。
+- `2027e5a` 内容核实：三处文档补充的开发中断恢复通道描述（v1 13 字段制表符格式、7 天过期窗口 + 5 分钟未来容忍、成功刷新才写入、失败/跳过不覆盖、路径无关）与 `aec839c` 实现逐项一致；代码实测：`TinyBuddyResetService.swift:330` 重置时清除 `DevelopmentInterruptionSnapshotStore.Key.snapshot`，`PetViewModel.swift:176/703` 启动与刷新时 `clearIfExpired(at:)`，均与文档声明一致。
+- 静态信号：`rg "TODO|FIXME|HACK|XXX"` 无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）；业务代码自 `aec839c`（Loop 12 已全量验证 1554 测试全绿）以来逐字节未变，无新 try!/fatalError/force-unwrap 候选。
+- 测试基线：`swift test --filter GitCommandExecutorTests`：33 个测试通过（环境健康检查）。
+
+**选择的问题及证据**
+- 无。逐项核对后未发现相对 Loop 12 的新证据，候选淘汰理由：
+  - `2027e5a` 文档提交：内容与 `aec839c` 实现及测试一致（重置清除、过期清理、失败不覆盖、路径无关均已代码核实），无错误或误导声明，不构成修改依据。
+  - 脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`：与 Loop 8/9/12 已评估项同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
+- 完成标准：na（无修改轮次）。
+
+**原因分析**
+- 自 Loop 12 以来唯一提交是纯文档变更，业务代码零变化；文档内容经代码核实与实际实现一致。观察范围（工作区、提交历史、静态信号、窄测基线）内不存在触发新一轮的证据门槛。按 loop.md 契约"无证据即无修改，不为了产生修改而修改"。
+
+**修改内容**
+- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条，属契约要求的 Record/Maintain 阶段）。
+
+**验证结果**
+- `swift test --filter GitCommandExecutorTests`：33 个测试通过（基线，环境健康检查）。
+- `git diff --check`：通过（history.md 追加仅新增行）。
+- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件为本轮唯一新增。
+
+**剩余风险**
+- 本轮为无修改轮次，无新增风险。开发中断恢复面板的端到端运行行为（真实安装 + 启动展示）仍需用户授权的本机签名安装另行验证（Loop 12 同述）。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
+
+## Loop 14：2026-08-13：无修改轮次（未提交的“继续专注”一键恢复功能经独立审查与全量回归验证，未发现新的可验证问题）
+
+**Loop 编号**
+- Loop 14。
+
+**日期**
+- 2026-08-13
+
+**观察结果**
+- 工作区：`git status --short` 显示 8 个已修改文件 + 2 个未跟踪新文件（`Sources/TinyBuddyCore/DevelopmentInterruptionRecovery.swift`、`Tests/TinyBuddyAppTests/PetViewModelDevelopmentInterruptionResumeTests.swift`、`Tests/TinyBuddyCoreTests/DevelopmentInterruptionResumeDecisionTests.swift`）——即开发中断“继续专注”一键恢复功能（334 行改动），尚未提交；`.agent/history.md` 与 `.agent/archive/history-2026-08-13.md` 为 Loop 13 遗留的 Record/Maintain 未提交改动（归档 1 条 + 追加 Loop 13 记录），与业务改动无重叠，原样保留。
+- 最近提交：`2027e5a`（Document development interruption recovery channel）；HEAD == origin/main。
+- `rg "TODO|FIXME|HACK|XXX"`：无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）；`git diff --check` 通过。
+- 测试基线：`swift test --filter GitCommandExecutorTests|DevelopmentInterruptionResumeDecisionTests|PetViewModelDevelopmentInterruptionResumeTests`：50 个测试全绿；功能改动自上一轮全量验证（1572 测试 0 失败）以来代码未变，按“输入未变不重复昂贵门禁”复用该全量证据。
+
+**选择的问题及证据**
+- 无。本轮对未提交的“继续专注”功能（`aec839c` 开发中断恢复的后续升级）做独立静态审查，逐项核实通过：
+  - 精确匹配门控：fingerprint 大小写折叠精确匹配（与注册表 `lowercased()` 约定一致）、kind 为 git、state 为 active、stored fingerprint 非空；名称/别名不参与匹配（测试覆盖仅同名不同 fingerprint、nil fingerprint、archived/temporarilyUnavailable/removed、非 git kind、空 fingerprint 全部 blocked）。
+  - 多匹配确定性：active 优先 + 稳定 id 最小（`usableProject`），测试覆盖。
+  - 会话冲突：基于引擎当前打开会话（含自动会话，新增 `FocusSessionEngine.currentSessionStatus` 最小扩展）而非 `manualControlState`；同项目 → inProgress(active/paused)，他项目 → blocked；测试覆盖自动会话在 `manualControlState == .idle` 时仍正确判定 inProgress。
+  - 一键恢复：`resumeDevelopmentInterruption()` 调用时先重算再走既有 `startManualFocus` 链路（context = 匹配项目 id + displayName），非 `.available` 一律 no-op；测试覆盖无会话启动成功（会话 key = 注册 id）、阻断态 no-op（引擎无新会话、manualControlState 不变）。
+  - 边界与隐私：会话记录无仓库路径、defaults 无新增 key（测试覆盖）；`DevelopmentInterruptionSnapshot.swift` 与 `script/update_git_completion_count.sh` 零改动（快照 v1 格式与采集链路未变）；diff 中无新 Git 命令/脚本调用。
+  - 生命周期：重算钩子覆盖 init、快照重载、手动状态刷新（含 1s timer，纯计算开销可忽略）、`focusSessionStatsDidChange`、前台恢复、`TinyBuddy.projectRegistryDidChange` 通知；新增观察者随 deinit 移除。
+  - 既有候选（脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`）：与 Loop 8/9/12/13 同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
+- 完成标准：na（无修改轮次）。
+
+**原因分析**
+- 功能实现经 9 项静态审查点逐一核实 + 50 个窄测全绿 + 上一轮 1572 全量全绿，未发现真实可复现缺陷；唯一观察到的冗余（`DevelopmentInterruptionResumeState.matchedProject` 仅测试使用）属最小 API 表面冗余，不构成修改依据。按 loop.md 契约“无证据即无修改，不为了产生修改而修改”。
+
+**修改内容**
+- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条，属契约要求的 Record/Maintain 阶段）。
+
+**验证结果**
+- `swift test --filter GitCommandExecutorTests|DevelopmentInterruptionResumeDecisionTests|PetViewModelDevelopmentInterruptionResumeTests`：50 个测试，0 失败。
+- 全量回归：复用上一轮 1572 个测试 0 失败证据（本轮代码未变）。
+- `git diff --check`：通过。
+- `git status --short` 复查：业务改动（继续专注功能）与 `.agent/` 记录改动均原样保留，无越界修改。
+
+**剩余风险**
+- 本轮为无修改轮次，无新增风险。“继续专注”功能尚未提交；用户已授权后续签名安装运行与提交推送，端到端运行行为由安装运行验证（Loop 12/13 同述的待办）。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
