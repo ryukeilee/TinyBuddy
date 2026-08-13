@@ -28,6 +28,7 @@ final class FocusSessionAppBridgeResetGateTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2026-08-02" }
         )
         let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
@@ -73,6 +74,7 @@ final class FocusSessionAppBridgeResetGateTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2026-08-02" }
         )
         let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)

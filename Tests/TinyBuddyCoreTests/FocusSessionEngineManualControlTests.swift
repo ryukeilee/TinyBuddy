@@ -13,6 +13,7 @@ final class FocusSessionEngineManualControlTests: XCTestCase {
     func makeEngine(_ clock: FakeClock, _ store: MemoryStore) -> FocusSessionEngine {
         FocusSessionEngine(
             clock: clock, persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-24" }
         )
     }

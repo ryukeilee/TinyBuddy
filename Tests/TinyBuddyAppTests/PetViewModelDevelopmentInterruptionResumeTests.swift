@@ -270,6 +270,7 @@ final class PetViewModelDevelopmentInterruptionResumeTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: ResumeFakeClock(today),
             persisting: ResumeMemoryStore(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { resumeDayIdentifier(for: $0) },
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))

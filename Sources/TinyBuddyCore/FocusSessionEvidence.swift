@@ -23,7 +23,9 @@ public struct FocusSessionRuleVersion: Codable, Equatable, Sendable {
     public let major: Int
     public let minor: Int
 
-    public static let current = FocusSessionRuleVersion(major: 1, minor: 0)
+    /// 1.1: automatic sessions require confirmation-gate accumulation before
+    /// starting (the 1.0 rule set started on the first activity event).
+    public static let current = FocusSessionRuleVersion(major: 1, minor: 1)
 
     public init(major: Int, minor: Int) {
         self.major = major

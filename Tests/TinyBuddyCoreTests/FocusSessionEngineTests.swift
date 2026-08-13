@@ -112,7 +112,9 @@ private func dayIdentifier(for date: Date) -> String {
 private func makeEngine(
     clock: FakeClock,
     store: MemoryStore,
-    config: FocusSessionConfiguration = FocusSessionConfiguration()
+    config: FocusSessionConfiguration = FocusSessionConfiguration(
+        confirmationMinimumActiveDuration: 0
+    )
 ) -> FocusSessionEngine {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -149,18 +151,37 @@ final class FocusSessionEngineTests: XCTestCase {
 // MARK: - Basic lifecycle
 
 extension FocusSessionEngineTests {
+    /// Contract change (confirmation gate): a single activity event must not
+    /// start an automatic session; sustained activity within the confirmation
+    /// window confirms it. The confirming event's timestamp is the start.
     func test_start_on_user_activity_creates_session() {
-        let engine = makeEngine(clock: clock, store: store)
-        let out = engine.userActivity(in: projectA, at: t0)
-        XCTAssertEqual(out, .saved)
+        let config = FocusSessionConfiguration(
+            confirmationWindow: 300,
+            confirmationMinimumActiveDuration: 120
+        )
+        let engine = makeEngine(clock: clock, store: store, config: config)
+
+        // Single event: no session yet, and no journal write.
+        XCTAssertEqual(engine.userActivity(in: projectA, at: t0), .noChange)
+        XCTAssertTrue(engine.allSessions.isEmpty)
+
+        // Brief follow-up (still below the minimum active duration): no session.
+        clock.advance(by: 30)
+        XCTAssertEqual(engine.userActivity(in: projectA, at: clock.now), .noChange)
+        XCTAssertTrue(engine.allSessions.isEmpty)
+
+        // Sustained activity spanning the minimum active duration confirms.
+        clock.advance(by: 90)
+        XCTAssertEqual(engine.userActivity(in: projectA, at: clock.now), .saved)
 
         XCTAssertEqual(engine.allSessions.count, 1)
         let s = engine.allSessions[0]
         XCTAssertEqual(s.project, projectA)
         XCTAssertEqual(s.status, .active)
         XCTAssertTrue(s.isOpen)
-        XCTAssertEqual(s.lastUserActivityAt, t0)
-        XCTAssertEqual(s.activeDuration(now: t0), 0) // no wall time passed
+        XCTAssertEqual(s.lastUserActivityAt, clock.now)
+        XCTAssertEqual(s.startedAt, clock.now)
+        XCTAssertEqual(s.activeDuration(now: clock.now), 0) // no wall time passed
     }
 
     func test_user_activity_same_project_refreshes() {
@@ -199,6 +220,50 @@ extension FocusSessionEngineTests {
 // MARK: - Idle
 
 extension FocusSessionEngineTests {
+    func test_idle_long_absence_end_clears_stale_pending_switch() {
+        // The idleDetected end path must clear a pending switch exactly like
+        // every other session-ending path. A stale pending switch survives
+        // with an old away boundary and, once a new session exists, a switch
+        // that confirms immediately consumes it: the current session is ended
+        // at its own start (duration wiped) and the new session is attributed
+        // from the stale boundary instead of the real activity time.
+        let config = FocusSessionConfiguration(
+            idleThreshold: 30,
+            longAbsenceThreshold: 120,
+            confirmationMinimumActiveDuration: 0
+        )
+        let engine = makeEngine(clock: clock, store: store, config: config)
+
+        // A open; foreground change to B pauses A with a pending switch at t0+10.
+        XCTAssertEqual(engine.userActivity(in: projectA, at: t0), .saved)
+        clock.advance(by: 10)
+        XCTAssertEqual(engine.foregroundProjectChanged(to: projectB, at: clock.now), .saved)
+
+        // Long idle while already paused: the idle end path closes A at the
+        // pause start and must discard the pending switch with it.
+        clock.advance(by: 200) // ≥ longAbsenceThreshold
+        XCTAssertEqual(engine.idleDetected(at: clock.now), .saved)
+        XCTAssertEqual(engine.allSessions[0].status, .ended)
+        XCTAssertEqual(engine.allSessions[0].endedAt, t0.addingTimeInterval(10))
+
+        // Fresh activity opens B at the activity time.
+        clock.advance(by: 60)
+        XCTAssertEqual(engine.userActivity(in: projectB, at: clock.now), .saved)
+        XCTAssertEqual(engine.allSessions[1].startedAt, t0.addingTimeInterval(270))
+
+        // A single activity in C switches at C's own activity time. The stale
+        // B-away boundary (t0+10) must not end B at its start and hand B's
+        // duration to C.
+        clock.advance(by: 30)
+        XCTAssertEqual(engine.userActivity(in: projectC, at: clock.now), .saved)
+        let b = engine.allSessions[1] // re-read after the switch
+        let c = engine.allSessions[2]
+        XCTAssertEqual(c.startedAt, clock.now) // t0+300, not the stale boundary
+        XCTAssertEqual(b.status, .ended)
+        XCTAssertEqual(b.endedAt, clock.now)
+        XCTAssertEqual(b.activeDuration(now: clock.now), 30, accuracy: 0.001)
+    }
+
     func test_idle_pauses_session() {
         let engine = makeEngine(clock: clock, store: store)
         engine.userActivity(in: projectA, at: t0)
@@ -515,7 +580,8 @@ extension FocusSessionEngineTests {
 
     func test_brief_interruption_merge() {
         let config = FocusSessionConfiguration(briefInterruptionThreshold: 60,
-                                               longAbsenceThreshold: 600)
+                                               longAbsenceThreshold: 600,
+                                               confirmationMinimumActiveDuration: 0)
         let engine = makeEngine(clock: clock, store: store, config: config)
         engine.userActivity(in: projectA, at: t0)
         clock.advance(by: 10)
@@ -544,7 +610,8 @@ extension FocusSessionEngineTests {
     }
 
     func test_activity_in_third_project_within_brief_window() {
-        let config = FocusSessionConfiguration(briefInterruptionThreshold: 60)
+        let config = FocusSessionConfiguration(briefInterruptionThreshold: 60,
+                                               confirmationMinimumActiveDuration: 0)
         let engine = makeEngine(clock: clock, store: store, config: config)
         engine.userActivity(in: projectA, at: t0)
         clock.advance(by: 10)
@@ -567,7 +634,8 @@ extension FocusSessionEngineTests {
     }
 
     func test_activity_in_third_project_outside_brief_window() {
-        let config = FocusSessionConfiguration(briefInterruptionThreshold: 30)
+        let config = FocusSessionConfiguration(briefInterruptionThreshold: 30,
+                                               confirmationMinimumActiveDuration: 0)
         let engine = makeEngine(clock: clock, store: store, config: config)
         engine.userActivity(in: projectA, at: t0)
         clock.advance(by: 5)
@@ -663,7 +731,11 @@ extension FocusSessionEngineTests {
 extension FocusSessionEngineTests {
     @MainActor
     func test_coordinator_filters_automated_git() {
-        let engine = makeEngine(clock: clock, store: store)
+        let config = FocusSessionConfiguration(
+            confirmationWindow: 300,
+            confirmationMinimumActiveDuration: 60
+        )
+        let engine = makeEngine(clock: clock, store: store, config: config)
         let coordinator = FocusSessionCoordinator(
             engine: engine,
             policy: FocusAttributionPolicy(gitAttributionWindow: nil),
@@ -674,13 +746,27 @@ extension FocusSessionEngineTests {
         coordinator.reportForegroundApp(bundleID: "com.apple.dt.Xcode",
                                         displayName: "Xcode",
                                         isCodeEditor: true)
-        // Automated git must NOT start a session
-        coordinator.reportGitActivity(repoKey: "repo/a", displayName: "A", automated: true)
+
+        // Automated background refreshes must never create, revive, or switch
+        // sessions — not even with sustained repetition, and they must not
+        // feed the confirmation gate either.
+        for _ in 0..<3 {
+            coordinator.reportGitActivity(repoKey: "repo/a", displayName: "A", automated: true, at: clock.now)
+            clock.advance(by: 60)
+        }
+        XCTAssertNil(coordinator.currentFocusProject())
+        XCTAssertTrue(engine.allSessions.isEmpty)
+
+        // A single non-automated commit is still not reliable: no session yet.
+        coordinator.reportGitActivity(repoKey: "repo/a", displayName: "A", automated: false, at: clock.now)
+        XCTAssertTrue(engine.allSessions.isEmpty)
         XCTAssertNil(coordinator.currentFocusProject())
 
-        // Non‑automated git starts session
-        coordinator.reportGitActivity(repoKey: "repo/a", displayName: "A", automated: false)
-        XCTAssertNotNil(coordinator.currentFocusProject())
+        // Sustained non-automated git activity confirms and attributes the repo.
+        clock.advance(by: 60)
+        coordinator.reportGitActivity(repoKey: "repo/a", displayName: "A", automated: false, at: clock.now)
+        XCTAssertEqual(engine.allSessions.count, 1)
+        XCTAssertEqual(engine.allSessions[0].project.key, "repo/a")
         XCTAssertEqual(coordinator.currentFocusProject()?.key, "repo/a")
     }
 }
@@ -895,7 +981,8 @@ extension FocusSessionEngineTests {
         let constrained = makeEngine(
             clock: clock,
             store: store,
-            config: FocusSessionConfiguration(maxSessionSpan: 30)
+            config: FocusSessionConfiguration(maxSessionSpan: 30,
+                                              confirmationMinimumActiveDuration: 0)
         )
         XCTAssertEqual(
             constrained.editSession(id: id, endedAt: t0.addingTimeInterval(40)),
@@ -1221,7 +1308,7 @@ extension FocusSessionEngineTests {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { dayIdentifier(for: $0) },
             nextDayBoundary: { _ in nil }
         )
@@ -1247,7 +1334,7 @@ extension FocusSessionEngineTests {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { date in
                 date < start.addingTimeInterval(600)
                     ? dayIdentifier(for: date)

@@ -57,7 +57,8 @@ private func makeExclusionEngine(
             briefInterruptionThreshold: 60,
             longAbsenceThreshold: 600,
             maxSessionSpan: nil,
-            dayBoundaryTolerance: 1
+            dayBoundaryTolerance: 1,
+            confirmationMinimumActiveDuration: 0
         ),
         dayIdentifier: { exclusionsDayIdentifier(for: $0) },
         nextDayBoundary: { date in

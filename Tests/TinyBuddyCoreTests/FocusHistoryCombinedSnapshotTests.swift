@@ -354,7 +354,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { date in
                 let fmt = DateFormatter()
                 fmt.locale = Locale(identifier: "en_US_POSIX")
@@ -446,7 +446,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { date in
                 let fmt = DateFormatter()
                 fmt.locale = Locale(identifier: "en_US_POSIX")
@@ -805,7 +805,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: dayProvider,
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
@@ -884,7 +884,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: dayProvider,
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
@@ -951,7 +951,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: dayProvider,
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
@@ -1006,7 +1006,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: dayProvider,
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
@@ -1077,7 +1077,7 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
-            config: FocusSessionConfiguration(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: dayProvider,
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))

@@ -42,6 +42,7 @@ final class FocusSessionEngineManualControlAdvancedTests: XCTestCase {
     ) -> FocusSessionEngine {
         FocusSessionEngine(
             clock: clock, persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in day }
         )
     }

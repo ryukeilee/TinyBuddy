@@ -43,8 +43,8 @@ final class FocusSessionEvidenceTests: XCTestCase {
         engine.lockScreen(at: clock.now)
 
         let evidence = try XCTUnwrap(engine.evidence(for: try XCTUnwrap(engine.allSessions.first?.id)))
+        XCTAssertEqual(evidence.ruleVersion, FocusSessionRuleVersion.current)
         XCTAssertEqual(evidence.ruleVersion.major, 1)
-        XCTAssertEqual(evidence.ruleVersion.minor, 0)
     }
 
     func test_evidence_explanations_match_decision_events() throws {
@@ -608,6 +608,7 @@ final class FocusSessionEvidenceTests: XCTestCase {
         let eng = FocusSessionEngine(
             clock: clk,
             persisting: st,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-24" }
         )
         return (eng, clk, st)

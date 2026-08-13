@@ -122,11 +122,10 @@ public final class FocusSessionCoordinator {
 
     /// Call after unlock or wake when the user is already active, to skip
     /// waiting for the next idle poll. This uses the coordinator's attribution
-    /// logic (foreground app, recent git activity) to determine the project,
-    /// rather than checking the engine's current project (which is nil when no
-    /// automatic session is active yet), so that a fresh automatic session can
-    /// start immediately. A paused manual session remains paused until an
-    /// explicit manual resume command.
+    /// logic (foreground app, recent git activity) to determine the project.
+    /// The engine's confirmation gate still requires sustained activity before
+    /// a fresh automatic session starts; a paused manual session remains
+    /// paused until an explicit manual resume command.
     public func reportActiveAfterIdle(at date: Date? = nil) {
         let now = date ?? clock.now
         engine.userActivity(in: focusProject(), at: now, reason: .userActivity)

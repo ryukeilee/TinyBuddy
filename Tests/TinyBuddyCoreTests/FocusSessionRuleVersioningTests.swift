@@ -60,7 +60,7 @@ final class FocusSessionRuleVersioningTests: XCTestCase {
         XCTAssertLessThan(v1, v1_1)
         XCTAssertGreaterThan(v2, v1)
         XCTAssertEqual(v1, v1)
-        XCTAssertEqual(FocusSessionRuleVersion(major: 1, minor: 0), FocusSessionRuleVersion.current)
+        XCTAssertEqual(FocusSessionRuleVersion(major: 1, minor: 1), FocusSessionRuleVersion.current)
     }
 
     // MARK: - Rule Set Codable
@@ -117,6 +117,7 @@ final class FocusSessionRuleVersioningTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2026-07-22" },
             ruleVersionProvider: { customVersion }
         )
@@ -224,6 +225,7 @@ final class FocusSessionRuleVersioningTests: XCTestCase {
         return FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { date in
                 let formatter = DateFormatter()
                 formatter.locale = Locale(identifier: "en_US_POSIX")

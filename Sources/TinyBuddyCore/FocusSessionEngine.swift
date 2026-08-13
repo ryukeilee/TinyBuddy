@@ -41,6 +41,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private var currentDay: String = ""
     /// Pending cross‑project switch (brief interruption candidate).
     private var pendingSwitch: PendingSwitch?
+    /// Confirmation gate for automatic session start: a single commit, brief
+    /// typing, or a lone foreground/project-switch event must never start or
+    /// switch an automatic session; sustained activity confirms. In-memory only.
+    private var confirmationGate = FocusSessionConfirmationGate()
     private var lastEditUndo: [FocusSession]?
     /// Exact session list immediately after the last edit. Undo restores the
     /// pre-edit versions of records the edit itself changed or removed, while
@@ -215,7 +219,12 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 return
             }
             guard let idx = sessions.firstIndex(where: \.isOpen) else {
-                startSession(in: p, at: when, reason: reason, into: &sessions)
+                // Automatic sessions start only after the confirmation gate's
+                // reliable condition is met; a single activity event must
+                // never start one. Unconfirmed activity changes nothing.
+                if recordConfirmation(project: p, at: when) {
+                    startSession(in: p, at: when, reason: reason, into: &sessions)
+                }
                 return
             }
             let cur = sessions[idx]
@@ -243,9 +252,18 @@ public final class FocusSessionEngine: @unchecked Sendable {
             // Block auto project switching during manual sessions.
             guard !sessions.contains(where: { $0.isOpen && $0.mode == .manual }) else { return }
             guard let p = project else { return }
-            guard let idx = sessions.firstIndex(where: \.isOpen) else { return }
+            guard let idx = sessions.firstIndex(where: \.isOpen) else {
+                // A foreground change alone neither starts nor accumulates a
+                // session, but a switch away resets confirmation accumulation.
+                if confirmationGate.trackedProjectKey != p.key {
+                    confirmationGate.reset()
+                }
+                return
+            }
             let cur = sessions[idx]
             guard cur.project != p else { return }
+            // A project switch resets confirmation accumulation.
+            confirmationGate.reset()
             handleProjectArrival(sessions: &sessions, candidate: p, when: when)
         }
     }
@@ -264,6 +282,13 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 let pauseDuration = when.timeIntervalSince(pauseStart)
                 if pauseDuration >= config.longAbsenceThreshold {
                     endSession(at: idx, endedAt: pauseStart, reason: .idle, into: &sessions)
+                    // The session is over: discard any pending switch with it.
+                    // A stale away boundary would otherwise be consumed by the
+                    // next confirmed switch and wipe the new session's time.
+                    pendingSwitch = nil
+                    // Re-entry after the long absence must re-satisfy the
+                    // confirmation gate; a single event must not revive it.
+                    confirmationGate.reset()
                 }
                 return
             }
@@ -286,6 +311,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
             guard pauseDuration >= config.longAbsenceThreshold else { return }
             endSession(at: idx, endedAt: pauseStart, reason: .idle, into: &sessions)
             pendingSwitch = nil
+            confirmationGate.reset()
         }
     }
 
@@ -295,6 +321,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
         return apply { sessions in
             guard let idx = sessions.firstIndex(where: \.isOpen) else {
                 pendingSwitch = nil
+                confirmationGate.reset()
                 return
             }
             if sessions[idx].mode == .manual {
@@ -306,6 +333,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 endSession(at: idx, endedAt: when, reason: .lockScreen, into: &sessions)
             }
             pendingSwitch = nil
+            confirmationGate.reset()
         }
     }
 
@@ -314,6 +342,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
         _ = clampToNow(date)
         return apply { sessions in
             pendingSwitch = nil
+            confirmationGate.reset()
         }
     }
 
@@ -345,6 +374,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 )
             }
             pendingSwitch = nil
+            confirmationGate.reset()
             currentDay = newDay
         }
         // A new day/week changes the visible report even when there was no
@@ -442,6 +472,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
             }
             // Clear any pending auto switch — manual is now in control.
             pendingSwitch = nil
+            confirmationGate.reset()
             // Start the new manual session.
             let session = FocusSession(
                 project: project,
@@ -522,6 +553,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
             )
             // Clear all pending automatic state so auto-detection starts clean.
             pendingSwitch = nil
+            confirmationGate.reset()
         }
     }
 
@@ -1149,6 +1181,7 @@ private extension FocusSessionEngine {
         lastEditUndo = previous
         lastEditPostSessions = working
         pendingSwitch = nil
+        confirmationGate.reset()
         committedRevision += 1
         confirmedRevision = nextRevision
         archiveRevision = nextArchiveRevision
@@ -1627,6 +1660,7 @@ private extension FocusSessionEngine {
         // An unattributed input confirms the user returned to the current
         // session, so a foreground-only switch candidate is no longer valid.
         pendingSwitch = nil
+        confirmationGate.reset()
     }
 
     func sameProjectActivity(
@@ -1642,7 +1676,9 @@ private extension FocusSessionEngine {
             when
         )
         // User returned to the original project — brief interruption merge.
+        // Any switch-candidate accumulation is stale and must not carry over.
         pendingSwitch = nil
+        confirmationGate.reset()
     }
 
     func differentProjectActivity(
@@ -1652,10 +1688,19 @@ private extension FocusSessionEngine {
         when: Date,
         reason: FocusSessionDecisionReason
     ) {
-        // User activity in a project different from the current session is a real
-        // focus switch — end the current session and start the new one immediately.
-        // If a pending switch exists, use its away timestamp as the boundary
-        // so the away gap is never double-counted nor overlapped.
+        // A single activity in another project must not switch the running
+        // session: only sustained activity confirms the switch. Until then the
+        // current session pauses as a pending switch (brief returns merge as
+        // before) so the away interval is never counted.
+        guard recordConfirmation(project: candidate, at: when) else {
+            if pendingSwitch?.candidate != candidate {
+                handleProjectArrival(sessions: &sessions, candidate: candidate, when: when)
+            }
+            return
+        }
+        // Confirmed: real focus switch — end the current session and start the
+        // new one. If a pending switch exists, use its away timestamp as the
+        // boundary so the away gap is never double-counted nor overlapped.
         let requestedStart: Date
         if let pending = pendingSwitch {
             requestedStart = pending.awayStartedAt
@@ -1668,9 +1713,29 @@ private extension FocusSessionEngine {
         startSession(in: candidate, at: startAt, reason: reason, into: &sessions)
     }
 
+    /// Feeds the confirmation gate and reports whether the reliable condition
+    /// is satisfied. On confirmation the gate resets so the session that is
+    /// about to start owns the focus until it ends.
+    private func recordConfirmation(project: FocusProjectContext, at date: Date) -> Bool {
+        let confirmed = confirmationGate.recordActivity(
+            project: project,
+            at: date,
+            window: config.confirmationWindow,
+            minimumActiveDuration: config.confirmationMinimumActiveDuration
+        )
+        if confirmed {
+            confirmationGate.reset()
+        }
+        return confirmed
+    }
+
     func handleProjectArrival(sessions: inout [FocusSession], candidate: FocusProjectContext, when: Date) {
         guard let idx = sessions.firstIndex(where: \.isOpen) else {
-            startSession(in: candidate, at: when, reason: .projectSwitch, into: &sessions)
+            // Defensive: a foreground arrival alone never starts a session;
+            // sustained activity through the confirmation gate does.
+            if recordConfirmation(project: candidate, at: when) {
+                startSession(in: candidate, at: when, reason: .projectSwitch, into: &sessions)
+            }
             return
         }
         let cur = sessions[idx]
@@ -1688,6 +1753,9 @@ private extension FocusSessionEngine {
     func commitPendingSwitch(sessions: inout [FocusSession], when: Date) {
         guard let pending = pendingSwitch else { return }
         if let idx = sessions.firstIndex(where: { $0.id == pending.fromSessionId && $0.isOpen }) {
+            // Sustained activity in the candidate must confirm the switch;
+            // a single event must not commit it.
+            guard recordConfirmation(project: pending.candidate, at: when) else { return }
             let boundary = transitionTime(for: sessions[idx], requested: pending.awayStartedAt)
             endSession(at: idx, endedAt: boundary, reason: .projectSwitch, into: &sessions)
             startSession(in: pending.candidate, at: boundary, reason: .projectSwitch, into: &sessions)
@@ -1705,6 +1773,7 @@ private extension FocusSessionEngine {
                 endSession(at: idx, endedAt: when, reason: reason, into: &sessions)
             }
             pendingSwitch = nil
+            confirmationGate.reset()
         }
     }
 

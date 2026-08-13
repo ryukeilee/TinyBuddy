@@ -49,6 +49,7 @@ final class PetViewRenderingTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: RenderingFakeClock(today),
             persisting: RenderingMemoryStore(),
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { renderingDayIdentifier(for: $0) },
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))

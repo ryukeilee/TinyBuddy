@@ -69,6 +69,12 @@ public struct FocusSessionRuleSet: Codable, Equatable, Sendable {
             let new = configuration.maxSessionSpan.map { formatSeconds($0) } ?? "unlimited"
             result.append("Max session span: \(old) → \(new)")
         }
+        if configuration.confirmationWindow != other.configuration.confirmationWindow {
+            result.append("Confirmation window: \(formatSeconds(other.configuration.confirmationWindow)) → \(formatSeconds(configuration.confirmationWindow))")
+        }
+        if configuration.confirmationMinimumActiveDuration != other.configuration.confirmationMinimumActiveDuration {
+            result.append("Confirmation minimum active duration: \(formatSeconds(other.configuration.confirmationMinimumActiveDuration)) → \(formatSeconds(configuration.confirmationMinimumActiveDuration))")
+        }
 
         // Attribution policy differences
         if attributionPolicy.gitAttributionWindow != other.attributionPolicy.gitAttributionWindow {
@@ -122,6 +128,7 @@ extension FocusSessionConfiguration: Codable {
     private enum CodingKeys: String, CodingKey {
         case idleThreshold, briefInterruptionThreshold, longAbsenceThreshold
         case maxSessionSpan, dayBoundaryTolerance
+        case confirmationWindow, confirmationMinimumActiveDuration
     }
 
     public init(from decoder: Decoder) throws {
@@ -131,6 +138,11 @@ extension FocusSessionConfiguration: Codable {
         longAbsenceThreshold = try container.decode(TimeInterval.self, forKey: .longAbsenceThreshold)
         maxSessionSpan = try container.decodeIfPresent(TimeInterval.self, forKey: .maxSessionSpan)
         dayBoundaryTolerance = try container.decodeIfPresent(TimeInterval.self, forKey: .dayBoundaryTolerance) ?? 1
+        confirmationWindow = try container.decodeIfPresent(TimeInterval.self, forKey: .confirmationWindow) ?? 1800
+        confirmationMinimumActiveDuration = try container.decodeIfPresent(
+            TimeInterval.self,
+            forKey: .confirmationMinimumActiveDuration
+        ) ?? 120
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -140,6 +152,8 @@ extension FocusSessionConfiguration: Codable {
         try container.encode(longAbsenceThreshold, forKey: .longAbsenceThreshold)
         try container.encodeIfPresent(maxSessionSpan, forKey: .maxSessionSpan)
         try container.encodeIfPresent(dayBoundaryTolerance, forKey: .dayBoundaryTolerance)
+        try container.encode(confirmationWindow, forKey: .confirmationWindow)
+        try container.encode(confirmationMinimumActiveDuration, forKey: .confirmationMinimumActiveDuration)
     }
 }
 

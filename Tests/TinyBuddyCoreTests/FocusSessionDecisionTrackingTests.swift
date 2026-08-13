@@ -141,6 +141,7 @@ final class FocusSessionDecisionTrackingTests: XCTestCase {
         let restarted = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-25" }
         )
         XCTAssertEqual(restarted.allSessions.last?.endedAt, openLastChange)
@@ -250,6 +251,7 @@ final class FocusSessionDecisionTrackingTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-24" }
         )
         guard case .saved = engine.editSession(id: legacy.id, project: projectB) else {
@@ -285,6 +287,7 @@ final class FocusSessionDecisionTrackingTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-24" },
             projectContextResolver: { _ in redirected }
         )
@@ -310,6 +313,7 @@ final class FocusSessionDecisionTrackingTests: XCTestCase {
         let engine = FocusSessionEngine(
             clock: clock,
             persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-24" }
         )
         return (engine, clock, store)

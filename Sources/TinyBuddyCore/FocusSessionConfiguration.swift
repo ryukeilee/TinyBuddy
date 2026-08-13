@@ -14,18 +14,31 @@ public struct FocusSessionConfiguration: Equatable, Sendable {
     public var maxSessionSpan: TimeInterval?
     /// Tolerance for same-day comparisons / minor clock jitter.
     public var dayBoundaryTolerance: TimeInterval
+    /// Automatic-session confirmation window: activity events for one project
+    /// accumulate only within this span. A longer gap (or a switch to another
+    /// project) resets the accumulation, so a fast A→B→A round trip never
+    /// accumulates across projects into a session.
+    public var confirmationWindow: TimeInterval
+    /// Cumulative active time within `confirmationWindow` that must accumulate
+    /// before an automatic session may start. Values ≤ 0 confirm on the first
+    /// activity event (legacy immediate-start behavior).
+    public var confirmationMinimumActiveDuration: TimeInterval
 
     public init(
         idleThreshold: TimeInterval = 120,
         briefInterruptionThreshold: TimeInterval = 60,
         longAbsenceThreshold: TimeInterval = 600,
         maxSessionSpan: TimeInterval? = nil,
-        dayBoundaryTolerance: TimeInterval = 1
+        dayBoundaryTolerance: TimeInterval = 1,
+        confirmationWindow: TimeInterval = 1800,
+        confirmationMinimumActiveDuration: TimeInterval = 120
     ) {
         self.idleThreshold = idleThreshold
         self.briefInterruptionThreshold = briefInterruptionThreshold
         self.longAbsenceThreshold = longAbsenceThreshold
         self.maxSessionSpan = maxSessionSpan
         self.dayBoundaryTolerance = dayBoundaryTolerance
+        self.confirmationWindow = confirmationWindow
+        self.confirmationMinimumActiveDuration = confirmationMinimumActiveDuration
     }
 }
