@@ -6,35 +6,6 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## 2026-08-09：修复 config 只读验证对 `-f`（`--file` 短形式）读形式误拒
-
-**发现的问题及证据**
-- `GitCommandExecutor.isReadOnlyConfigInvocation` 的带值选项集合（`valueTakingOptions`）只含长形式 `--file`/`--blob`/`--type`/`--default`，缺少 `--file` 的短形式 `-f`，导致合法只读调用 `git config -f <path> <name>` 被误判为写形式 `git config <name> <value>`（`<path>` 被计入裸参数计数=2）而抛 `commandNotAllowed`。
-- 用真实 Git 验证语义：`git config -f .git/config user.name` 退出 0 并输出读取值（与 `--file` 等价）；写形式 `git config -f <path> <name> <value>` 退出 0 会真实写入，必须在只读模式下保持拒绝。
-- 新增测试在修复前运行按预期失败：`config -f <path> <name> is a read but was rejected`。
-- 全量基线：1542 个测试全绿。
-
-**原因分析**
-- 前两轮（修复 `--file`/`--blob`、`--type`/`--default`）已标注剩余风险："带值选项集合不完整，Git 若新增读语义带值选项需同步维护"；`-f` 是 `--file` 的既有短形式，从未被覆盖，属该剩余风险的一个具体实例。带值选项的短形式同样属于"选项自身携带的值"，不应计入配置键/值计数。
-
-**修改内容**
-- `Sources/TinyBuddyCore/GitCommandExecutor.swift`
-  - `isReadOnlyConfigInvocation` 的 `valueTakingOptions` 加入 `-f`，其携带的路径在裸参数计数中被跳过；写形式 `git config -f <path> <name> <value>` 仍有 2 个真实裸参数（`<name>`/`<value>`），继续被拒绝（安全性不变）。
-  - 同步更新该处注释，标注 `-f` 为 `--file` 的短形式。
-- `Tests/TinyBuddyCoreTests/GitCommandExecutorTests.swift`
-  - 新增 `testReadOnlyAllowsConfigFileShortFormRead`：`config -f <path> <name>` 必须执行成功（缺失文件是普通 git 错误而非策略拒绝），不抛 `commandNotAllowed`；并断言写形式 `config -f <path> <name> <value>` 仍抛 `commandNotAllowed`。
-
-**验证结果**
-- 修复前运行新测试：按预期失败，确认缺陷真实存在。
-- 修复后 `swift test --filter GitCommandExecutorTests`：33 个测试（+1）全部通过。
-- `swift test` 全量：1543 个测试（+1），0 失败。
-- `git diff --check`：通过。
-- `git status --short` 复查：仅 GitCommandExecutor.swift、GitCommandExecutorTests.swift 两处改动，无越界修改（观察阶段工作区即为干净状态）。
-
-**剩余风险**
-- `git config` 的带值短形式目前仅 `-f`；若 Git 未来新增其他带值短选项或长选项，仍需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。组合短选项形式（如 `-f<path>`）与 `--file=<path>` 一样不产生额外裸参数，本就不受影响。
-- 本轮只涉及只读验证逻辑，未改变命令执行、超时或取消路径。
-
 ## Loop 6：2026-08-09：建立 Evidence-driven Maintenance Loop 基础设施（memory.md + 归档目录）
 
 **Loop 编号**
@@ -410,5 +381,42 @@
 
 **剩余风险**
 - 本轮为无修改轮次，无新增风险。“继续专注”功能尚未提交；用户已授权后续签名安装运行与提交推送，端到端运行行为由安装运行验证（Loop 12/13 同述的待办）。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+- Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
+## Loop 15：2026-08-13：修复 idleDetected 长缺席结束路径残留陈旧 pendingSwitch（切换边界误用）
+
+**Loop 编号**
+- Loop 15。
+
+**日期**
+- 2026-08-13
+
+**观察结果**
+- 工作区：`git status --short` 显示 17 个已修改文件 + 2 个未跟踪新文件——即自动专注确认门功能（`FocusSessionConfirmationGate` 及其测试，前一轮未提交改动），本轮未覆盖或回滚；`.agent/` 无在途修改（Loop 14 记录已随 `2772659` 提交）。最近提交：`2772659`（Loop 14 记录）、`c8c92f9`（继续专注一键恢复）、`2027e5a`（文档）。
+- `rg "TODO|FIXME|HACK|XXX"`：无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）。
+- 在途确认门改动逐点复核中，对照引擎全部 `pendingSwitch` 清理点（12 处）发现唯一不一致：`idleDetected` 长缺席结束路径（`FocusSessionEngine.swift`）结束时**未清空 `pendingSwitch`**，其余所有会话结束路径（`endPausedSessionAfterLongAbsence`、锁屏、解锁、日切、手动接管、`finalizeOpen`、`edit` 等）均清空。
+
+**选择的问题及证据**
+- 选择"idleDetected 长缺席结束路径残留陈旧 pendingSwitch"这一数据正确性问题（Loop 优先级第 3 位）。
+- 复现条件（确定性）：会话 A 打开 → 前台切到 B（A 暂停、pendingSwitch=(A, away, B)）→ 已暂停状态下 `idleDetected` 且暂停时长 ≥ `longAbsenceThreshold`（A 结束，pendingSwitch 残留）→ 新活动打开 B 会话 → 单次活动切到 C：确认门配置为 `confirmationMinimumActiveDuration ≤ 0`（即时确认）时，确认路径消费陈旧边界：`transitionTime` 把 B 钳制到**自身起点**结束（时长清零），C 从陈旧边界开始，B 的专注时长被错误归属到 C。
+- 修复前运行新测试 `test_idle_long_absence_end_clears_stale_pending_switch` 按预期失败（调试输出实证：B endedAt=自身起点、activeDuration=0；C startedAt=陈旧边界而非活动时刻）。
+- 完成标准：`idleDetected` 结束路径与其他结束路径一致清空 `pendingSwitch`；新测试全绿；焦点类与全量回归无失败。
+
+**原因分析**
+- `idleDetected` 的已暂停分支只处理"暂停超时结束"，遗漏了与 `endPausedSessionAfterLongAbsence` 相同的清理职责（后者清空 `pendingSwitch`）。生产默认阈值（确认门 120s）下陈旧边界总会在被消费前被未确认的首事件替换，实际影响限于即时确认配置（`≤ 0`，恰为全部测试 harness 与"legacy 即时开始"配置所用）；属引擎内既有的潜在数据归属缺陷，此前从未记录或覆盖。
+
+**修改内容**
+- `Sources/TinyBuddyCore/FocusSessionEngine.swift`：`idleDetected` 长缺席结束分支在 `endSession` 后补 `pendingSwitch = nil`（一行，与 `endPausedSessionAfterLongAbsence` 一致）。
+- `Tests/TinyBuddyCoreTests/FocusSessionEngineTests.swift`：新增 `test_idle_long_absence_end_clears_stale_pending_switch`（确定性时钟驱动真实引擎：A→pending B→idle 结束→B 新会话→C 切换，断言 B 时长 30s 保留、C 从真实活动时刻开始）。
+
+**验证结果**
+- 修复前新测试失败（`c.startedAt`=陈旧边界、`b.endedAt`=B 起点、`b.activeDuration`=0）：缺陷真实存在。
+- 修复后新测试通过；焦点类 8 个相关测试类 225 个测试 0 失败。
+- `swift test` 全量：1595 个测试（+1），0 失败。
+- `git diff --check`：通过。
+- `git status --short` 复查：本轮改动仅 `FocusSessionEngine.swift` 与 `FocusSessionEngineTests.swift` 各一处；在途确认门改动原样保留，无越界修改。
+
+**剩余风险**
+- 生产默认阈值下该路径需"即时确认配置 + 精确时序"才可达，属防御性修复；本次以测试固定行为，无新增风险。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
 - Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
