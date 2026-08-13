@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TinyBuddy is a macOS 14 companion HUD (SwiftUI + WidgetKit) that combines a floating desktop pet, shared daily Git-activity stats, and a focus-session engine so the app and a desktop Widget present the same lightweight productivity state. It is built with SwiftPM (`swift-tools-version: 6.0`, `swiftLanguageMode(.v6)`), an XcodeGen source of truth (`project.yml` → `TinyBuddy.xcodeproj`), and Bash release/refresh scripts.
 
-`AGENTS.md` in the repo root is the exhaustive reference for conventions, review guidelines, and definitions of done. Read it before submitting changes; this file is the fast operating summary.
+`AGENTS.md` in the repo root is the exhaustive reference for conventions, review guidelines, and definitions of done. Read it before submitting changes; this file is the fast operating summary. For maintenance work, `.agent/loop.md` defines the repeatable observe→evidence→decide→execute→verify→record→maintain loop with its history in `.agent/history.md` (archived under `.agent/archive/`).
 
 ## Commands
 
@@ -37,9 +37,11 @@ Release modes default to `TINYBUDDY_SIGNING_MODE=local` (profile-free Apple Deve
 
 Three processes cooperate through the App Group `group.com.ryukeili.TinyBuddy`:
 
-- **`script/update_git_completion_count.sh`** — a Bash scanner (the app's only Git reader) that parses reflogs across authorized scan roots and writes raw per-day counters into the app-group preferences plist.
+- **`script/update_git_completion_count.sh`** — a Bash scanner (the app's only Git reader) that parses reflogs across authorized scan roots and writes raw per-day counters plus the path-free development interruption scene into the app-group preferences plist.
 - **`TinyBuddy` (app)** — owns all state. `GitActivityRefreshCoordinator` validates the script's output and commits it; `TinyBuddyCombinedSnapshotStore` is the single source of truth for what HUD, Widget, telemetry, and release verification all consume.
 - **`TinyBuddyWidgetExtension`** — read-only WidgetKit consumer of the combined snapshot (`repairOnLoad: false`); it never writes.
+
+The development interruption scene is the one separate channel: the script writes a v1, 13-field tab-separated payload (fingerprint/name/branch base64 + working-tree counts + recent commit + epochs) to `tinybuddy.developmentInterruption.snapshot.v1` on successful refreshes only; the app reads it via `DevelopmentInterruptionSnapshotStore` (7-day expiry, path-free by design) and shows the "继续上次开发" resume panel in the HUD.
 
 ### The combined snapshot is the heart
 
@@ -56,8 +58,8 @@ Three processes cooperate through the App Group `group.com.ryukeili.TinyBuddy`:
 
 ### Module responsibilities
 
-- **`Sources/TinyBuddyCore/`** — all shared logic: stores, focus-session engine/coordinator/rules/evidence/editing, Git activity stores, project identity registry, combined snapshot store + migrator, data integrity (invariants/validator/repair/quarantine), storage cleanup, time model, widget presentation models, privacy redactor, diagnostics.
-- **`Sources/TinyBuddy/`** — thin SwiftUI HUD + lifecycle wiring: `AppDelegate` coordinates Git refresh, focus session bridge, history archival, login item, reset, HUD window positioning. No business rules live here.
+- **`Sources/TinyBuddyCore/`** — all shared logic: stores, focus-session engine/coordinator/rules/evidence/editing, Git activity stores, project identity registry, development interruption snapshot, combined snapshot store + migrator, data integrity (invariants/validator/repair/quarantine), storage cleanup, time model, widget presentation models, privacy redactor, diagnostics.
+- **`Sources/TinyBuddy/`** — thin SwiftUI HUD + lifecycle wiring: `AppDelegate` coordinates Git refresh, focus session bridge, history archival, login item, reset, HUD window positioning, development interruption resume panel. No business rules live here.
 - **`Sources/TinyBuddyReleaseInstaller/`** / **`Sources/TinyBuddyReleaseVerifier/`** — narrow CLI helpers for the signed release workflow.
 - **`Widget/TinyBuddyWidget/TinyBuddyWidget.swift`** — the single widget entry point.
 

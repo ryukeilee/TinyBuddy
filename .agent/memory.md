@@ -15,6 +15,7 @@
   - `TinyBuddy`（App）：拥有全部状态；`GitActivityRefreshCoordinator` 校验脚本输出并提交。
   - `TinyBuddyWidgetExtension`：只读 WidgetKit 消费者（`repairOnLoad: false`），从不写入。
 - 组合快照是唯一真相：`TinyBuddyCombinedSnapshotStore` 合并宠物、Git 活动与焦点历史切片，revision 单调、带 schema 版本（V3 为新写入格式，V2/V1 为旧读者镜像）；写入采用双槽 A/B 事务 + 独立校验的 `committedRevision` 标记，崩溃不会暴露撕裂状态。HUD、Widget、遥测与 Release 校验必须读同一份已提交组合快照。
+- 开发中断恢复是唯一独立通道（不经组合快照）：脚本在成功刷新时把路径无关的场景（base64 fingerprint/name/branch、工作树计数、最近提交、活动/捕获时间）以 v1 13 字段制表符格式写入 App Group 键 `tinybuddy.developmentInterruption.snapshot.v1`，App 经 `DevelopmentInterruptionSnapshotStore` 读取（7 天过期窗口 + 5 分钟未来容忍，主 App 启动时清理过期值，重置服务一并清除该键），HUD 的"继续上次开发"面板展示；失败/跳过刷新不覆盖旧场景，仅持久化 fingerprint 与展示名、永不写仓库路径。跨进程契约测试见 `GitActivityRefreshScriptTests` 与 `DevelopmentInterruptionSnapshotTests`。
 - 时间模型：`TinyBuddyTimeEnvironment` 是本地日边界的权威来源，所有快照、焦点与 Git 活动归属共用同一日边界；`TinyBuddyTimeCalibrator`/`TinyBuddyTimeContinuityRecord` 处理时钟、DST 与日变化。
 
 ## 模块职责边界
