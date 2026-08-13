@@ -212,7 +212,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         combinedSnapshotStore: combinedSnapshotStore,
         refreshStatusStore: refreshStatusStore,
         notificationCenter: notificationCenter,
-        timeEnvironment: timeEnvironment
+        timeEnvironment: timeEnvironment,
+        registeredProjectsProvider: { [weak self] in
+            self?.activeManualFocusProjects ?? []
+        }
     )
     private lazy var gitActivityRefreshCoordinator = GitActivityRefreshCoordinator(
         activityStore: activityStore,

@@ -93,6 +93,11 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var refreshDiagnostics: RefreshDiagnostics
     @Published private(set) var hiddenSnapshotDiagnosticSummary: TinyBuddyHiddenSnapshotDiagnosticSummary?
     @Published private(set) var developmentInterruptionSnapshot: DevelopmentInterruptionSnapshot?
+    /// One-click “继续专注” gating for the development-interruption card.
+    /// Derived from the snapshot fingerprint vs. the project registry and the
+    /// engine's currently open session; `.available` is the only state that
+    /// may start a session.
+    @Published private(set) var developmentInterruptionResumeState: DevelopmentInterruptionResumeState = .blocked
     /// The same revision-bound session history that the Widget and Settings
     /// report consume. HUD rendering never re-derives it from raw sessions.
     @Published private(set) var focusHistoryPublication: FocusHistoryPublication?
@@ -134,6 +139,7 @@ final class PetViewModel: ObservableObject {
     private let developmentInterruptionStore: DevelopmentInterruptionSnapshotStore
     private let notificationCenter: NotificationCenter
     private let timeEnvironment: TinyBuddyTimeEnvironment
+    private let registeredProjectsProvider: () -> [TinyBuddyProject]
     private let widgetReloader: () throws -> Void
     private let sharedSnapshotDiagnosticRecorder: TinyBuddySharedSnapshotDiagnosticRecorder
     private let hudSnapshotConsumptionRecorder: (TinyBuddyHUDSnapshotConsumption) -> Void
@@ -160,6 +166,7 @@ final class PetViewModel: ObservableObject {
         developmentInterruptionStore: DevelopmentInterruptionSnapshotStore = DevelopmentInterruptionSnapshotStore(),
         notificationCenter: NotificationCenter = .default,
         timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
+        registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] },
         widgetReloader: @escaping () throws -> Void = {
             TinyBuddyWidgetReloadCoordinator.shared.requestReload()
         },
@@ -247,6 +254,7 @@ final class PetViewModel: ObservableObject {
         self.developmentInterruptionStore = developmentInterruptionStore
         self.notificationCenter = notificationCenter
         self.timeEnvironment = timeEnvironment
+        self.registeredProjectsProvider = registeredProjectsProvider
         self.widgetReloader = widgetReloader
         self.sharedSnapshotDiagnosticRecorder = sharedSnapshotDiagnosticRecorder
         self.hudSnapshotConsumptionRecorder = hudSnapshotConsumptionRecorder
@@ -264,6 +272,7 @@ final class PetViewModel: ObservableObject {
         self.hiddenSnapshotDiagnosticSummary = sharedSnapshotDiagnosticRecorder.latestSummary
         self.developmentInterruptionSnapshot = developmentInterruptionSnapshot
         self.focusHistoryPublication = combinedHUDState.committedSnapshot?.focusHistoryPublication
+        reloadDevelopmentInterruptionResumeState()
         recordHUDConsumptionIfMatching(
             snapshot: snapshot,
             activitySnapshot: activitySnapshot,
@@ -425,6 +434,15 @@ final class PetViewModel: ObservableObject {
                 self?.focusSessionStatsDidChange(reloadWidget: reloadWidget)
             }
         })
+        observers.append(notificationCenter.addObserver(
+            forName: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.reloadDevelopmentInterruptionResumeState()
+            }
+        })
     }
 
     func select(_ nextStatus: PetStatus) {
@@ -525,6 +543,21 @@ final class PetViewModel: ObservableObject {
         refreshManualControlState()
     }
 
+    /// One-click “继续专注” for the development-interruption card. Recomputes
+    /// the gate at call time so a stale published state can never start a
+    /// session; every non-`.available` state is a safe no-op that creates or
+    /// mutates nothing.
+    func resumeDevelopmentInterruption() {
+        reloadDevelopmentInterruptionResumeState()
+        guard case .available(let project) = developmentInterruptionResumeState else {
+            return
+        }
+        startManualFocus(project: FocusProjectContext(
+            key: project.id.rawValue,
+            displayName: project.displayName
+        ))
+    }
+
     /// Pause the current manual focus session.
     func pauseManualFocus() {
         guard let engine = focusSessionEngine else { return }
@@ -572,6 +605,7 @@ final class PetViewModel: ObservableObject {
         case .paused, .idle:
             stopManualControlRefresh()
         }
+        reloadDevelopmentInterruptionResumeState()
     }
 
     private func startManualControlRefreshIfNeeded() {
@@ -705,6 +739,29 @@ final class PetViewModel: ObservableObject {
         if developmentInterruptionSnapshot != nextSnapshot {
             developmentInterruptionSnapshot = nextSnapshot
         }
+        reloadDevelopmentInterruptionResumeState()
+    }
+
+    /// Recomputes the one-click resume gate from the latest snapshot, registry
+    /// projection, and the engine's currently open session (manual or
+    /// automatic). Pure and cheap; safe to call on every lifecycle hook.
+    private func reloadDevelopmentInterruptionResumeState() {
+        let openSession: (project: FocusProjectContext, status: FocusSessionStatus)?
+        if let engine = focusSessionEngine, let project = engine.currentProject {
+            openSession = (project: project, status: engine.currentSessionStatus ?? .active)
+        } else {
+            openSession = nil
+        }
+        let nextState = developmentInterruptionSnapshot.map { snapshot in
+            DevelopmentInterruptionResumeDecision.make(
+                fingerprint: snapshot.repositoryFingerprint,
+                projects: registeredProjectsProvider(),
+                openSession: openSession
+            )
+        } ?? .blocked
+        if developmentInterruptionResumeState != nextState {
+            developmentInterruptionResumeState = nextState
+        }
     }
 
     private static func makeRefreshDiagnostics(
@@ -825,6 +882,7 @@ final class PetViewModel: ObservableObject {
     func focusSessionStatsDidChange(reloadWidget: Bool = true) {
         let previousHistory = focusHistoryPublication
         let didChange = reloadCommittedHUDState()
+        reloadDevelopmentInterruptionResumeState()
         // Elapsed focus duration lives in the history publication rather than
         // the legacy count-based display presentation. Reload WidgetKit when
         // that authoritative slice changes even if the status/count UI did not.

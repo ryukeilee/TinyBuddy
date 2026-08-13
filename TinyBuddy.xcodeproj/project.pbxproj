@@ -90,6 +90,7 @@
 		D5EEB7DAC526407C74016447 /* FocusSessionSnapshotPublicationJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB3B1EA64DD8323CD9492AF8 /* FocusSessionSnapshotPublicationJournal.swift */; };
 		D8032BD68E38F54C02BC67F0 /* GitTodayActivitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B2356A5A3AB0BC7E871B67 /* GitTodayActivitySnapshot.swift */; };
 		D8125FF0FA9D02EBC5243366 /* TinyBuddyTimelineGenerationTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EFD2F2B68FF37328CE7FF1E /* TinyBuddyTimelineGenerationTracker.swift */; };
+		D84AD3E2E97647B6C9DC9F99 /* DevelopmentInterruptionRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBBE71F9D6A38C22C04CA48 /* DevelopmentInterruptionRecovery.swift */; };
 		DC39C9FAA183B33F8A711422 /* TinyBuddyDataRepairEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9346814758D580F03E3A9591 /* TinyBuddyDataRepairEngine.swift */; };
 		DEC823FA3D30129CBEDEDE2E /* FocusSessionQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6619ECAC55E516619FB7CCA /* FocusSessionQuery.swift */; };
 		E1587B65053364BEB431A4FA /* libTinyBuddyCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6796FBF433D0F4D59BDCBF74 /* libTinyBuddyCore.a */; };
@@ -169,6 +170,7 @@
 		3326B206AF7806B7FA7617C6 /* TinyBuddyTimeCalibrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyTimeCalibrator.swift; sourceTree = "<group>"; };
 		368B956AA4CDD441F77A9FE2 /* FocusSessionQueryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSessionQueryService.swift; sourceTree = "<group>"; };
 		36B82C6587B4222259145296 /* TinyBuddyPrivacyRedactor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyPrivacyRedactor.swift; sourceTree = "<group>"; };
+		3CBBE71F9D6A38C22C04CA48 /* DevelopmentInterruptionRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentInterruptionRecovery.swift; sourceTree = "<group>"; };
 		407F72F9E84A576635B0E034 /* TinyBuddyDataValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyDataValidator.swift; sourceTree = "<group>"; };
 		41815B81BAED2AD15F32A336 /* TinyBuddyDataInvariant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyDataInvariant.swift; sourceTree = "<group>"; };
 		4362C69C975766D10F6DC396 /* TinyBuddyTransactionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyBuddyTransactionLog.swift; sourceTree = "<group>"; };
@@ -357,6 +359,7 @@
 			children = (
 				C9BCCD796B2241BD8B52FB1A /* DailyStats.swift */,
 				7603BBF06B0D7E24C2CADBD4 /* DailyStatsStore.swift */,
+				3CBBE71F9D6A38C22C04CA48 /* DevelopmentInterruptionRecovery.swift */,
 				FC6691E81A4CF77FE12645AB /* DevelopmentInterruptionSnapshot.swift */,
 				4378CF590FFCC47D0266D429 /* FocusGoalConfiguration.swift */,
 				50DB07106220C7851D6FCAE1 /* FocusHistoryAggregation.swift */,
@@ -635,6 +638,7 @@
 			files = (
 				9E843273B4BFEC5E16B69712 /* DailyStats.swift in Sources */,
 				8AC0469D9BB8F7ED958A9C02 /* DailyStatsStore.swift in Sources */,
+				D84AD3E2E97647B6C9DC9F99 /* DevelopmentInterruptionRecovery.swift in Sources */,
 				69B1219E2CC04E9E0C9D8337 /* DevelopmentInterruptionSnapshot.swift in Sources */,
 				06F052B409DFE90C78A13233 /* FocusGoalConfiguration.swift in Sources */,
 				FDBC51FD23CCB4F2907FCB5F /* FocusHistoryAggregation.swift in Sources */,

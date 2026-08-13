@@ -584,6 +584,15 @@ public final class FocusSessionEngine: @unchecked Sendable {
         return sessions.first(where: \.isOpen)?.project
     }
 
+    /// The live status of the currently open session (manual or automatic),
+    /// if any. Unlike `manualControlState`, this also covers automatically
+    /// attributed sessions, which consumers must not ignore when gating
+    /// one-click resume actions.
+    public var currentSessionStatus: FocusSessionStatus? {
+        lock.lock(); defer { lock.unlock() }
+        return sessions.first(where: \.isOpen)?.status
+    }
+
     /// Whether an automatically or manually attributed session is actively
     /// accumulating time. A paused open session deliberately reports false.
     public var isFocusSessionActive: Bool {

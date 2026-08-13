@@ -398,58 +398,99 @@ struct PetView: View {
                     now: context.date
                 )
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .foregroundStyle(statusAccent)
-                        Text("继续上次开发")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(primaryText)
-                        Spacer(minLength: 4)
-                        Text(interruption.awayDurationText)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(secondaryText)
-                            .lineLimit(1)
-                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.uturn.backward.circle.fill")
+                                .foregroundStyle(statusAccent)
+                            Text("继续上次开发")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(primaryText)
+                            Spacer(minLength: 4)
+                            Text(interruption.awayDurationText)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(secondaryText)
+                                .lineLimit(1)
+                        }
 
-                    HStack(spacing: 5) {
-                        Text(interruption.repositoryName)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(primaryText)
-                            .lineLimit(1)
-                        Text("·")
-                            .foregroundStyle(secondaryText)
-                        Label(interruption.branchName, systemImage: "arrow.triangle.branch")
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+                        HStack(spacing: 5) {
+                            Text(interruption.repositoryName)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(primaryText)
+                                .lineLimit(1)
+                            Text("·")
+                                .foregroundStyle(secondaryText)
+                            Label(interruption.branchName, systemImage: "arrow.triangle.branch")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
 
-                    Text(interruption.workingTreeText)
-                        .font(.caption2)
-                        .foregroundStyle(
-                            snapshot.workingTree.isClean ? secondaryText : statusAccent
-                        )
-                        .lineLimit(2)
-
-                    if let recentCommitText = interruption.recentCommitText {
-                        Label(recentCommitText, systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                        Text(interruption.workingTreeText)
                             .font(.caption2)
-                            .foregroundStyle(secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                            .foregroundStyle(
+                                snapshot.workingTree.isClean ? secondaryText : statusAccent
+                            )
+                            .lineLimit(2)
+
+                        if let recentCommitText = interruption.recentCommitText {
+                            Label(recentCommitText, systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                                .font(.caption2)
+                                .foregroundStyle(secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "继续上次开发，\(interruption.repositoryName)，分支 \(interruption.branchName)，\(interruption.workingTreeText)，\(interruption.recentCommitText ?? "暂无提交")，\(interruption.awayDurationText)"
+                    )
+
+                    developmentResumeActionRow
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .background(panelFill)
                 .overlay(panelBorder)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(
-                    "继续上次开发，\(interruption.repositoryName)，分支 \(interruption.branchName)，\(interruption.workingTreeText)，\(interruption.recentCommitText ?? "暂无提交")，\(interruption.awayDurationText)"
-                )
             }
+        }
+    }
+
+    /// The action/state row of the development-interruption card. Only the
+    /// exact-match `.available` state renders a start control; every other
+    /// state is read-only and the resume action itself is a safe no-op.
+    @ViewBuilder
+    private var developmentResumeActionRow: some View {
+        switch viewModel.developmentInterruptionResumeState {
+        case .available(let project):
+            Button {
+                viewModel.resumeDevelopmentInterruption()
+            } label: {
+                Label("继续专注", systemImage: "play.circle.fill")
+                    .font(.caption.weight(.bold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(statusAccent)
+            .accessibilityLabel("继续专注：\(project.displayName)")
+        case .inProgress(let project, let status):
+            Label(
+                status == .active
+                    ? "专注中 · \(project.displayName)"
+                    : "已暂停 · \(project.displayName)",
+                systemImage: status == .active ? "scope" : "pause.circle.fill"
+            )
+            .font(.caption.weight(.bold))
+            .foregroundStyle(statusAccent)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .accessibilityLabel(
+                status == .active
+                    ? "专注中：\(project.displayName)"
+                    : "已暂停：\(project.displayName)"
+            )
+        case .blocked:
+            EmptyView()
         }
     }
 

@@ -918,7 +918,7 @@ final class PetViewModelTests: XCTestCase {
             widgetReloader: { widgetReloadCount += 1 }
         )
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 8)
+        XCTAssertEqual(viewModel.notificationObserverCount, 9)
 
         for _ in 0..<25 {
             notificationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
@@ -926,7 +926,7 @@ final class PetViewModelTests: XCTestCase {
         await Task.yield()
         await Task.yield()
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 8)
+        XCTAssertEqual(viewModel.notificationObserverCount, 9)
         XCTAssertEqual(widgetReloadCount, 0)
     }
 
@@ -1402,7 +1402,7 @@ final class PetViewModelTests: XCTestCase {
         )
         await Task.yield()
 
-        XCTAssertEqual(viewModel.notificationObserverCount, 8)
+        XCTAssertEqual(viewModel.notificationObserverCount, 9)
         XCTAssertEqual(
             viewModel.hiddenSnapshotDiagnosticSummary?.identifier,
             "tinybuddy.sharedSnapshot.gitScan.gitScanFailed"
