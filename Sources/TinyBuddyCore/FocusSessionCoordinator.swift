@@ -82,6 +82,14 @@ public final class FocusSessionCoordinator {
         )
     }
 
+    /// Periodic heartbeat while the user is active (idle-poll cadence). Feeds
+    /// the engine's confirmation gate so sustained work confirms even without
+    /// transition, commit, or foreground events; never mutates an open
+    /// same-project session.
+    public func reportSustainedActivity(at date: Date? = nil) {
+        engine.reportSustainedActivity(in: focusProject(), at: date ?? clock.now)
+    }
+
     /// Call on non‑automated git activity.  `automated: true` is silently ignored,
     /// satisfying the "background git must not create sessions" requirement.
     public func reportGitActivity(

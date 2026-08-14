@@ -255,6 +255,10 @@ final class FocusSessionAppBridge {
             // Check day change every active poll (not just every 6th) so
             // cross-midnight active sessions are closed promptly.
             checkDayChange()
+            // Sustained-activity heartbeat: continuous typing produces no
+            // transition event after the first, so the confirmation gate
+            // needs this periodic feed to recognize real work.
+            coordinator.reportSustainedActivity()
             publishLiveFocusHistoryIfNeeded()
         }
 

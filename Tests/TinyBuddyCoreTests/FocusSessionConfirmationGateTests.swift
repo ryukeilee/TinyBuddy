@@ -591,4 +591,104 @@ extension FocusSessionEngineTests {
         var immediate = FocusSessionConfirmationGate()
         XCTAssertTrue(immediate.recordActivity(project: gateProjectA, at: gateT0, window: 300, minimumActiveDuration: 0))
     }
+
+    // MARK: Production feed — periodic sustained-activity heartbeat
+
+    /// The production idle poll reports sustained activity every poll while the
+    /// user is active. Continuous typing without commits and without any
+    /// idle→active transition must still confirm through the heartbeat, or
+    /// automatic sessions would never start for typing-only work.
+    func testConfirmationGate_heartbeatStartsSessionForContinuousTyping() {
+        let clock = FakeClock(gateT0)
+        let store = MemoryStore()
+        let engine = makeGateEngine(clock: clock, store: store)
+
+        // One transition event, then nothing but 15s heartbeats (the
+        // production poll cadence) — no commits, no further transitions.
+        XCTAssertEqual(engine.userActivity(in: gateProjectA, at: gateT0), .noChange)
+        var outcome: FocusSessionUpdateOutcome = .noChange
+        for _ in 1 ... 8 {
+            clock.advance(by: 15)
+            outcome = engine.reportSustainedActivity(in: gateProjectA, at: clock.now)
+        }
+        XCTAssertEqual(outcome, .saved)
+
+        XCTAssertEqual(engine.allSessions.count, 1)
+        let session = try! XCTUnwrap(engine.allSessions.first)
+        XCTAssertTrue(session.isOpen)
+        XCTAssertEqual(session.project, gateProjectA)
+        // The session starts at the confirming heartbeat, never at the first event.
+        XCTAssertEqual(session.startedAt, gateT0.addingTimeInterval(8 * 15))
+        XCTAssertEqual(session.activeDuration(now: clock.now), 0, accuracy: 0.001)
+    }
+
+    /// The heartbeat must feed only the confirmation gate: for an already-open
+    /// same-project session it is a pure no-op that never mutates state or
+    /// writes (a live session accrues time without journal writes).
+    func testConfirmationGate_heartbeatDoesNotMutateOrPersistOpenSession() {
+        let clock = FakeClock(gateT0)
+        let store = MemoryStore()
+        let engine = makeGateEngine(clock: clock, store: store)
+
+        _ = confirmActivity(engine: engine, in: gateProjectA, startAt: gateT0, clock: clock)
+        let saveCountAfterConfirm = store.saveCount
+        let sessionBefore = try! XCTUnwrap(engine.allSessions.first)
+
+        clock.advance(by: 15)
+        XCTAssertEqual(
+            engine.reportSustainedActivity(in: gateProjectA, at: clock.now),
+            .noChange
+        )
+        clock.advance(by: 15)
+        XCTAssertEqual(
+            engine.reportSustainedActivity(in: gateProjectA, at: clock.now),
+            .noChange
+        )
+
+        let sessionAfter = try! XCTUnwrap(engine.allSessions.first)
+        XCTAssertEqual(sessionAfter.startedAt, sessionBefore.startedAt)
+        XCTAssertNil(sessionAfter.endedAt)
+        XCTAssertEqual(
+            store.saveCount,
+            saveCountAfterConfirm,
+            "Heartbeat must not persist for an open same-project session"
+        )
+    }
+
+    /// Continuous typing in a new project (no idle transition, no commit) must
+    /// confirm the pending switch through the heartbeat: the old session ends
+    /// at the away boundary and the new one starts there.
+    func testConfirmationGate_heartbeatConfirmsSwitchForContinuousTypingInNewProject() {
+        let clock = FakeClock(gateT0)
+        let store = MemoryStore()
+        let engine = makeGateEngine(clock: clock, store: store)
+
+        _ = confirmActivity(engine: engine, in: gateProjectA, startAt: gateT0, clock: clock)
+        XCTAssertEqual(engine.allSessions.count, 1)
+
+        // Foreground change to B sets up the pending switch; then only
+        // heartbeats arrive — the user never goes idle and never commits.
+        // The first heartbeat only starts tracking; 9 heartbeats add 8 gaps
+        // of 15s = the 120s minimum active duration.
+        let switchAt = clock.now
+        engine.foregroundProjectChanged(to: gateProjectB, at: switchAt)
+        var outcome: FocusSessionUpdateOutcome = .noChange
+        for _ in 1 ... 9 {
+            clock.advance(by: 15)
+            outcome = engine.reportSustainedActivity(in: gateProjectB, at: clock.now)
+        }
+        XCTAssertEqual(outcome, .saved)
+
+        XCTAssertEqual(engine.allSessions.count, 2)
+        let aSession = try! XCTUnwrap(engine.allSessions.first { $0.project == gateProjectA })
+        let bSession = try! XCTUnwrap(engine.allSessions.first { $0.project == gateProjectB })
+        XCTAssertFalse(aSession.isOpen)
+        XCTAssertEqual(aSession.endedAt, switchAt)
+        XCTAssertEqual(aSession.activeDuration(now: clock.now), 0, accuracy: 0.001)
+        XCTAssertTrue(bSession.isOpen)
+        XCTAssertEqual(bSession.startedAt, switchAt)
+        // The away interval (9 heartbeats × 15s) belongs to the arrival
+        // project: the switch boundary is the away start, never double-counted.
+        XCTAssertEqual(bSession.activeDuration(now: clock.now), 9 * 15, accuracy: 0.001)
+    }
 }

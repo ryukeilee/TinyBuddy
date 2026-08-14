@@ -242,6 +242,37 @@ public final class FocusSessionEngine: @unchecked Sendable {
         }
     }
 
+    /// Periodic activity heartbeat while the user is active (idle-poll
+    /// cadence). Feeds the confirmation gate so sustained work is recognized
+    /// even when no transition, commit, or foreground event arrives —
+    /// continuous typing without idle produces no other engine event, and
+    /// without this the gate could never confirm. It never mutates or persists
+    /// an already-open same-project session (a live session accrues time
+    /// without journal writes), and it never touches manual sessions.
+    @discardableResult
+    public func reportSustainedActivity(in project: FocusProjectContext?, at date: Date) -> FocusSessionUpdateOutcome {
+        let when = clampToNow(date)
+        return apply { sessions in
+            guard !sessions.contains(where: { $0.isOpen && $0.mode == .manual }) else { return }
+            guard let p = project else { return }
+            guard let idx = sessions.firstIndex(where: \.isOpen) else {
+                if recordConfirmation(project: p, at: when) {
+                    startSession(in: p, at: when, reason: .userActivity, into: &sessions)
+                }
+                return
+            }
+            let cur = sessions[idx]
+            guard cur.project != p else { return }
+            differentProjectActivity(
+                idx: idx,
+                sessions: &sessions,
+                candidate: p,
+                when: when,
+                reason: .userActivity
+            )
+        }
+    }
+
     /// The foreground app changed.  This only sets up a pending switch; a real
     /// session only begins when user activity is confirmed in the new project.
     /// During a manual session, foreground changes are ignored.
