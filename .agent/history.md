@@ -6,50 +6,6 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## Loop 6：2026-08-09：建立 Evidence-driven Maintenance Loop 基础设施（memory.md + 归档目录）
-
-**Loop 编号**
-- Loop 6（本文件第 6 条记录；既有 5 条记录未编号，本轮起按 Record 契约显式编号）。
-
-**日期**
-- 2026-08-09
-
-**观察结果**
-- 现有 `.agent/` 体系（loop.md/rules.md/history.md）已运行多轮，但对照"Evidence-driven Maintenance Loop"目标存在结构性缺口：
-  - `memory.md` 不存在；loop.md 入口与 Observe 阶段未要求读取长期项目知识。
-  - Decide 优先级为 6 级旧版（Bug/稳定性/性能/错误处理/测试缺口/用户体验），缺"数据正确性风险"与"可维护性问题"。
-  - Record 字段缺"Loop 编号"与"观察结果"。
-  - 归档位置约定为 `.agent/history-archive.md`，与目标要求的 `.agent/archive/` 目录不一致。
-  - rules.md 禁止清单未显式列出"删除用户数据/修改凭证"。
-- 工作区干净（`git status --short` 无输出）；仓库基线（Swift 6.0/macOS 14、SwiftPM + XcodeGen、XCTest 双测试目录、TinyBuddyCore 职责边界、组合快照唯一真相、时间模型）经 `Package.swift`、根级 `AGENTS.md`/`CLAUDE.md` 与 loop.md 项目基线核实。
-- 已核实无其他可复用维护体系：`.agents/`、`.codex/`、`.pi/`、`skills/` 为空或仅承载空 skills 目录；`.opencode/` 仅含 opencode 自身运行时状态。
-
-**选择的问题及证据**
-- 选择"完善 `.agent/` 维护体系基础设施"：本次为纯文档设施建立，不进入代码修改路径。
-- 证据：loop.md 入口文本为"先读取本文件和 `.agent/rules.md`"（无 memory.md）；Decide 优先级列表原文为 6 级；Record 字段列表原文 6 项（无 Loop 编号/观察结果）；loop.md/rules.md/history.md 契约文本中的 8 处 `.agent/history-archive.md` 引用与目标归档目录要求不一致；rules.md 禁止清单原文无"删除用户数据/修改凭证"。
-- 完成标准：四个文件自洽、六阶段硬性检查齐备、归档引用统一指向 `.agent/archive/`、业务文件零改动。
-
-**原因分析**
-- 目标要求长期可维护的 Evidence-driven Loop：Observe 必须先读 rules/memory/history，Decide 需覆盖数据正确性与可维护性两类风险，Record 需要跨轮追踪编号，历史需要受控归档。现有体系缺 memory 层与这些契约字段，属结构性缺口而非单点问题；本次仅增补与引用更新，不改动既有契约与历史记录。
-
-**修改内容**
-- `.agent/memory.md`（新建）：长期项目知识种子（技术栈/进程架构/组合快照唯一真相/时间模型/模块边界/构建测试验证约定/已解决的重要问题/避免重复核查信息/体系自身定位）。
-- `.agent/loop.md`：入口与 Observe 要求先读 `memory.md`；Observe 增加"禁止直接修改代码"与必读三项；Decide 优先级并入目标 7 级版本；Record 补齐 Loop 编号与观察结果字段；归档位置统一为 `.agent/archive/`。
-- `.agent/rules.md`：必须清单增加"执行前读 loop/rules/memory/最近 history"；禁止清单显式化"删除用户数据/修改凭证"；归档引用更新为 `.agent/archive/`。
-- `.agent/history.md`：头部归档契约更新为 `.agent/archive/`；追加本条 Loop 6 记录。
-- `.agent/archive/README.md`（新建）：归档目录用途说明。
-
-**验证结果**
-- 逐文件重读 loop.md/rules.md/memory.md/history.md：六阶段流程与硬性检查齐备（Observe 必读三项 + 禁止直接改代码；Evidence 无证据不修改；Decide 7 级优先级；Execute 最小修改；Verify 用项目现有验证流程；Record 九字段）；入口契约要求的文件（loop.md/rules.md/memory.md/最近 history.md/`.agent/archive/`）全部存在；契约文本（loop.md/rules.md/history.md 头部）中的归档引用已全部统一为 `.agent/archive/`，既有历史记录体内的旧引用为当时事实记载，按契约保持不变。
-- `git status --short`：仅 `.agent/**` 下文件变更；`Sources/`、`Tests/`、`Widget/`、`script/`、`docs/`、`AGENTS.md`、`CLAUDE.md`、`project.yml` 零改动。
-- `git diff --check`：通过。
-- 按 loop.md 既有边界（仅 `.agent/` 基础设施改动不跑 `swift test`），本轮不运行测试。
-
-**剩余风险**
-- 归档目录首次落地，尚未实际触发归档动作（history.md 现为 6 条 < 10 条阈值）；后续轮次按 Maintain 阶段执行时以 `.agent/archive/` 为准。
-- 既有 5 条历史记录未编号，Loop 编号从本轮（Loop 6）起显式记录；跨轮去重时以日期+标题为准。
-- 本轮为纯文档基础设施改动，未运行 `swift test`（与既有"仅 `.agent/` 基础设施改动"验证边界一致）。
-
 ## Loop 7：2026-08-09：无修改轮次（未发现可验证的高价值问题）
 
 **Loop 编号**
@@ -420,3 +376,42 @@
 - 生产默认阈值下该路径需"即时确认配置 + 精确时序"才可达，属防御性修复；本次以测试固定行为，无新增风险。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
 - Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
+
+## Loop 16：2026-08-14：修复确认门在生产事件流下永远无法确认持续输入（周期性活动心跳）
+
+**Loop 编号**
+- Loop 16。
+
+**日期**
+- 2026-08-14
+
+**观察结果**
+- 工作区干净（`git status --short` 无输出），HEAD == origin/main == `d0b980c`（Loop 15 记录）；自 Loop 15 以来唯一新提交是 `1ebef5e`（"Gate automatic focus on sustained activity"，+929 行：新增 `FocusSessionConfirmationGate`、`FocusSessionEngine` 确认门接线、规则版本 1.0→1.1、594 行确认门测试），即 Loop 15 观察到的在途确认门改动已提交（含 Loop 15 修复的 `pendingSwitch = nil`）。
+- 静态信号：`rg "TODO|FIXME|HACK|XXX"` 无真实待办（仅 `mktemp` 模板）；`try!`/`fatalError` 无匹配；`git diff --check` 通过。
+- 接线审查（关键发现）：App 事件流未随提交改动——引擎 `userActivity` 事件仅来自 (a) idle→active 转换（`FocusSessionAppBridge.swift:251`，每轮询周期一次，默认轮询 15s）、(b) 非自动化 Git 提交（`TinyBuddyApp.swift:798`）、(c) 解锁/唤醒/启动单次事件（`reportActiveAfterIdle`）；持续活动期间（`!isNowIdle` 分支，line 253-258）轮询仅递增 `activeCount`（该变量本身是既有无读死变量），不产生任何引擎事件。
+
+**选择的问题及证据**
+- 选择"确认门在生产事件流下无法确认持续输入"这一用户影响 Bug（Loop 优先级第 1 位）。
+- 复现条件（确定性）：默认 `confirmationMinimumActiveDuration = 120`，而"持续输入（无提交、无 ≥120s idle）"在整个工作时段只产生 1 个引擎事件 → 门累计 0 < 120 → 自动焦点会话**永不启动**；规则 1.0（`1ebef5e^`）下首个事件即 `startSession`，属用户可见回归（HUD/Widget 焦点统计对纯输入型工作静默丢失）。自动项目切换同根因：pending switch 后在新项目持续输入但无事件 → 门无法确认 → 切换永不提交（该路径在门前后均有缺陷，一并修复）。
+- 与设计意图矛盾：门文档明示"短暂输入不启动、持续活动确认"，而接线使"持续输入"与"短暂输入"（同为单事件）不可区分。
+- 完成标准：新增周期性心跳只喂确认门（不改写已打开同项目会话、零持久化抖动）；确定性测试覆盖 持续输入启动 / 心跳不改写不落盘 / 心跳确认切换；相关窄测全绿；全量回归除预先存在的环境计时失败外无失败。
+
+**原因分析**
+- 门的累计模型（事件间隔计入活跃时间）假设生产事件流近似活跃时间；实际接线只在转换/提交/解锁时上报，持续输入在首个事件后静默，门无法确认。修复方向：在活跃轮询分支周期性喂门，同时保持"打开的同项目会话零写入"（活会话本就按设计不产生 journal 写入）。
+
+**修改内容**
+- `Sources/TinyBuddyCore/FocusSessionEngine.swift`：新增 `reportSustainedActivity(in:at:)`——按轮询节奏喂确认门；手动会话/无项目直接跳过；无打开会话时确认即 `startSession`；打开会话同项目为纯 no-op（不触碰 `lastUserActivityAt`/`lastStateChangeAt`，零写入）；不同项目走 `differentProjectActivity`（未确认仅累计，已确认按 away 边界切换）。
+- `Sources/TinyBuddyCore/FocusSessionCoordinator.swift`：新增 `reportSustainedActivity(at:)`（复用 `focusProject()` 归属逻辑与排除门）。
+- `Sources/TinyBuddy/FocusSessionAppBridge.swift`：`checkIdleState` 活跃（`!isNowIdle`）分支每轮询调用 `coordinator.reportSustainedActivity()`（与 `reportUserInput` 同风格，受 `isStopped` 防护）。
+- `Tests/TinyBuddyCoreTests/FocusSessionConfirmationGateTests.swift`：新增 3 个确定性测试（生产喂入节奏：转换事件 + 15s 心跳）：`testConfirmationGate_heartbeatStartsSessionForContinuousTyping`（8 个心跳累计 120s 后会话在确认心跳时刻启动，先于首个事件的时间不计入）、`testConfirmationGate_heartbeatDoesNotMutateOrPersistOpenSession`（`.noChange`、`saveCount` 不变）、`testConfirmationGate_heartbeatConfirmsSwitchForContinuousTypingInNewProject`（9 个心跳累计 120s 后按 away 边界切换，away 间隔归属到达项目）。
+
+**验证结果**
+- 红→绿：新测试先以编译失败证明 API 缺失；修复后 3 个心跳测试全绿（过程中修正 2 处测试自身错误：门重置后首心跳只开始跟踪需 9 个心跳；B 活跃时长 = away 间隔 135s 属边界设计语义，非缺陷）。
+- `swift test --filter 'FocusSessionEngineTests|FocusSessionCoordinatorTests|FocusSessionAppBridgeResetGateTests|FocusSessionDecisionTrackingTests'`：110 个测试 0 失败。
+- `swift test` 全量：1598 个测试，仅**预先存在的环境计时失败**：`GitActivityRefreshScriptTests` 脚本超时墙钟断言（~6.5-7.4s > 4.0s 预算）2 个、`testWakeNotificationRetriesWhenFirstWakeRefreshCannotStart` 高负载下偶发 1 个；决定性证据：在**原始树**（`git stash` 暂存本次改动后）该脚本超时测试同样失败（7.4s），且脚本/测试文件自 `aec839c`（Loop 12 全量 1554 绿）以来未变；当前系统负载均值 4.47（WebKit/WindowServer/WeChat 高占用），属环境条件而非代码回归，与本次焦点会话改动零交集。
+- `git diff --check`：通过；`git status --short` 复查：仅 4 个目标文件改动（+143），无越界；无用户在途修改。
+
+**剩余风险**
+- 全量门禁受本机当前高负载影响：脚本超时墙钟测试与 wake 重试测试在本机重负载下失败（原始树复现，预先存在）；负载回落或换机后应复跑 `swift test` 确认全绿。已记录"脚本超时测试 4.0s 墙钟断言环境敏感"候选，留待出现新证据（脚本或测试变更）时处理。
+- 心跳节奏固定为轮询间隔（默认 15s），确认延迟 ≈ 默认最小活跃时长（120s），属确认门设计权衡；纯门语义未改动（未在 idle 时重置门，间隔计入活跃时间符合既有纯机语义与既有测试）。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch`（`FocusSessionEngine.swift`）自 `72ac058` 起从未被调用（本次提交还给其死体加了确认门守卫），属既有死代码，可留作纯清理候选。
