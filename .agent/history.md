@@ -6,46 +6,6 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## Loop 7：2026-08-09：无修改轮次（未发现可验证的高价值问题）
-
-**Loop 编号**
-- Loop 7。
-
-**日期**
-- 2026-08-09
-
-**观察结果**
-- 工作区：`git status --short` 仅 `.agent/history.md`、`.agent/loop.md`、`.agent/rules.md` 已修改（用户/前一轮 Loop 6 基础设施未提交内容），`?? .agent/archive/`、`?? .agent/memory.md` 未跟踪；`Sources/`、`Tests/`、`Widget/`、`script/`、`docs/` 全部干净，无用户在途修改冲突。
-- 最近提交：`943d743`（config `-f` 短形式修复）、`d206124`（Loop 升级）、`31319b5`（恢复重试 generation 测试）、`2732086`（带值选项修复）、`6a9b488`（刷新提交日与恢复预算）、`13b0953`（焦点查询/升级防护）等，活跃区域集中在 Git 只读验证、恢复重试与焦点/快照防护。
-- 历史记录：`history.md` 现有 6 条（Loop 6 起编号），无未完成事项；各轮"剩余风险"均为"Git 若新增带值选项需同步维护 `valueTakingOptions`"一类的维护提示，非可验证缺陷。
-- `rg "TODO|FIXME|HACK|XXX"`：匹配项全部为 `script/` 下 `mktemp` 模板 `XXXXXX`，无真实标记。
-- 高风险代码：`try!`/`fatalError` 无匹配；唯一 `precondition(!days.isEmpty)` 位于 `FocusHistoryAggregation.swift:541`，为 week 聚合内部契约，调用方保证非空，无外部输入触发路径。
-- 测试基线：`swift test --filter GitCommandExecutorTests` 33 个全绿；全量 `swift test` 1543 个测试 0 失败；`swift build` 无编译警告。
-
-**选择的问题及证据**
-- 无。逐项核对后未发现真实可复现且可验证的高价值问题，各候选淘汰理由：
-  - GitCommandExecutor 只读验证：历史 4 轮已处理同根因问题；当前 `valueTakingOptions = {--file, -f, --blob, --type, --default}` 完备，config 各读 action（`--get/--get-all/--get-regexp/--get-urlmatch/--get-color/--get-colorbool/--list`）与 symbolic-ref/reflog/multi-pack-index/interpret-trailers 分支逐一核对无新缺陷，无新失败、新复现或新 Git 语义证据，按规则不重复处理。
-  - multi-pack-index `--object-dir` 带值选项：`verify` 放行、`write/expire/repack` 拒绝，带值参数不影响判断，无缺陷。
-  - `FocusHistoryAggregation` precondition：无复现条件与外部触发证据，内部契约假设。
-  - 测试缺口：无跳过掩盖失败（XCTSkip 均为环境条件），1543 测试全绿。
-
-**原因分析**
-- 最近多轮持续收敛 Git 只读验证边界，该方向已完备；其余模块在当前观察范围（工作区、提交历史、测试、静态信号）内无真实缺陷证据。按 loop.md 契约，无证据即无修改，不为了产生修改而修改。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录，属契约要求的 Record 阶段）。
-
-**验证结果**
-- `swift test --filter GitCommandExecutorTests`：33 个测试通过（基线）。
-- `swift test` 全量：1543 个测试，0 失败。
-- `swift build`：无警告。
-- `git diff --check`：通过（history.md 追加仅新增行）。
-- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件中本条目为唯一新增，用户/前一轮修改原样保留。
-
-**剩余风险**
-- 本轮为无修改轮次，无新增风险；既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- `31319b5` 新增的恢复重试测试依赖真实主队列计时窗口，极慢 CI 下存在既有时序脆弱性，无新失败证据，留待出现实际失败时处理。
-
 ## Loop 8：2026-08-11：无修改轮次（未发现可验证的高价值问题）
 
 **Loop 编号**
@@ -415,3 +375,46 @@
 - 全量门禁受本机当前高负载影响：脚本超时墙钟测试与 wake 重试测试在本机重负载下失败（原始树复现，预先存在）；负载回落或换机后应复跑 `swift test` 确认全绿。已记录"脚本超时测试 4.0s 墙钟断言环境敏感"候选，留待出现新证据（脚本或测试变更）时处理。
 - 心跳节奏固定为轮询间隔（默认 15s），确认延迟 ≈ 默认最小活跃时长（120s），属确认门设计权衡；纯门语义未改动（未在 idle 时重置门，间隔计入活跃时间符合既有纯机语义与既有测试）。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch`（`FocusSessionEngine.swift`）自 `72ac058` 起从未被调用（本次提交还给其死体加了确认门守卫），属既有死代码，可留作纯清理候选。
+## Loop 17：2026-08-15：无修改轮次（在途“焦点识别解释”功能经独立审查、全量回归与本机签名安装运行验证通过）
+
+**Loop 编号**
+- Loop 17。
+
+**日期**
+- 2026-08-15
+
+**观察结果**
+- 工作区：`git status --short` 显示 4 个已修改文件 + 3 个未跟踪新文件——即“焦点识别解释”功能（未提交）：`Sources/TinyBuddyCore/FocusRecognitionExplanation.swift`（新增 166 行，纯展示解释器）、`Sources/TinyBuddyCore/FocusSessionEngine.swift`（+84：只读 accessors `confirmationGateSnapshot`/`confirmationCandidateProject`/`pendingSwitchCandidateProject`/`currentSessionMode`/`confirmationMinimumActiveDuration`/`mostRecentDecisionExplanation` + `confirmationCandidate` 展示态）、`Sources/TinyBuddy/PetViewModel.swift`（+32：`refreshFocusRecognitionExplanation` 纯读桥接）、`Sources/TinyBuddy/PetView.swift`（+112：FOCUS CONTROL 面板 info 按钮 + popover 展示）、`Tests/TinyBuddyCoreTests/FocusRecognitionExplanationTests.swift`（392 行，含两个测试类）、`Tests/TinyBuddyAppTests/PetViewModelFocusRecognitionTests.swift`（178 行）、`TinyBuddy.xcodeproj/project.pbxproj`（+4，新源文件注册）。用户/前一轮在途修改，本轮未覆盖或回滚。
+- 最近提交：`167ce07`（Loop 16 记录）、`37e134b`（心跳喂确认门）；HEAD == origin/main。
+- 依赖类型核实：`FocusSessionConfirmationGate`（`FocusSessionConfirmationGate.swift:20`）与 `FocusSessionDecisionExplanation`（`FocusSessionEvidence.swift:88`）均已在 HEAD 存在。
+- `rg "TODO|FIXME|HACK|XXX"`：无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）；`git diff --check` 通过。
+- 签名身份：本机唯一 Apple Development 身份（`C6B16796...`）。
+
+**选择的问题及证据**
+- 无。对在途“焦点识别解释”功能做独立静态审查，逐项核实通过：
+  - 职责边界：`FocusRecognitionExplainer` 纯函数分类引擎已持有状态（gate 快照、会话、pendingSwitch、决策证据），不重算确认门决策；注释明确“gate 保持唯一权威”，无决策逻辑复制。
+  - 引擎 accessor：全部在锁内读、值类型拷贝、只读；`mostRecentDecisionExplanation` 的“最新”比较（at 时间戳 → 会话序 → 事件序三级 tie-break）与事件流顺序一致（生命周期决策回填到会话边界，同时间戳按事件序裁决），遍历仅内存会话事件且按需调用，非高频路径。
+  - `confirmationCandidate` 展示态：每次 gate 喂入（`recordConfirmation` 入口，含 `differentProjectActivity` 内部路径）先赋值再喂门，与 `gate.trackedProjectKey` 一致；gate `reset()` 后 `isTracking=false`，explainer 走 `notEntered` 分支不读候选，陈旧值不可达；注释明示“ignored whenever the gate is not tracking”，属文档化约定而非缺陷。
+  - ViewModel 桥接：`refreshFocusRecognitionExplanation` 纯读（引擎 nil 时清空发布值，引擎存在时构造 Context 调 explainer，值相等不重复发布）；App 测试 `testOnDemandRefreshIsPureRead` 覆盖零变异。
+  - UI：popover 按需打开时刷新，展示 title/detail/最近判断（脱敏解释原文复用），无新持久化、无新 Git 读取、无仓库路径泄漏。
+  - pbxproj：xcodegen 重生成后 diff 仅 +4 行（新文件注册），无无关 churn。
+- 既有候选（脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`、脚本超时墙钟断言环境敏感）：与 Loop 8/9/12/13/16 同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
+- 完成标准：na（无修改轮次）。
+
+**原因分析**
+- 功能实现经 6 项静态审查点逐一核实 + 15 个窄测全绿 + 全量回归无新失败 + 本机签名安装运行验证通过，未发现真实可复现缺陷。按 loop.md 契约“无证据即无修改，不为了产生修改而修改”。
+
+**修改内容**
+- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条 Loop 7 至 `.agent/archive/history-2026-08-15.md`，属契约要求的 Record/Maintain 阶段）。
+
+**验证结果**
+- `swift test --filter 'FocusRecognition|PetViewModelFocusRecognition'`：15 个测试（核心 11 + App 4），0 失败。
+- `swift test` 全量：1613 个测试（+15），仅 2 个**预先存在的环境性失败**：`GitActivityRefreshScriptTests` 脚本超时墙钟断言（`testScriptTimesOutSlowRepositoryMetadataAndRetainsItsLastValidResult` 7.49s > 4.0s、`testScriptTimesOutSlowRepositoryParsingAndRetainsItsLastValidResult` 7.26s > 4.0s）——Loop 16 已用原始树复现归因（脚本/测试自 `aec839c` 未变，本机负载环境条件），与本次纯展示层改动零交集。
+- `script/tb-install.sh`（用户授权本机签名安装）：工程过期自动 `xcodegen generate` → Debug 构建成功 → Apple Development 签名（Widget + App + 嵌套）验证通过 → 安装 `/Applications/TinyBuddy.app` → 启动成功。
+- 安装运行验证：运行中 App（PID 49668）executable 路径来自已安装 bundle；`codesign --verify --deep --strict` 通过；安装 bundle 与构建产物 MD5 一致（`61fb8001766a181eae89878817405154`）。
+- `git diff --check`：通过；`git status --short` 复查：本轮改动仅 `.agent/` 记录/归档；在途功能改动原样保留，无越界修改。
+
+**剩余风险**
+- 全量门禁仍受本机环境负载影响：脚本超时墙钟测试在本机重负载下失败（预先存在，Loop 16 同述）；负载回落或换机后应复跑 `swift test` 确认全绿。
+- 在途“焦点识别解释”功能尚未提交；用户已授权提交推送，随本轮一并处理。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch` 死代码可留作纯清理候选；`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口仍无新失败证据。
