@@ -15,6 +15,7 @@ struct PetView: View {
     @StateObject private var viewModel: PetViewModel
     @State private var lowPowerModeEnabled: Bool
     @State private var showProjectPicker = false
+    @State private var showRecognitionExplanation = false
     private let registeredProjectsProvider: () -> [TinyBuddyProject]
 
     private let fixedWidth: CGFloat = 284
@@ -499,12 +500,42 @@ struct PetView: View {
 
     private var manualFocusControlPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("FOCUS CONTROL")
-                .font(.caption2.weight(.semibold).monospaced())
-                .foregroundStyle(HUDTheme.brandTextColor(
-                    for: colorScheme,
-                    increasedContrast: increasedContrast
-                ))
+            HStack(spacing: 6) {
+                Text("FOCUS CONTROL")
+                    .font(.caption2.weight(.semibold).monospaced())
+                    .foregroundStyle(HUDTheme.brandTextColor(
+                        for: colorScheme,
+                        increasedContrast: increasedContrast
+                    ))
+                Spacer(minLength: 4)
+                Button {
+                    // On demand: recompute the explanation from the engine's
+                    // live gate state at open time, then show the popover.
+                    viewModel.refreshFocusRecognitionExplanation()
+                    showRecognitionExplanation = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusAccent)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .help("专注识别原因说明")
+                .accessibilityLabel("专注识别原因说明")
+                .popover(isPresented: $showRecognitionExplanation) {
+                    FocusRecognitionExplanationView(
+                        explanation: viewModel.focusRecognitionExplanation,
+                        accent: statusAccent,
+                        primaryText: primaryText,
+                        secondaryText: secondaryText,
+                        onRefresh: {
+                            viewModel.refreshFocusRecognitionExplanation()
+                        }
+                    )
+                    .frame(width: 260)
+                    .padding()
+                }
+            }
 
             switch viewModel.manualControlState {
             case .idle:
@@ -924,5 +955,74 @@ private struct StatusButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(isSelected ? accent : border, lineWidth: isSelected ? 2 : 1)
             )
+    }
+}
+
+private struct FocusRecognitionExplanationView: View {
+    let explanation: FocusRecognitionExplanation?
+    let accent: Color
+    let primaryText: Color
+    let secondaryText: Color
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("专注识别原因")
+                    .font(.caption.weight(.bold).monospaced())
+                    .foregroundStyle(primaryText)
+                Spacer(minLength: 4)
+                Button("刷新", action: onRefresh)
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(accent)
+                    .accessibilityLabel("刷新识别说明")
+            }
+
+            if let explanation {
+                Label(explanation.title, systemImage: iconName)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(accent)
+                    .labelStyle(.titleAndIcon)
+                    .accessibilityLabel(explanation.title)
+
+                Text(explanation.detail)
+                    .font(.caption)
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let last = explanation.lastDecision {
+                    Divider()
+                    Text("最近判断")
+                        .font(.caption2.weight(.semibold).monospaced())
+                        .foregroundStyle(primaryText)
+                    Text(last.explanation)
+                        .font(.caption)
+                        .foregroundStyle(secondaryText)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("最近判断：\(last.explanation)")
+                }
+            } else {
+                Text("引擎未运行，暂时无法获取识别说明。")
+                    .font(.caption)
+                    .foregroundStyle(secondaryText)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var iconName: String {
+        switch explanation?.posture {
+        case .recognizing:
+            return "waveform.path.ecg"
+        case .confirmed:
+            return "scope"
+        case .switched:
+            return "arrow.left.arrow.right"
+        case .notEntered, .none:
+            return "questionmark.circle"
+        }
     }
 }

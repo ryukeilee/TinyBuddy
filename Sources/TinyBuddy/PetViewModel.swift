@@ -103,6 +103,10 @@ final class PetViewModel: ObservableObject {
     @Published private(set) var focusHistoryPublication: FocusHistoryPublication?
     /// Live state of the manual focus control system, published for HUD, menu bar, and Widget.
     @Published private(set) var manualControlState: ManualFocusControlState = .idle
+    /// The current automatic-focus recognition explanation, computed on demand
+    /// from the engine's live gate state and committed decision evidence.
+    /// Pure read; never mutates sessions, the gate, or persistence.
+    @Published private(set) var focusRecognitionExplanation: FocusRecognitionExplanation?
 
     var hudPresentation: TinyBuddyWidgetPresentation {
         displayPresentation
@@ -531,6 +535,34 @@ final class PetViewModel: ObservableObject {
             stopManualControlRefresh()
         }
         refreshManualControlState()
+    }
+
+    /// Recomputes the automatic-focus recognition explanation from the
+    /// engine's live state. Pure read: it only copies the confirmation gate's
+    /// own state and the committed decision evidence; it never mutates
+    /// sessions, the gate, or persistence. Call on demand (e.g. when the user
+    /// opens the explanation popover).
+    func refreshFocusRecognitionExplanation() {
+        guard let engine = focusSessionEngine else {
+            if focusRecognitionExplanation != nil {
+                focusRecognitionExplanation = nil
+            }
+            return
+        }
+        let context = FocusRecognitionExplainer.Context(
+            gate: engine.confirmationGateSnapshot,
+            confirmationCandidate: engine.confirmationCandidateProject,
+            minimumActiveDuration: engine.confirmationMinimumActiveDuration,
+            currentProject: engine.currentProject,
+            currentSessionStatus: engine.currentSessionStatus,
+            currentSessionMode: engine.currentSessionMode,
+            pendingSwitchCandidate: engine.pendingSwitchCandidateProject,
+            mostRecentDecision: engine.mostRecentDecisionExplanation
+        )
+        let next = FocusRecognitionExplainer.makeExplanation(for: context)
+        if focusRecognitionExplanation != next {
+            focusRecognitionExplanation = next
+        }
     }
 
     /// Start a manual focus session for the given project.

@@ -45,6 +45,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// typing, or a lone foreground/project-switch event must never start or
     /// switch an automatic session; sustained activity confirms. In-memory only.
     private var confirmationGate = FocusSessionConfirmationGate()
+    /// The project context of the candidate currently accumulating in the
+    /// confirmation gate. Presentation-only (display name); refreshed on every
+    /// gate feed, ignored whenever the gate is not tracking.
+    private var confirmationCandidate: FocusProjectContext?
     private var lastEditUndo: [FocusSession]?
     /// Exact session list immediately after the last edit. Undo restores the
     /// pre-edit versions of records the edit itself changed or removed, while
@@ -661,6 +665,85 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public var isFocusSessionActive: Bool {
         lock.lock(); defer { lock.unlock() }
         return sessions.contains { $0.isOpen && $0.status == .active }
+    }
+
+    // MARK: - Recognition explanation state (read-only)
+
+    /// Read-only snapshot of the confirmation gate — the exact value the
+    /// engine evaluates. Exposed so presentation can explain recognition
+    /// without duplicating any decision logic.
+    public var confirmationGateSnapshot: FocusSessionConfirmationGate {
+        lock.lock(); defer { lock.unlock() }
+        return confirmationGate
+    }
+
+    /// The project context of the candidate currently accumulating in the
+    /// confirmation gate, if the gate is tracking. Presentation-only; never
+    /// used in decisions. Ignored by callers whenever the gate is not tracking.
+    public var confirmationCandidateProject: FocusProjectContext? {
+        lock.lock(); defer { lock.unlock() }
+        return confirmationCandidate
+    }
+
+    /// The candidate of an in-flight automatic project switch, if any.
+    public var pendingSwitchCandidateProject: FocusProjectContext? {
+        lock.lock(); defer { lock.unlock() }
+        return pendingSwitch?.candidate
+    }
+
+    /// The mode of the currently open session, if any.
+    public var currentSessionMode: FocusMode? {
+        lock.lock(); defer { lock.unlock() }
+        return sessions.first(where: \.isOpen)?.mode
+    }
+
+    /// The confirmation threshold, exposed for display only. The engine
+    /// remains the sole authority that applies it.
+    public var confirmationMinimumActiveDuration: TimeInterval {
+        config.confirmationMinimumActiveDuration
+    }
+
+    /// The most recent committed decision explanation across all evidence,
+    /// if any. The evidence engine generates the text; this accessor only
+    /// picks the newest record so the HUD can surface the last key judgment.
+    ///
+    /// “Newest” follows the engine's event order, not just the decision's
+    /// boundary timestamp: lifecycle decisions are backdated to the session
+    /// boundary they close (e.g. an idle end is recorded at the pause start),
+    /// so two judgments can share a timestamp while the later one was made
+    /// later. Ties resolve to the later event in its session's stream, then
+    /// the later session.
+    public var mostRecentDecisionExplanation: FocusSessionDecisionExplanation? {
+        lock.lock(); defer { lock.unlock() }
+        var newest: FocusSessionDecisionExplanation?
+        var newestSessionIndex = -1
+        var newestEventIndex = -1
+        for (sessionIndex, session) in sessions.enumerated() {
+            guard let events = session.decisionEvents else { continue }
+            let evidence = evidenceBySessionID[session.id]
+            for (eventIndex, event) in events.enumerated() {
+                guard let decision = evidence?.decisionExplanations
+                    .first(where: { $0.id == event.id }) else { continue }
+                var isNewer = false
+                if let newest {
+                    if decision.at != newest.at {
+                        isNewer = decision.at > newest.at
+                    } else if sessionIndex != newestSessionIndex {
+                        isNewer = sessionIndex > newestSessionIndex
+                    } else {
+                        isNewer = eventIndex > newestEventIndex
+                    }
+                } else {
+                    isNewer = true
+                }
+                if isNewer {
+                    newest = decision
+                    newestSessionIndex = sessionIndex
+                    newestEventIndex = eventIndex
+                }
+            }
+        }
+        return newest
     }
 
     /// Returns the evidence record for a specific session, if available.
@@ -1748,6 +1831,7 @@ private extension FocusSessionEngine {
     /// is satisfied. On confirmation the gate resets so the session that is
     /// about to start owns the focus until it ends.
     private func recordConfirmation(project: FocusProjectContext, at date: Date) -> Bool {
+        confirmationCandidate = project
         let confirmed = confirmationGate.recordActivity(
             project: project,
             at: date,
