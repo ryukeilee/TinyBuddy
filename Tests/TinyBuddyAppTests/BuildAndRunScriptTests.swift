@@ -2,6 +2,501 @@ import Foundation
 import XCTest
 
 final class BuildAndRunScriptTests: XCTestCase {
+    func testNonreleaseBuildDefaultsToProvisionedSigningOnMacOS15AndLater() throws {
+        let signingMode = try XCTUnwrap(
+            shellFunction(named: "default_nonrelease_signing_mode", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddySigningModeTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let fakeSwVers = temporaryDirectory.appendingPathComponent("fake-sw-vers.sh")
+        try writeExecutable(
+            "#!/bin/bash\nprintf '%s\\n' \"$FAKE_MACOS_VERSION\"\n",
+            to: fakeSwVers
+        )
+
+        func run(version: String) throws -> String {
+            let result = try runBash("""
+            set -euo pipefail
+            SW_VERS_BIN=\(shellQuote(fakeSwVers.path))
+            FAKE_MACOS_VERSION=\(shellQuote(version))
+            export FAKE_MACOS_VERSION
+            \(signingMode)
+            default_nonrelease_signing_mode
+            """)
+            XCTAssertEqual(result.exitCode, 0, result.standardError)
+            return result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        XCTAssertEqual(try run(version: "14.8.7"), "unsigned")
+        XCTAssertEqual(try run(version: "15.0"), "signed")
+        XCTAssertEqual(try run(version: "27.0"), "signed")
+    }
+
+    func testSignedWidgetRunPreservesXcodeManagedProvisioning() throws {
+        let signing = try XCTUnwrap(
+            shellFunction(named: "sign_widget_extension_for_run", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddySignedRunTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let verifiedBundle = temporaryDirectory.appendingPathComponent("verified-bundle.txt")
+        let app = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let result = try runBash("""
+        set -euo pipefail
+        SIGNING_MODE=signed
+        APP_BUNDLE=\(shellQuote(app.path))
+        verify_release_bundle() { printf '%s\\n' "$1" >\(shellQuote(verifiedBundle.path)); }
+        resolve_local_code_sign_identity() { exit 91; }
+        \(signing)
+        sign_widget_extension_for_run
+        """)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(
+            try String(contentsOf: verifiedBundle, encoding: .utf8),
+            "\(app.path)\n"
+        )
+        XCTAssertTrue(result.standardOutput.contains("preserved Xcode-managed Widget and App Group signing"))
+    }
+
+    func testManualWidgetSigningFailsClosedOnMacOS15AndLater() throws {
+        let compatibility = try XCTUnwrap(
+            shellFunction(named: "require_local_signing_host_compatibility", in: try buildAndRunScript())
+        )
+        let signing = try XCTUnwrap(
+            shellFunction(named: "sign_widget_extension_for_run", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddySigningCompatibilityTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let fakeSwVers = temporaryDirectory.appendingPathComponent("fake-sw-vers.sh")
+        try writeExecutable(
+            "#!/bin/bash\nprintf '%s\\n' 27.0\n",
+            to: fakeSwVers
+        )
+        let result = try runBash("""
+        set -euo pipefail
+        SIGNING_MODE=unsigned
+        SW_VERS_BIN=\(shellQuote(fakeSwVers.path))
+        \(compatibility)
+        \(signing)
+        sign_widget_extension_for_run
+        """)
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("profile-free local signing cannot preserve"))
+        XCTAssertTrue(result.standardError.contains("TINYBUDDY_SIGNING_MODE=signed"))
+    }
+
+    func testProvisioningProfileMustAuthorizeTheExactAppGroupAndBundle() throws {
+        let verifier = try XCTUnwrap(
+            shellFunction(named: "verify_provisioned_app_group", in: try buildAndRunScript())
+        )
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyProfileContractTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let fakeSecurity = temporaryDirectory.appendingPathComponent("fake-security.sh")
+        let fakePlistBuddy = temporaryDirectory.appendingPathComponent("fake-plist-buddy.sh")
+        let profile = temporaryDirectory.appendingPathComponent("embedded.provisionprofile")
+        try Data().write(to: profile)
+        try writeExecutable("#!/bin/bash\ncat /dev/null\n", to: fakeSecurity)
+        try writeExecutable(
+            """
+            #!/bin/bash
+            case "$*" in
+              *application-identifier*) printf '%s\\n' "$FAKE_PROFILE_APP_ID" ;;
+              *application-groups*) printf '%s\\n' "$FAKE_PROFILE_GROUPS" ;;
+              *) exit 64 ;;
+            esac
+            """,
+            to: fakePlistBuddy
+        )
+
+        func run(appID: String, groups: String) throws -> (Int32, String) {
+            let result = try runBash("""
+            set -euo pipefail
+            SECURITY_BIN=\(shellQuote(fakeSecurity.path))
+            PLIST_BUDDY_BIN=\(shellQuote(fakePlistBuddy.path))
+            EXPECTED_TEAM_ID=JYL9G28DP3
+            APP_GROUP_ID=group.com.ryukeili.TinyBuddy
+            FAKE_PROFILE_APP_ID=\(shellQuote(appID))
+            FAKE_PROFILE_GROUPS=\(shellQuote(groups))
+            export FAKE_PROFILE_APP_ID FAKE_PROFILE_GROUPS
+            \(verifier)
+            verify_provisioned_app_group \(shellQuote(profile.path)) com.ryukeili.TinyBuddy app
+            """)
+            return (result.exitCode, result.standardError)
+        }
+
+        XCTAssertEqual(
+            try run(
+                appID: "JYL9G28DP3.com.ryukeili.TinyBuddy",
+                groups: "group.com.ryukeili.TinyBuddy"
+            ).0,
+            0
+        )
+        let wrongGroup = try run(
+            appID: "JYL9G28DP3.com.ryukeili.TinyBuddy",
+            groups: "group.other.TinyBuddy"
+        )
+        XCTAssertEqual(wrongGroup.0, 1)
+        XCTAssertTrue(wrongGroup.1.contains("does not authorize the expected App Group"))
+        let wrongBundle = try run(
+            appID: "JYL9G28DP3.com.other.App",
+            groups: "group.com.ryukeili.TinyBuddy"
+        )
+        XCTAssertEqual(wrongBundle.0, 1)
+        XCTAssertTrue(wrongBundle.1.contains("unexpected application identifier"))
+    }
+
+    func testDailyInstallerUsesProvisionedSigningAndChecksWidgetRegistration() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let preflightOffset = try XCTUnwrap(installer.range(of: "\nverify_widget_registration_preflight\n")?.lowerBound)
+            .utf16Offset(in: installer)
+        let buildOffset = try XCTUnwrap(installer.range(of: "\"$XCODEBUILD_BIN\" -project")?.lowerBound)
+            .utf16Offset(in: installer)
+        let widgetVerificationOffset = try XCTUnwrap(
+            installer.range(of: "\nverify_built_widget_extension\nok \"构建完成: $BUILD_APP\"")?.lowerBound
+        ).utf16Offset(in: installer)
+        let installOffset = try XCTUnwrap(installer.range(of: "# ── 3. 安装")?.lowerBound)
+            .utf16Offset(in: installer)
+
+        XCTAssertLessThan(preflightOffset, buildOffset)
+        XCTAssertLessThan(widgetVerificationOffset, installOffset)
+        XCTAssertTrue(installer.contains("-allowProvisioningUpdates"))
+        XCTAssertTrue(installer.contains("verify_provisioned_app_group \"$BUILD_APP\" \"$BUNDLE_ID\""))
+        XCTAssertTrue(installer.contains("verify_provisioned_app_group \"$widget\" \"$WIDGET_BUNDLE_ID\""))
+        XCTAssertTrue(installer.contains("verify_built_widget_extension"))
+        XCTAssertTrue(installer.contains("INSTALL_COMMITTED=1"))
+        XCTAssertFalse(installer.contains("pluginkit -a \"$INSTALL_APP/Contents/PlugIns/\"*.appex 2>/dev/null || true"))
+    }
+
+    func testDailyInstallerRefusesDuplicateWidgetRegistrationsBeforeChangingInstall() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let registeredPaths = try XCTUnwrap(shellFunction(named: "registered_widget_paths", in: installer))
+        let preflight = try XCTUnwrap(shellFunction(named: "verify_widget_registration_preflight", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerRegistrationPreflightTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let installedApp = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let currentWidget = installedApp.appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let oldWidget = temporaryDirectory.appendingPathComponent(
+            "TinyBuddy.app.backup/Contents/PlugIns/TinyBuddyWidgetExtension.appex"
+        )
+        let fakePlugInKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        try FileManager.default.createDirectory(at: currentWidget, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: oldWidget, withIntermediateDirectories: true)
+        try writeExecutable(
+            """
+            #!/bin/bash
+            printf 'id-a\\tmeta-a\\t%s\\n' "$CURRENT_WIDGET_PATH"
+            printf 'id-b\\tmeta-b\\t%s\\n' "$OLD_WIDGET_PATH"
+            """,
+            to: fakePlugInKit
+        )
+        let result = try runBash("""
+        set -euo pipefail
+        PLUGINKIT_BIN=\(shellQuote(fakePlugInKit.path))
+        WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+        INSTALL_APP=\(shellQuote(installedApp.path))
+        CURRENT_WIDGET_PATH=\(shellQuote(currentWidget.path))
+        OLD_WIDGET_PATH=\(shellQuote(oldWidget.path))
+        export CURRENT_WIDGET_PATH OLD_WIDGET_PATH
+        WIDGET_REGISTRATION_PRESERVED=0
+        fail() { echo "$*" >&2; return 1; }
+        \(registeredPaths)
+        \(preflight)
+        registered_widget_paths
+        verify_widget_registration_preflight
+        """)
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("注册状态不唯一或路径不匹配"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: currentWidget.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldWidget.path))
+    }
+
+    func testDailyInstallerRestoresPreviousAppWhenInstallFailsBeforeCommit() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let cleanup = try XCTUnwrap(shellFunction(named: "cleanup", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerRollbackTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let installParent = temporaryDirectory.appendingPathComponent("Applications")
+        let installedApp = installParent.appendingPathComponent("TinyBuddy.app")
+        let backupDirectory = installParent.appendingPathComponent(".TinyBuddy-backup.test")
+        let backupApp = backupDirectory.appendingPathComponent("TinyBuddy.app")
+        let profileDirectory = temporaryDirectory.appendingPathComponent("profiles")
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: backupApp, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: profileDirectory, withIntermediateDirectories: true)
+
+        let newMarker = installedApp.appendingPathComponent("version.txt")
+        let oldMarker = backupApp.appendingPathComponent("version.txt")
+        let profileMarker = profileDirectory.appendingPathComponent("profile.plist")
+        try Data("new".utf8).write(to: newMarker)
+        try Data("old".utf8).write(to: oldMarker)
+        try Data("temporary profile".utf8).write(to: profileMarker)
+
+        let result = try runBash("""
+        set -euo pipefail
+        APP_NAME=TinyBuddy
+        INSTALL_APP=\(shellQuote(installedApp.path))
+        BACKUP_DIR=\(shellQuote(backupDirectory.path))
+        PROFILE_TEMP_DIR=\(shellQuote(profileDirectory.path))
+        INSTALL_APP_CREATED=1
+        INSTALL_COMMITTED=0
+        \(cleanup)
+        trap cleanup EXIT
+        false
+        """)
+
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertEqual(
+            try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8),
+            "old"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: profileDirectory.path))
+    }
+
+    func testDailyInstallerProfileVerifierRequiresExactAppGroupAndBundle() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let verifier = try XCTUnwrap(shellFunction(named: "verify_provisioned_app_group", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerProfileContractTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let app = temporaryDirectory.appendingPathComponent("TinyBuddy.app")
+        let profile = app.appendingPathComponent("Contents/embedded.provisionprofile")
+        let profileDirectory = temporaryDirectory.appendingPathComponent("decoded-profile")
+        try FileManager.default.createDirectory(
+            at: profile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(at: profileDirectory, withIntermediateDirectories: true)
+        try Data().write(to: profile)
+
+        let fakeSecurity = temporaryDirectory.appendingPathComponent("fake-security.sh")
+        let fakePlistBuddy = temporaryDirectory.appendingPathComponent("fake-plist-buddy.sh")
+        try writeExecutable(
+            """
+            #!/bin/bash
+            printf 'decoded profile\\n'
+            """,
+            to: fakeSecurity
+        )
+        try writeExecutable(
+            """
+            #!/bin/bash
+            case "$*" in
+              *application-identifier*) printf '%s\\n' "$FAKE_PROFILE_APP_ID" ;;
+              *application-groups*) printf '%s\\n' "$FAKE_PROFILE_GROUPS" ;;
+              *) exit 64 ;;
+            esac
+            """,
+            to: fakePlistBuddy
+        )
+
+        func run(applicationIdentifier: String, groups: String) throws -> (Int32, String) {
+            let result = try runBash("""
+            set -euo pipefail
+            DEVELOPMENT_TEAM=JYL9G28DP3
+            APP_GROUP=group.com.ryukeili.TinyBuddy
+            SECURITY_BIN=\(shellQuote(fakeSecurity.path))
+            PLIST_BUDDY_BIN=\(shellQuote(fakePlistBuddy.path))
+            PROFILE_TEMP_DIR=\(shellQuote(profileDirectory.path))
+            FAKE_PROFILE_APP_ID=\(shellQuote(applicationIdentifier))
+            FAKE_PROFILE_GROUPS=\(shellQuote(groups))
+            export FAKE_PROFILE_APP_ID FAKE_PROFILE_GROUPS
+            fail() { printf '%s\\n' "$*" >&2; exit 1; }
+            \(verifier)
+            verify_provisioned_app_group \(shellQuote(app.path)) com.ryukeili.TinyBuddy
+            """)
+            return (result.exitCode, result.standardError)
+        }
+
+        XCTAssertEqual(
+            try run(
+                applicationIdentifier: "JYL9G28DP3.com.ryukeili.TinyBuddy",
+                groups: "group.com.ryukeili.TinyBuddy"
+            ).0,
+            0
+        )
+        let wrongGroup = try run(
+            applicationIdentifier: "JYL9G28DP3.com.ryukeili.TinyBuddy",
+            groups: "group.example.Other"
+        )
+        XCTAssertEqual(wrongGroup.0, 1)
+        XCTAssertTrue(wrongGroup.1.contains("provisioning profile 未授权预期 App Group"))
+        let wrongBundle = try run(
+            applicationIdentifier: "JYL9G28DP3.com.example.Other",
+            groups: "group.com.ryukeili.TinyBuddy"
+        )
+        XCTAssertEqual(wrongBundle.0, 1)
+        XCTAssertTrue(wrongBundle.1.contains("provisioning profile 的应用标识不匹配"))
+    }
+
+    func testDailyInstallerRemovesPreviousBundleOnlyAfterCommit() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let cleanup = try XCTUnwrap(shellFunction(named: "cleanup", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerCommitTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let installParent = temporaryDirectory.appendingPathComponent("Applications")
+        let installedApp = installParent.appendingPathComponent("TinyBuddy.app")
+        let backupDirectory = installParent.appendingPathComponent(".TinyBuddy-backup.test")
+        let backupApp = backupDirectory.appendingPathComponent("TinyBuddy.app")
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: backupApp, withIntermediateDirectories: true)
+        try Data("new".utf8).write(to: installedApp.appendingPathComponent("version.txt"))
+        try Data("old".utf8).write(to: backupApp.appendingPathComponent("version.txt"))
+
+        let result = try runBash("""
+        set -euo pipefail
+        APP_NAME=TinyBuddy
+        INSTALL_APP=\(shellQuote(installedApp.path))
+        BACKUP_DIR=\(shellQuote(backupDirectory.path))
+        PROFILE_TEMP_DIR=""
+        INSTALL_APP_CREATED=1
+        INSTALL_COMMITTED=1
+        \(cleanup)
+        trap cleanup EXIT
+        exit 0
+        """)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertEqual(
+            try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8),
+            "new"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupDirectory.path))
+    }
+
+    func testDailyInstallerRequiresOneWidgetKitExtensionWithExpectedIdentity() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let verifier = try XCTUnwrap(shellFunction(named: "verify_built_widget_extension", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyBuiltWidgetContractTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let widget = temporaryDirectory
+            .appendingPathComponent("TinyBuddy.app/Contents/PlugIns/TinyBuddyWidgetExtension.appex/Contents/Info.plist")
+        try FileManager.default.createDirectory(
+            at: widget.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: widget)
+        let fakePlistBuddy = temporaryDirectory.appendingPathComponent("fake-plist-buddy.sh")
+        try writeExecutable(
+            """
+            #!/bin/bash
+            case "$*" in
+              *CFBundleIdentifier*) printf '%s\\n' "$FAKE_WIDGET_BUNDLE_ID" ;;
+              *NSExtensionPointIdentifier*) printf '%s\\n' "$FAKE_WIDGET_EXTENSION_POINT" ;;
+              *) exit 64 ;;
+            esac
+            """,
+            to: fakePlistBuddy
+        )
+
+        func run(bundleID: String, extensionPoint: String) throws -> (Int32, String) {
+            let result = try runBash("""
+            set -euo pipefail
+            BUILD_APP=\(shellQuote(temporaryDirectory.appendingPathComponent("TinyBuddy.app").path))
+            PLIST_BUDDY_BIN=\(shellQuote(fakePlistBuddy.path))
+            WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+            FAKE_WIDGET_BUNDLE_ID=\(shellQuote(bundleID))
+            FAKE_WIDGET_EXTENSION_POINT=\(shellQuote(extensionPoint))
+            export FAKE_WIDGET_BUNDLE_ID FAKE_WIDGET_EXTENSION_POINT
+            fail() { printf '%s\\n' "$*" >&2; exit 1; }
+            \(verifier)
+            verify_built_widget_extension
+            """)
+            return (result.exitCode, result.standardError)
+        }
+
+        XCTAssertEqual(
+            try run(
+                bundleID: "com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension",
+                extensionPoint: "com.apple.widgetkit-extension"
+            ).0,
+            0
+        )
+        let wrongBundle = try run(
+            bundleID: "com.example.WrongWidget",
+            extensionPoint: "com.apple.widgetkit-extension"
+        )
+        XCTAssertEqual(wrongBundle.0, 1)
+        XCTAssertTrue(wrongBundle.1.contains("bundle identifier 不匹配"))
+        let wrongExtensionPoint = try run(
+            bundleID: "com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension",
+            extensionPoint: "com.apple.share-services"
+        )
+        XCTAssertEqual(wrongExtensionPoint.0, 1)
+        XCTAssertTrue(wrongExtensionPoint.1.contains("不是预期的 WidgetKit 扩展"))
+
+        let secondWidgetInfo = temporaryDirectory.appendingPathComponent(
+            "TinyBuddy.app/Contents/PlugIns/SecondWidget.appex/Contents/Info.plist"
+        )
+        try FileManager.default.createDirectory(
+            at: secondWidgetInfo.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: secondWidgetInfo)
+        let duplicateWidget = try run(
+            bundleID: "com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension",
+            extensionPoint: "com.apple.widgetkit-extension"
+        )
+        XCTAssertEqual(duplicateWidget.0, 1)
+        XCTAssertTrue(duplicateWidget.1.contains("必须包含且只包含一个 Widget 扩展"))
+
+        try FileManager.default.removeItem(at: widget.deletingLastPathComponent().deletingLastPathComponent())
+        try FileManager.default.removeItem(at: secondWidgetInfo.deletingLastPathComponent().deletingLastPathComponent())
+        let missingWidget = try run(
+            bundleID: "com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension",
+            extensionPoint: "com.apple.widgetkit-extension"
+        )
+        XCTAssertEqual(missingWidget.0, 1)
+        XCTAssertTrue(missingWidget.1.contains("必须包含且只包含一个 Widget 扩展"))
+    }
+
     func testAppConfigurationProhibitsConcurrentSemanticWriters() throws {
         let repositoryURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -2094,6 +2589,14 @@ final class BuildAndRunScriptTests: XCTestCase {
             .appendingPathComponent("\(prefix).\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private func writeExecutable(_ contents: String, to url: URL) throws {
+        try Data(contents.utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: url.path
+        )
     }
 
     private func bookmarkData(for url: URL) throws -> Data {

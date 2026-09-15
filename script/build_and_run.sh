@@ -17,6 +17,7 @@ LOG_BIN="${TINYBUDDY_LOG_BIN:-/usr/bin/log}"
 PLUGINKIT_BIN="${TINYBUDDY_PLUGINKIT_BIN:-/usr/bin/pluginkit}"
 CODESIGN_BIN="${TINYBUDDY_CODESIGN_BIN:-/usr/bin/codesign}"
 SECURITY_BIN="${TINYBUDDY_SECURITY_BIN:-/usr/bin/security}"
+PLIST_BUDDY_BIN="${TINYBUDDY_PLIST_BUDDY_BIN:-/usr/libexec/PlistBuddy}"
 SW_VERS_BIN="${TINYBUDDY_SW_VERS_BIN:-/usr/bin/sw_vers}"
 LAUNCHCTL_BIN="${TINYBUDDY_LAUNCHCTL_BIN:-/bin/launchctl}"
 RELEASE_LOCK_PERL_BIN="${TINYBUDDY_RELEASE_LOCK_PERL_BIN:-/usr/bin/perl}"
@@ -26,6 +27,27 @@ CURRENT_USER_UID="${TINYBUDDY_CURRENT_USER_UID:-$(/usr/bin/id -u)}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BUILD_LOG_DIR="${TINYBUDDY_BUILD_LOG_DIR:-${TMPDIR:-/tmp}/TinyBuddyBuildLogs}"
+
+default_nonrelease_signing_mode() {
+  local product_version
+  local major_version
+
+  product_version="$("$SW_VERS_BIN" -productVersion)" || return $?
+  major_version="${product_version%%.*}"
+  case "$major_version" in
+    ''|*[!0-9]*)
+      echo "could not determine the macOS major version for WidgetKit signing: $product_version" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$major_version" -ge 15 ]; then
+    printf '%s\n' signed
+  else
+    printf '%s\n' unsigned
+  fi
+}
+
 case "$MODE" in
   release-install|--release-install|release-verify|--release-verify|release-acceptance|--release-acceptance)
     BUILD_CONFIGURATION="${TINYBUDDY_BUILD_CONFIGURATION:-Release}"
@@ -33,7 +55,7 @@ case "$MODE" in
     ;;
   *)
     BUILD_CONFIGURATION="${TINYBUDDY_BUILD_CONFIGURATION:-Debug}"
-    SIGNING_MODE="${TINYBUDDY_SIGNING_MODE:-unsigned}"
+    SIGNING_MODE="${TINYBUDDY_SIGNING_MODE:-$(default_nonrelease_signing_mode)}"
     ;;
 esac
 
@@ -668,9 +690,10 @@ require_local_signing_host_compatibility() {
   local product_version
   local major_version
 
-  if [ "$SIGNING_MODE" != "local" ]; then
-    return 0
-  fi
+  case "$SIGNING_MODE" in
+    local|unsigned) ;;
+    *) return 0 ;;
+  esac
   product_version="$("$SW_VERS_BIN" -productVersion)" || return $?
   major_version="${product_version%%.*}"
   case "$major_version" in
@@ -1273,6 +1296,38 @@ require_entitlement_key_count() {
   fi
 }
 
+verify_provisioned_app_group() {
+  local profile="$1"
+  local bundle_id="$2"
+  local role="$3"
+  local decoded_profile
+  local profile_app_identifier
+  local profile_groups
+
+  decoded_profile="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/TinyBuddyProvisioningProfile.XXXXXX")" || return $?
+  if ! "$SECURITY_BIN" cms -D -i "$profile" >"$decoded_profile" 2>/dev/null; then
+    /bin/rm -f "$decoded_profile"
+    echo "$role provisioning profile could not be decoded" >&2
+    return 1
+  fi
+
+  profile_app_identifier="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:application-identifier' "$decoded_profile" 2>/dev/null)" || profile_app_identifier=""
+  profile_groups="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:com.apple.security.application-groups' "$decoded_profile" 2>/dev/null)" || profile_groups=""
+  /bin/rm -f "$decoded_profile"
+
+  if [ "$profile_app_identifier" != "$EXPECTED_TEAM_ID.$bundle_id" ]; then
+    echo "$role provisioning profile has an unexpected application identifier" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$profile_groups" \
+    | /usr/bin/sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | /usr/bin/grep -Fqx "$APP_GROUP_ID"
+  then
+    echo "$role provisioning profile does not authorize the expected App Group" >&2
+    return 1
+  fi
+}
+
 verify_code_signing_contract() {
   local app_bundle="$1"
   local appex="$2"
@@ -1310,6 +1365,16 @@ verify_code_signing_contract() {
       echo "profile-free local signing contract rejects embedded provisioning profiles" >&2
       return 1
     fi
+  elif [ "$SIGNING_MODE" = "signed" ]; then
+    local app_profile="$app_bundle/Contents/embedded.provisionprofile"
+    local widget_profile="$appex/Contents/embedded.provisionprofile"
+    if [ ! -f "$app_profile" ] || [ ! -f "$widget_profile" ]
+    then
+      echo "signed WidgetKit builds require App and Widget provisioning profiles for the group.com App Group" >&2
+      return 1
+    fi
+    verify_provisioned_app_group "$app_profile" "$BUNDLE_ID" app || return $?
+    verify_provisioned_app_group "$widget_profile" "$WIDGET_BUNDLE_ID" widget || return $?
   fi
 
   temp_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/TinyBuddyEntitlements.XXXXXX")" || return $?
@@ -2950,6 +3015,13 @@ sign_widget_extension_for_run() {
   local identity
   local appex
 
+  if [ "$SIGNING_MODE" = "signed" ]; then
+    verify_release_bundle "$APP_BUNDLE" || return $?
+    echo "preserved Xcode-managed Widget and App Group signing: bundle=$APP_BUNDLE"
+    return 0
+  fi
+
+  require_local_signing_host_compatibility || return $?
   identity="$(resolve_local_code_sign_identity)" || return $?
   appex="$(find_widget_extension "$APP_BUNDLE")"
   if [ -z "$appex" ]; then
@@ -3009,10 +3081,9 @@ case "$MODE" in
     ;;
   run)
     build_current_app
-    # Ensure the widget extension is properly code-signed with a
-    # development certificate (not just ad-hoc/linker-signed) so
-    # macOS 14+ WidgetKit can load it, then register it with
-    # pluginkit so it appears in the widget gallery.
+    # Modern macOS requires provisioned authorization for the group.
+    # Preserve Xcode's signatures on macOS 15+; profile-free development
+    # signing is restricted to macOS 14, then register through PlugInKit.
     unregister_widget_extensions
     sign_widget_extension_for_run
     register_widget_extension "$APP_BUNDLE" 1

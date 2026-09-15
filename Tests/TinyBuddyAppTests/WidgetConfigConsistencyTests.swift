@@ -40,6 +40,26 @@ final class WidgetConfigConsistencyTests: XCTestCase {
         )
     }
 
+    func testAppAndWidgetTargetsRegisterTheirAppGroupForManagedSigning() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let project = try String(
+            contentsOf: repositoryURL.appendingPathComponent("project.yml"),
+            encoding: .utf8
+        )
+        let appTarget = try XCTUnwrap(project.range(of: "  TinyBuddy:\n"))
+        let widgetTarget = try XCTUnwrap(project.range(of: "  TinyBuddyWidgetExtension:\n"))
+        let appSection = project[appTarget.lowerBound..<widgetTarget.lowerBound]
+        let widgetSection = project[widgetTarget.lowerBound...]
+
+        XCTAssertTrue(appSection.contains("REGISTER_APP_GROUPS: YES"))
+        XCTAssertTrue(widgetSection.contains("REGISTER_APP_GROUPS: YES"))
+        XCTAssertTrue(appSection.contains("group.com.ryukeili.TinyBuddy"))
+        XCTAssertTrue(widgetSection.contains("group.com.ryukeili.TinyBuddy"))
+    }
+
     // MARK: - Bundle ID relationships
 
     func testWidgetBundleIDIsChildOfAppBundleID() {

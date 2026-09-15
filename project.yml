@@ -51,6 +51,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryukeili.TinyBuddy
         PRODUCT_NAME: TinyBuddy
         ENABLE_APP_SANDBOX: YES
+        REGISTER_APP_GROUPS: YES
     postCompileScripts:
       - name: Clear Signing Metadata
         basedOnDependencyAnalysis: false
@@ -91,6 +92,7 @@ targets:
         PRODUCT_NAME: TinyBuddyWidgetExtension
         APPLICATION_EXTENSION_API_ONLY: YES
         ENABLE_APP_SANDBOX: YES
+        REGISTER_APP_GROUPS: YES
     postCompileScripts:
       - name: Clear Signing Metadata
         basedOnDependencyAnalysis: false

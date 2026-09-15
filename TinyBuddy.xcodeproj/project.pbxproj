@@ -797,6 +797,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension;
 				PRODUCT_NAME = TinyBuddyWidgetExtension;
+				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -820,6 +821,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension;
 				PRODUCT_NAME = TinyBuddyWidgetExtension;
+				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -842,6 +844,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy;
 				PRODUCT_NAME = TinyBuddy;
+				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -929,6 +932,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ryukeili.TinyBuddy;
 				PRODUCT_NAME = TinyBuddy;
+				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
 			};
 			name = Release;
