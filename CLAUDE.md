@@ -10,28 +10,7 @@ TinyBuddy is a macOS 14 companion HUD (SwiftUI + WidgetKit) that combines a floa
 
 ## Commands
 
-```bash
-swift build                          # build the Swift package targets
-swift test                           # run TinyBuddyCoreTests + TinyBuddyAppTests
-swift test --filter <TestClass>      # run one test class
-swift test --filter <TestClass>/<testMethod>   # run one test method
-./script/swiftpm.sh build|test       # wrappers with isolated module/cache/scratch paths (.build/spm)
-xcodegen generate                    # regenerate TinyBuddy.xcodeproj from project.yml
-```
-
-There is no lint command. Static gates are the compiler, affected tests, `/bin/bash -n script/update_git_completion_count.sh` for Git-refresh script edits, and `git diff --check`.
-
-### App / verification entry points
-
-- `./script/tb-install.sh` — regenerates the Xcode project automatically when `project.yml` or a source file is newer, then builds, signs, installs to `/Applications/TinyBuddy.app`, registers the Widget, and launches. Prefer this for day-to-day local runs.
-- `./script/build_and_run.sh` — Debug build + launch (unsigned); flags: `--verify` (app startup + Widget source/hash consistency), `--logs`, `--telemetry`.
-- `./script/build_and_run.sh release-install` — signed Release build, transactional install/swap preserving the canonical app path and Widget registration.
-- `./script/build_and_run.sh release-verify` — verifies the installed signed app and Widget registration from a fresh process state.
-- `./script/build_and_run.sh release-acceptance` — the single terminal release gate: full `swift test`, signed Release build, real install + same-version reinstall, then fresh runtime verification. A passing run supersedes lower-level test/install/verify evidence.
-- `./script/benchmark_git_refresh.sh` — repeatable Git-refresh accuracy/perf/resource/cancellation gate.
-- `./script/regression_gate.sh --quick` — broader performance/energy/stability regression sweep.
-
-Release modes default to `TINYBUDDY_SIGNING_MODE=local` (profile-free Apple Development signing of the checked-in entitlements, macOS 14 only). Full signing workflow details are in `README.md`.
+构建、测试与安装命令统一见 `AGENTS.md` 的「Build, Test, and Development Commands」一节；此处不再重复，避免同一规则在两份文件中各写一遍。
 
 ## Architecture
 

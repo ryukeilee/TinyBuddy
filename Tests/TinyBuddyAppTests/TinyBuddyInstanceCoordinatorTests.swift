@@ -46,6 +46,7 @@ final class CoordinatorBox: @unchecked Sendable {
 ///
 /// Each test creates its own temporary directory and lock file so there is no
 /// interaction with App Group containers, running app instances, or other tests.
+@MainActor
 final class TinyBuddyInstanceCoordinatorTests: XCTestCase {
 
     private var tempDir: URL!
@@ -456,6 +457,7 @@ final class TinyBuddyInstanceCoordinatorTests: XCTestCase {
 /// Integration tests that verify cross-process lock behavior using real
 /// subprocesses. These tests use `python3` (available on macOS) to create
 /// child processes that interact with the same lock file via `fcntl.flock`.
+@MainActor
 final class TinyBuddyInstanceCoordinatorCrossProcessTests: XCTestCase {
 
     private var tempDir: URL!

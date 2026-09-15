@@ -453,7 +453,59 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         try writePropertyList(appEntitlements, to: appPlist)
         try writePropertyList(widgetEntitlements, to: widgetPlist)
         let script = try buildAndRunScript()
+        var provisioningEnvironment = ""
+        if signingMode == "signed" {
+            let appProfile = app.appendingPathComponent("Contents/embedded.provisionprofile")
+            let widgetContents = widget.appendingPathComponent("Contents")
+            let widgetProfile = widgetContents.appendingPathComponent("embedded.provisionprofile")
+            try FileManager.default.createDirectory(
+                at: widgetContents,
+                withIntermediateDirectories: true
+            )
+            try Data("app".utf8).write(to: appProfile)
+            try Data("widget".utf8).write(to: widgetProfile)
+
+            let fakeSecurity = scenarioDirectory.appendingPathComponent("fake-security.sh")
+            let fakePlistBuddy = scenarioDirectory.appendingPathComponent("fake-plist-buddy.sh")
+            try writeExecutable(
+                """
+                #!/bin/bash
+                set -eu
+                profile="${@: -1}"
+                case "$profile" in
+                  *TinyBuddyWidgetExtension.appex*) printf 'widget\\n' ;;
+                  *) printf 'app\\n' ;;
+                esac
+                """,
+                to: fakeSecurity
+            )
+            try writeExecutable(
+                """
+                #!/bin/bash
+                set -eu
+                decoded="${@: -1}"
+                kind="$(/bin/cat "$decoded")"
+                case "$*" in
+                  *application-identifier*)
+                    if [ "$kind" = "widget" ]; then
+                      printf '%s\\n' 'JYL9G28DP3.com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension'
+                    else
+                      printf '%s\\n' 'JYL9G28DP3.com.ryukeili.TinyBuddy'
+                    fi
+                    ;;
+                  *application-groups*) printf '%s\\n' 'group.com.ryukeili.TinyBuddy' ;;
+                  *) exit 64 ;;
+                esac
+                """,
+                to: fakePlistBuddy
+            )
+            provisioningEnvironment = """
+            SECURITY_BIN=\(shellQuote(fakeSecurity.path))
+            PLIST_BUDDY_BIN=\(shellQuote(fakePlistBuddy.path))
+            """
+        }
         let functions = try [
+            "verify_provisioned_app_group",
             "signing_team_identifier",
             "signing_leaf_authority",
             "extract_signed_entitlements",
@@ -482,6 +534,7 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         FAKE_APP_ENTITLEMENTS=\(shellQuote(appPlist.path))
         FAKE_WIDGET_ENTITLEMENTS=\(shellQuote(widgetPlist.path))
         FAKE_SIGNING_AUTHORITY='Apple Development: Contract Test'
+        \(provisioningEnvironment)
         export FAKE_APP_PATH FAKE_WIDGET_PATH FAKE_APP_TEAM FAKE_WIDGET_TEAM
         export FAKE_APP_ENTITLEMENTS FAKE_WIDGET_ENTITLEMENTS FAKE_SIGNING_AUTHORITY
         \(functions)

@@ -6,137 +6,7 @@
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
 
-## Loop 9：2026-08-11：无修改轮次（仓库状态与 Loop 8 逐字节一致，未发现新的可验证问题）
 
-**Loop 编号**
-- Loop 9。
-
-**日期**
-- 2026-08-11
-
-**观察结果**
-- 工作区：`git status --short` 无输出、`git diff --check` 通过、无未跟踪文件；`git diff origin/main..HEAD` 为空，HEAD（`041980f`）即 Loop 8 提交，仓库业务代码自 Loop 8 以来**逐字节未变**。
-- 最近提交：`041980f`（Record Loop 8 no-op）自上一轮以来是唯一提交，且只改 `.agent/history.md`；业务文件（Sources/Tests/Widget/script）无任何新改动。
-- 历史去重：`history.md` 现有 8 条记录（Loop 6-8 编号，前 5 条未编号）；Loop 8 已对脚本 dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition` 等候选逐条给出淘汰依据，本轮候选若同根因即构成重复。
-- `rg "TODO|FIXME|HACK|XXX"`：Swift/脚本代码无真实待办标记（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）。
-- 高风险模式：`try!`/`fatalError` 无匹配；候选 force-unwrap 现场逐一复核均为安全：
-  - `ManualFocusMenuBarController.swift:81` `engine!`：`if engine == nil { stop() } else if statusItem == nil { start(with: engine!) }`，else 分支已排除 nil，安全。
-  - `TinyBuddyDataValidator.swift:446/454` `previousVersion!`：前置 `guard previousVersion != nil else { return }`，安全。
-  - `TinyBuddyTransactionLog.swift:352` `data(using: .utf8)!`：String 到 UTF-8 的 Data 编码恒成功，惯用法。
-  - `FocusSessionQueryService.swift:82` `page.last!`：Loop 8 候选 C，防护链已验证恒非空。
-  - `FocusNotificationManager.swift:134` `URL(string:)!`：字面量常量 URL，恒有效。
-- `precondition(!days.isEmpty)`（`FocusHistoryAggregation.swift:541`）：Loop 7/8 已评估为内部契约（`isoWeekDayIdentifiers(through:)` 兜底保证至少 1 天），无新证据。
-- 测试基线：`swift test` 全量 **1543 个测试、0 失败**（后台运行，耗时约 212s）；构建随测试编译成功，无失败。
-
-**选择的问题及证据**
-- 无。逐项核对后未发现任何相对 Loop 8 的新证据，各候选淘汰理由：
-  - **脚本 focus_block 区域内 dead code**（`script/update_git_completion_count.sh:716-719` 的 `local_hour`/`local_minute`/`block_minute` 三行已核实仍计算后未使用）：Loop 8 已确认 `focus_block=$((epoch / 1800))` 为**有意**的 UTC 桶设计（提交 `4ecc4a9`，且有 DST fallback 测试锁定语义），dead code 属零行为纯清理。本轮无新失败、新复现、新指标或新用户反馈，同根因重复，按契约不处理。
-  - force-unwrap 四处与 `precondition`：均无复现证据，先前轮次已复核安全，不构成新一轮依据。
-  - 测试缺口：1543 测试全绿，XCTSkip 均为环境条件（Git/App Group 不可用），无失败掩盖。
-- 完成标准：na（无修改轮次）。
-
-**原因分析**
-- 仓库自 Loop 8 无任何业务代码变化，观察范围（工作区、提交历史、静态信号、全量测试）内不存在"新的失败、新复现、新指标或新用户反馈"；所有候选要么与历史已完成问题同根因（dead code、precondition、page.last!），要么经现场复核恒安全（四处 force-unwrap），缺少触发新一轮的证据门槛。按 loop.md 契约"无证据即无修改，不为了产生修改而修改"。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录，属契约要求的 Record 阶段）。
-
-**验证结果**
-- `swift test` 全量：1543 个测试，0 失败（基线，后台运行记录）。
-- `git diff --check`：通过（history.md 追加仅新增行）。
-- `git status --short` 复查：业务文件零改动，`.agent/` 下历史文件中本条目为唯一新增；HEAD == origin/main，工作区干净。
-
-**剩余风险**
-- 本轮为无修改轮次，无新增风险。留待后续轮次（需新证据）：脚本 focus_block 区域 3 行 dead code 可随时作为纯清理移除（行为零变化）；`FocusSessionQueryService` 的 `page.last!` 与 `TinyBuddyTimeContext(...)!` 属防御性加固，若未来相关 guard 收紧需先处理。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- `31319b5` 新增的恢复重试测试依赖真实主队列计时窗口，极慢 CI 下存在既有时序脆弱性，无新失败证据，留待出现实际失败时处理。
-
-## Loop 10：2026-08-11：修复 Widget 历史数据与中性占位的自恢复展示
-
-**Loop 编号**
-- Loop 10。
-
-**日期**
-- 2026-08-11
-
-**观察结果**
-- 起始工作区在 `main`，与 `origin/main` 同步，但存在 6 个未提交的 Widget/共享展示改动及其回归测试；本轮未覆盖或回滚这些在途修改。
-- 对照 Loop 9：此前全量基线为 1543 个测试通过，业务文件没有变化；本轮新增改动集中在 `TinyBuddyDisplayPresentation`、`TinyBuddyWidgetTimelinePolicy`、Widget provider 及对应测试。
-- 旧实现仅以 Git activity 字段决定 `showsActivityMetrics`，且稳定 `.idle` 状态始终不自调度；这会使仅有 `FocusHistoryPublication` 的合法快照隐藏 Widget 指标，也会使无数据的首次/跨日占位在缺失 App reload 时永久停留。
-- `git diff --check` 通过；未发现 TODO/FIXME 等新的可验证线索。
-
-**选择的问题及证据**
-- 选择 Widget 在合法历史-only 快照和无数据占位下无法可靠展示/自恢复这一单一跨层问题。
-- 复现条件：activity slice 的两个可选计数均为 `nil`、但 focus-history publication 存在；或 timeline entry 为 neutral `.idle` 且无可渲染数据，App-side reload 缺失。
-- 完成标准：历史-only 快照显示 metrics；有数据的空日保持 push-only；无数据 idle 按慢速 cadence 重读；跨日 neutral rollover 在边界后进行一次有界 probe；自调度不跨越本地日边界。
-
-**原因分析**
-- Widget 的主要 focus 指标来自权威 focus-history publication，而旧的可见性门槛只检查 Git activity 字段；同时 timeline 的 `.never` fallback 没有覆盖“占位尚未具备数据、但后续提交会出现”的可恢复状态。
-
-**修改内容**
-- `Sources/TinyBuddyCore/TinyBuddyDisplayPresentation.swift`：将有效的 focus-history metric 纳入 Widget metrics 可见性判定，同时保留 stale/loading/授权异常的隐藏规则。
-- `Sources/TinyBuddyCore/TinyBuddyWidgetTimelinePolicy.swift`：为无可渲染数据的 neutral idle 增加慢速重试；增加有界的跨日 rollover probe。
-- `Widget/TinyBuddyWidget/TinyBuddyWidget.swift`：识别占位 entry，接入 idle 自恢复与跨日 probe。
-- `Tests/TinyBuddyCoreTests/TinyBuddyDisplayPresentationTests.swift`、`Tests/TinyBuddyCoreTests/TinyBuddyWidgetTimelinePolicyTests.swift`、`Tests/TinyBuddyAppTests/WidgetFallbackRenderingTests.swift`：补充 history-only、占位自恢复、边界和共享快照回归覆盖。
-
-**验证结果**
-- `swift test --filter TinyBuddyWidgetTimelinePolicyTests`：15 个测试通过。
-- `swift test --filter TinyBuddyDisplayPresentationTests`：27 个测试通过。
-- `swift test --filter WidgetFallbackRenderingTests`：11 个测试通过。
-- `swift test`：1550 个测试通过，0 失败。
-- `git diff --check`：通过。
-- `./script/tb-install.sh`：Xcode Debug 构建成功，Apple Development 签名验证通过，安装并启动成功。
-- 独立 `codesign --verify --deep --strict`：已安装 App 的嵌套签名验证通过；运行中的 `TinyBuddy` executable 路径来自已安装 bundle，且安装产物与构建产物一致。
-
-**剩余风险**
-- 未单独实测 WidgetKit 的系统调度；本轮源码测试覆盖 timeline policy/provider wiring，已完成本机签名安装与 App 启动验证。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-
-## Loop 11：2026-08-12：消除恢复重试测试的真实计时依赖（注入确定性调度器）
-
-**Loop 编号**
-- Loop 11。
-
-**日期**
-- 2026-08-12
-
-**观察结果**
-- 起始工作区干净（`git status --short` 无输出），HEAD == origin/main（`de3da20`）；业务代码自 Loop 10（`6049a63` Widget 修复）以来逐字节未变，`de3da20` 仅改 `.agent/history.md`。
-- 最近提交：`de3da20`（Record signed local app verification）、`6049a63`（Fix Widget fallback rendering and self-healing）、`d58c31c`/`041980f`（Loop 9/8 no-op）。
-- `rg "TODO|FIXME|HACK|XXX"`：Swift/脚本代码无真实待办标记（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）。
-- 高风险模式：`try!`/`fatalError` 无匹配；force-unwrap 候选仅 `FocusSessionQueryService.swift:82 page.last!`（Loop 8/9 已评估恒安全，无新证据）。
-- **关键发现（新失败证据）**：全量 `swift test` 1550 个测试**偶发 1 失败**——6 次运行中 1 次失败（该次恰与另一个全量测试并行编译，高负载环境），5 次单独运行全绿（16:40 完整日志、4 次串行循环、1 次最终验证）。失败详情最初被过滤管道丢失，无法直接确认失败测试名；无 xctest 崩溃报告（0 unexpected，普通断言失败）。
-- 历史预告：Loop 8/9/10 均记录 `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget`（`6a9b488` 的回归测试）"依赖真实主队列计时窗口（0.2s/0.5s），极慢 CI 下存在既有时序脆弱性，留待出现实际失败时处理"。
-
-**选择的问题及证据**
-- 选择"消除恢复重试回归测试的真实计时依赖"这一稳定性问题（Loop 优先级第 2 位）。
-- 复现条件：全量测试与另一构建/测试进程并行、或慢环境（真实主队列 `asyncAfter` 0.2s/0.5s 窗口调度延迟导致超时）。本次已实际观察到 1 次全量失败，且 coordinator 的恢复重试排队（`scheduleRecoveryRetryIfNeeded`）是全测试套件中唯一经真实主队列计时驱动的恢复路径，与历史三次预告的脆弱测试吻合。
-- 影响范围：CI/慢机下偶发全量失败，掩盖真实回归信号。
-- 完成标准：恢复重试排队改为可注入延迟执行器（默认主队列行为不变）；该测试改用 `DeterministicScheduler` 虚拟时间驱动；目标测试重复运行 100% 确定；`GitActivityRefreshCoordinatorTests` 97 个测试与全量 1550 个测试全绿。
-
-**原因分析**
-- `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget` 用真实主队列 `asyncAfter(deadline: .now() + 0.5)` 等待已排队重试触发、用 0.2s `minimumRefreshSpacing` 让重试在测试时间内触发，验证 generation 取消与预算恢复。高负载下主队列调度延迟使等待窗口（timeout 1.0s）超时或断言窗口漂移，产生 flaky。项目已有 `DeterministicScheduler`（`Tests/TinyBuddyAppTests/Helpers/`，支持 `schedule(after:)` 与虚拟时间推进），但此前未接线到 coordinator。
-
-**修改内容**
-- `Sources/TinyBuddy/GitActivityRefreshCoordinator.swift`
-  - 新增可注入延迟执行器 `scheduleAfterDelay: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void`（属性 + init 参数，默认 `DispatchQueue.main.asyncAfter`，产品行为不变）。
-  - `scheduleRecoveryRetryIfNeeded` 的恢复重试排队由 `DispatchQueue.main.asyncAfter(...)` 改为 `scheduleAfterDelay(minimumRefreshSpacing) { ... }`。
-- `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift`
-  - `RefreshHarness` 新增 `let scheduler = DeterministicScheduler()`，并在 coordinator 构造时注入 `scheduleAfterDelay`。
-  - `testSuccessfulRefreshCancelsQueuedRecoveryRetryWithoutConsumingResetBudget`：移除真实 `asyncAfter(0.5)` 等待，改为 `scheduler.advanceTime(by: 0.2)` 确定性触发已排队的恢复重试（步骤 3 验证 generation 取消，步骤 5 验证恢复后重试成功）。
-
-**验证结果**
-- `swift test --filter GitActivityRefreshCoordinatorTests`：97 个测试通过（0 失败）。
-- 目标测试重复运行 10 次：全部通过（确定性，无真实计时依赖）。
-- `swift test` 全量：1550 个测试，0 失败。
-- `git diff --check`：通过。
-- `git status --short` 复查：仅 `Sources/TinyBuddy/GitActivityRefreshCoordinator.swift` 与 `Tests/TinyBuddyAppTests/GitActivityRefreshCoordinatorTests.swift` 两处改动（+28/-13），无越界修改；`.agent/` 下追加 Loop 11 记录并归档最旧 1 条。
-
-**剩余风险**
-- 偶发失败详情未能直接捕获（过滤管道丢失），无法 100% 证实失败测试即此测试；但该测试是 coordinator 中唯一经真实计时驱动的恢复重试路径，且历史三次预告同一风险，本次修复消除了该路径的全部真实计时依赖，逻辑上覆盖了观察到的失败模式。若后续再次出现偶发失败，优先检查其余真实计时依赖（如 `DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口）。
-- 其他测试未注入 `scheduleAfterDelay`，默认仍走主队列，行为不变；RefreshHarness 注入 scheduler 后，其他依赖恢复重试排队的测试隔离性反而更好（重试只在 `advanceTime` 时触发）。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- `.agent/` 首次实际触发归档：`history.md` 现保留 10 条，最旧 1 条（2026-08-09 Loop 升级）原样移入 `.agent/archive/history-2026-08-12.md`。
 
 ## Loop 12：2026-08-13：无修改轮次（main 最新开发中断恢复改动经全量回归验证通过，未发现新的可验证问题）
 
@@ -413,3 +283,122 @@
 **剩余风险**
 - 本轮为无修改轮次，无新增风险。全量门禁仍受本机环境负载影响（脚本超时墙钟测试在重负载下失败，Loop 16 原始树复现归因；负载回落或换机后应复跑 `swift test` 确认全绿）。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch` 死代码可留作纯清理候选；`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口仍无新失败证据。
+
+## Loop 19：2026-08-20：修复 Git 刷新脚本超时轮询未按配置秒数生效
+
+**Loop 编号**
+- Loop 19。
+
+**日期**
+- 2026-08-20
+
+**观察结果**
+- 起始工作区干净，HEAD == origin/main == `32f6cd4`；历史含 Loop 9–18 共 10 条记录。
+- 静态检查：Swift/脚本无新的真实 TODO/FIXME/HACK/XXX；无 `try!`/`fatalError`；`git diff --check` 通过；`/bin/bash -n script/update_git_completion_count.sh` 通过。
+- 窄测基线 `swift test --filter GitCommandExecutorTests`：33 个测试通过。
+- 系统负载为 2.13；此前被 Loop 16/17 归因为高负载环境问题的两个超时测试在正常负载下仍失败：metadata 6.02s、parsing 5.90s，均超过 4s 断言。
+- 独立复现中，配置 `TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS=1` 时慢 stat 探测只命中 1 次，但脚本耗时约 6s；`/bin/sleep 0.01` × 100 实测约 4.1s。
+
+**选择的问题及证据**
+- 选择 Git 刷新脚本 `run_command_with_timeout` 未按配置墙钟秒数超时这一错误处理/稳定性问题。
+- 复现条件：任一有界命令持续运行，尤其慢仓库读操作或解析操作；旧逻辑以 `timeout_seconds * 100` 次轮询代替墙钟计时，实际超时显著超过配置值。
+- 影响范围：慢仓库可能使默认 5s 读超时实际等待约 20–30s，默认 30s 解析超时实际等待更久；两个既有超时回归测试在正常负载下失败。
+- 完成标准：按配置 deadline 终止命令；慢仓库仍保留有效仓库的 partial 结果；两个超时测试、相关测试、全量测试和 benchmark 通过。
+
+**原因分析**
+- 旧实现假设每次 `sleep 0.01` 都耗时 10ms，但当前 macOS 实测约 40ms；100 次轮询因此约 4s，叠加调度和清理后达到约 6s。根因是用名义轮询次数估算墙钟时间，而不是检查真实 deadline。
+
+**修改内容**
+- `script/update_git_completion_count.sh`：删除 `poll_count`/`poll_limit`，改为 `deadline=$((SECONDS + timeout_seconds))`，循环内按 `SECONDS` 判断超时；保持 TERM → 0.1s → KILL、返回码 124 和清理语义不变。
+- 撤销方法：将上述函数恢复为 Loop 19 前的 `poll_count`/`poll_limit` 实现；历史记录撤销可从 `.agent/archive/history-2026-08-20.md` 移回 Loop 9 并删除本条。
+
+**验证结果**
+- `/bin/bash -n script/update_git_completion_count.sh`：通过。
+- 真实脚本复现：修复前约 6.0s；修复后约 3.0s，`refresh_outcome=partial`、`retained_repository_count=1`；重复测量 1.0s、1.0s、2.0s。
+- `swift test --filter 'GitActivityRefreshScriptTests/testScriptTimesOutSlowRepositoryMetadataAndRetainsItsLastValidResult|GitActivityRefreshScriptTests/testScriptTimesOutSlowRepositoryParsingAndRetainsItsLastValidResult'`：2 个测试通过。
+- `swift test --filter 'GitActivityRefreshScriptTests|GitActivityRealRepositoryFixtureTests'`：85 个测试通过。
+- `swift test`：1613 个测试通过，0 失败。
+- `./script/benchmark_git_refresh.sh`：通过；24 repositories、100 events/repository、expected_events=2400，first=42351ms、incremental=18503ms、cancel=1001ms。
+- 最终 `git diff --check`：通过；业务改动仅目标脚本。
+
+**剩余风险**
+- `SECONDS` 为整数秒计时，实际终止点可能比配置 deadline 晚不足 1 秒；当前所有超时配置均为整数秒，既有测试和 benchmark 已通过。
+- 本轮未执行 App 安装/发布流程；改动仅限 Git 刷新脚本超时实现，不涉及签名、Widget 或安装状态。
+
+## Loop 20：2026-08-28：复核 Git 刷新脚本超时修复，未发现新的可验证问题
+
+**Loop 编号**
+- Loop 20。
+
+**日期**
+- 2026-08-28
+
+**观察结果**
+- 工作区起始状态为 `.agent/history.md` 与 `script/update_git_completion_count.sh` 已修改，`.agent/archive/history-2026-08-20.md` 未跟踪；HEAD 与 `origin/main` 均为 `32f6cd4`。这些在途改动未覆盖或回滚。
+- 当前 diff 显示 `run_command_with_timeout` 已从轮询次数改为 `SECONDS` deadline；Loop 19 已记录该问题与修复意图。
+- `TODO|FIXME|HACK|XXX` 仅命中脚本 `mktemp` 的 `XXXXXX` 模板，未发现真实待办；归档目录已核对。
+
+**选择的问题及证据**
+- 无新的业务问题。当前唯一业务改动正是 Loop 19 已选定的 Git 刷新超时问题，本轮基于新执行结果复核其终态，不重复修改同一根因。
+- 复核完成标准：脚本通过语法检查；慢 metadata/parsing 场景按配置超时并保留有效仓库的 `partial` 结果；相关测试、全量测试和 benchmark 通过。
+
+**原因分析**
+- 当前实现与 Loop 19 的根因分析一致：以实际 `SECONDS` deadline 替代依赖调度精度的固定轮询次数；本轮所有受影响验证均通过，未产生新的失败或回归证据。
+
+**修改内容**
+- 无业务代码修改；保留现有 `script/update_git_completion_count.sh` 在途改动原样。
+- `.agent/history.md` 追加本轮记录；按 Maintain 规则将最旧的 Loop 10 原样归档至 `.agent/archive/history-2026-08-28.md`。
+- 撤销方法：将归档文件中的 Loop 10 原样移回 `.agent/history.md`，删除本条 Loop 20 记录；不触碰既有脚本改动。
+
+**验证结果**
+- `/bin/bash -n script/update_git_completion_count.sh`：通过。
+- `swift test --filter 'GitActivityRefreshScriptTests/testScriptTimesOutSlowRepositoryMetadataAndRetainsItsLastValidResult|GitActivityRefreshScriptTests/testScriptTimesOutSlowRepositoryParsingAndRetainsItsLastValidResult'`：2 个测试通过。
+- `swift test --filter 'GitActivityRefreshScriptTests|GitActivityRealRepositoryFixtureTests'`：85 个测试通过。
+- `swift test`：1613 个测试通过，0 失败。
+- `./script/benchmark_git_refresh.sh`：通过；24 repositories、100 events/repository、expected_events=2400，first=36100ms、incremental=12648ms、cancel=1006ms。
+- `git diff --check` 与最终 `git status --short` 在记录完成后复查。
+
+**剩余风险**
+- `SECONDS` 为整数秒计时，实际终止点可能比配置 deadline 晚不足 1 秒；当前整数秒配置、相关测试和 benchmark 均通过。
+- 本轮未执行 App 安装/发布流程；既有脚本改动仍未提交，按规则不执行 commit。
+
+## Loop 21：2026-09-15：恢复 Swift 6.4 下测试门禁的编译与签名契约夹具
+
+**Loop 编号**
+- Loop 21。
+
+**日期**
+- 2026-09-15。
+
+**观察结果**
+- 起始工作区含既有在途改动：`.agent/history.md`、`.agent/rules.md`、`AGENTS.md`、`CLAUDE.md`、`script/update_git_completion_count.sh`，以及两个未跟踪归档文件；本轮未覆盖或回滚。
+- HEAD 与 `origin/main` 为 `bb7f219`，最新提交要求 macOS 15+ 的 signed Widget 构建同时具备 App/Widget provisioning profiles 和预期 App Group。
+- 首次运行 `swift test --filter 'BuildAndRunScriptTests|WidgetConfigConsistencyTests|ReleaseSigningAndWidgetContractTests'` 未进入测试：Swift 6.4 严格并发检查拒绝 `FocusSessionQueryPerformanceTests` 中跨 `Task` 写入 `canonicalIDs`；修正后又暴露 `TinyBuddyInstanceCoordinatorTests` 两个测试类中跨 `@MainActor Task` 写入角色变量的同类编译错误。
+- 编译门禁恢复后，签名契约测试仍有 1 个失败：`ReleaseSigningAndWidgetContractTests` 的 signed 夹具未提供嵌入 provisioning profile，无法满足最新提交新增的 profile 校验。
+- `TODO|FIXME|HACK|XXX` 未发现真实待办；三份相关脚本语法检查和 `git diff --check` 通过。
+
+**选择的问题及证据**
+- 选择“当前 Swift/Xcode 测试门禁无法完整编译并验证最新签名契约”这一测试稳定性问题。
+- 复现条件：使用当前 Xcode 27 / Swift 6.4 执行受影响测试；严格区域隔离报错会在测试目标编译阶段阻断测试，随后 signed 契约夹具因缺少 profile 失败。
+- 影响范围：无法运行焦点查询性能、实例协调器以及最新 Widget/App Group 签名契约测试，导致提交后的回归信号不可用。
+- 完成标准：受影响测试不再依赖不安全的跨任务可变捕获；signed 夹具提供可验证的 App/Widget profile；相关测试全部通过，生产代码不变。
+
+**原因分析**
+- Swift 6.4 对 `Task` 的 sending/region-isolation 检查比原测试写法严格，旧测试通过 `Task` 回写局部变量并在外部读取，无法编译。
+- `bb7f219` 在 `verify_code_signing_contract` 中新增了 embedded provisioning profile 和 App Group 校验，但既有 signed 测试只模拟了 `codesign` 输出，没有同步模拟 profile 解码链路。
+
+**修改内容**
+- `Tests/TinyBuddyCoreTests/FocusSessionQueryPerformanceTests.swift`：将排序稳定性测试改为 `async throws`，直接 `await` 三次查询，移除跨任务回写和等待。
+- `Tests/TinyBuddyAppTests/TinyBuddyInstanceCoordinatorTests.swift`：将两个使用 `@MainActor Task` 的实例协调器测试类标为 `@MainActor`，使角色变量和任务处于同一隔离域。
+- `Tests/TinyBuddyAppTests/ReleaseSigningAndWidgetContractTests.swift`：signed 夹具新增 App/Widget embedded profile、`security`/`PlistBuddy` 确定性桩，并接入 `verify_provisioned_app_group`；local 夹具仍保持 profile-free 场景。
+
+**验证结果**
+- `swift test --filter FocusSessionQueryPerformanceTests`：8 个测试通过。
+- `swift test --filter 'BuildAndRunScriptTests|WidgetConfigConsistencyTests|ReleaseSigningAndWidgetContractTests'`：79 个测试通过。
+- `swift test --filter 'FocusSessionQueryPerformanceTests|TinyBuddyInstanceCoordinatorTests|TinyBuddyInstanceCoordinatorCrossProcessTests|ReleaseSigningAndWidgetContractTests'`：29 个测试通过。
+- `/bin/bash -n script/update_git_completion_count.sh`、`/bin/bash -n script/build_and_run.sh`、`/bin/bash -n script/tb-install.sh`：通过。
+- `git diff --check`：通过；最终检查确认既有在途改动仍保留，新增改动仅限上述 3 个测试文件。
+
+**剩余风险**
+- 按测试-only 低影响改动采用 Focused 验证级别，未重复运行完整 `swift test`；未覆盖测试类仍可能包含与当前 Swift 6.4 无关的既有失败。
+- 未执行 App 安装、发布或替换已安装产物；本轮未修改生产代码、签名配置或安装状态。

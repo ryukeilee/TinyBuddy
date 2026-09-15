@@ -256,45 +256,33 @@ final class FocusSessionQueryPerformanceTests: XCTestCase {
     /// 100 sessions share the exact same `startedAt`, forcing the
     /// tie-breaking sort on `id.uuidString`. Runs 3 repeated queries
     /// and asserts the result order is identical each time.
-    func testSortStabilityWithIdenticalTimestamps() throws {
+    func testSortStabilityWithIdenticalTimestamps() async throws {
         let service = makeIdenticalTimestampService()
 
         // Warm up / establish the canonical order.
-        let warmExp = expectation(description: "warmUp")
-        var canonicalIDs: [UUID]?
-        Task {
-            let page = await service.execute(
-                query: FocusSessionQuery(),
-                cursor: nil,
-                limit: 200,
-                version: 0
-            )
-            canonicalIDs = page!.sessions.map(\.id)
-            warmExp.fulfill()
-        }
-        wait(for: [warmExp], timeout: 5)
-        let expectedIDs = try XCTUnwrap(canonicalIDs)
+        let page = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 200,
+            version: 0
+        )
+        let expectedIDs = try XCTUnwrap(page?.sessions.map(\.id))
         // Verify it's indeed sorted by uuidString ascending.
         let sorted = expectedIDs.sorted { $0.uuidString < $1.uuidString }
         XCTAssertEqual(expectedIDs, sorted,
                        "tie-breaking must order by id.uuidString ascending")
 
         // Repeat the query twice more and verify identical ordering.
-        for iteration in 0 ..< 2 {
-            let exp = expectation(description: "sortStability_\(iteration)")
-            Task {
-                let page = await service.execute(
-                    query: FocusSessionQuery(),
-                    cursor: nil,
-                    limit: 200,
-                    version: 0
-                )
-                let ids = page!.sessions.map(\.id)
-                XCTAssertEqual(ids, expectedIDs,
-                               "sort order must be deterministic across queries")
-                exp.fulfill()
-            }
-            wait(for: [exp], timeout: 5)
+        for _ in 0 ..< 2 {
+            let page = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: nil,
+                limit: 200,
+                version: 0
+            )
+            let ids = try XCTUnwrap(page?.sessions.map(\.id))
+            XCTAssertEqual(ids, expectedIDs,
+                           "sort order must be deterministic across queries")
         }
     }
 }

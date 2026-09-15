@@ -175,15 +175,14 @@ run_command_with_timeout() {
   shift
   local command_pid
   local command_status=0
-  local poll_count=0
-  local poll_limit=$((timeout_seconds * 100))
+  local deadline=$((SECONDS + timeout_seconds))
 
   "$@" &
   command_pid=$!
   active_command_pid="$command_pid"
 
   while kill -0 "$command_pid" 2>/dev/null; do
-    if [ "$poll_count" -ge "$poll_limit" ]; then
+    if [ "$SECONDS" -ge "$deadline" ]; then
       kill -TERM "$command_pid" 2>/dev/null || true
       sleep 0.1
       kill -KILL "$command_pid" 2>/dev/null || true
@@ -191,7 +190,6 @@ run_command_with_timeout() {
       active_command_pid=""
       return 124
     fi
-    poll_count=$((poll_count + 1))
     sleep 0.01
   done
 

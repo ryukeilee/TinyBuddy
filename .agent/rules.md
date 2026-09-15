@@ -1,6 +1,6 @@
 # TinyBuddy Agent Rules
 
-这些规则约束所有执行 Maintenance Loop 的智能体。它们与根目录 `AGENTS.md`、`CLAUDE.md` 和用户当前请求一起生效；如有冲突，以用户明确要求和更高优先级的仓库规则为准。
+这些规则约束所有执行 Maintenance Loop 的智能体。它们与根目录 `AGENTS.md`、`CLAUDE.md` 和用户当前请求一起生效；如有冲突，按全局 `~/.dsh/AGENTS.md` 的指令优先级裁决：用户当前指令 > 更具体的项目文件（子目录 > 仓库根 > 全局）> skill 文档。
 
 ## 必须
 
@@ -35,3 +35,4 @@
 - Git 刷新脚本：运行 `/bin/bash -n script/update_git_completion_count.sh`，并在行为或性能变化时运行仓库规定的测试/benchmark。
 - 仓库没有独立 lint；对所有改动运行 `git diff --check`，并检查 `git status --short` 与最终 diff。
 - `release-install`、`release-acceptance`、发布和部署会改变外部状态，除非用户明确授权，否则不执行。
+- `script/tb-install.sh` 在默认安装路径 `/Applications/TinyBuddy.app` 下属于日常本地运行流程，不需要额外授权；当 `INSTALL_APP` 指向其他路径，或会替换非本项目的产物时，需要用户明确授权。
