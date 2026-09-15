@@ -393,6 +393,7 @@ struct TinyBuddyProvider: TimelineProvider {
 
 struct TinyBuddyWidgetView: View {
     @Environment(\.widgetFamily) private var family
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -449,6 +450,10 @@ struct TinyBuddyWidgetView: View {
         )
     }
 
+    private var usesSimplifiedRendering: Bool {
+        widgetRenderingMode == .accented || widgetRenderingMode == .vibrant
+    }
+
     private var layout: TinyBuddyDisplayLayout {
         TinyBuddyDisplayLayout(presentation: presentation, environment: displayEnvironment)
     }
@@ -484,11 +489,20 @@ struct TinyBuddyWidgetView: View {
 
     var body: some View {
         Group {
-            switch family {
-            case .systemMedium:
-                mediumBody
-            default:
-                smallBody
+            if usesSimplifiedRendering {
+                switch family {
+                case .systemMedium:
+                    simplifiedMediumBody
+                default:
+                    simplifiedSmallBody
+                }
+            } else {
+                switch family {
+                case .systemMedium:
+                    mediumBody
+                default:
+                    smallBody
+                }
             }
         }
         .containerBackground(for: .widget) {
@@ -503,6 +517,108 @@ struct TinyBuddyWidgetView: View {
             }
         }
         .accessibilityLabel(widgetAccessibilityLabel)
+    }
+
+    /// macOS desktop widgets can use accented or vibrant rendering, which
+    /// removes the container background and flattens custom colors. Keep that
+    /// presentation legible by avoiding the full-color reactor, gradients,
+    /// and low-opacity text used by the HUD-style layout.
+    private var simplifiedSmallBody: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("TINYBUDDY")
+                .font(.caption2.weight(.bold).monospaced())
+                .accessibilityHidden(true)
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: presentation.systemImage)
+                    .font(.headline.weight(.semibold))
+                    .accessibilityHidden(true)
+                Text(presentation.statusTitle)
+                    .font(.headline.weight(.heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+
+            if layout.showsMessage {
+                Text(presentation.message)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+            }
+
+            if layout.showsMetrics {
+                HStack(alignment: .top, spacing: 12) {
+                    simplifiedMetric(title: "今日专注", value: focusMetricText)
+                    simplifiedMetric(title: "今日完成", value: presentation.completionCountText)
+                }
+            }
+        }
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(12)
+    }
+
+    private var simplifiedMediumBody: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("TINYBUDDY")
+                    .font(.caption2.weight(.bold).monospaced())
+                    .accessibilityHidden(true)
+
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: presentation.systemImage)
+                        .font(.title3.weight(.semibold))
+                        .accessibilityHidden(true)
+                    Text(presentation.statusTitle)
+                        .font(.title3.weight(.heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+
+                if layout.showsMessage {
+                    Text(presentation.message)
+                        .font(.caption)
+                        .lineLimit(2)
+                }
+
+                if let focusSessionSummary {
+                    Text(focusSessionSummary)
+                        .font(.caption2.weight(.semibold))
+                        .lineLimit(1)
+                }
+
+                if layout.showsProject, let recentProjectName = presentation.recentProjectName {
+                    Text(recentProjectName)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if layout.showsMetrics {
+                VStack(alignment: .leading, spacing: 10) {
+                    simplifiedMetric(title: "今日专注", value: focusMetricText)
+                    simplifiedMetric(title: "今日完成", value: presentation.completionCountText)
+                }
+            }
+        }
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(14)
+    }
+
+    private func simplifiedMetric(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+            Text(value)
+                .font(.title3.weight(.heavy))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
     }
 
     private var widgetAccessibilityLabel: String {
