@@ -64,6 +64,12 @@ default_derived_data_dir() {
   local release_scope_hash
   local scoped_install_dir="${RELEASE_CANONICAL_INSTALL_DIR:-${TINYBUDDY_INSTALL_DIR:-/Applications}}"
 
+  # PlugInKit reports real paths. Canonicalize TMPDIR so registration checks
+  # do not compare /var/folders/... with its /private/var/folders/... alias.
+  if [ -d "${temp_root%/}" ]; then
+    temp_root="$(cd "${temp_root%/}" && pwd -P)" || return $?
+  fi
+
   release_scope_hash="$(
     printf '%s\n%s\n' "$ROOT_DIR" "$scoped_install_dir" \
       | /usr/bin/shasum -a 256 \
@@ -1311,7 +1317,7 @@ verify_provisioned_app_group() {
     return 1
   fi
 
-  profile_app_identifier="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:application-identifier' "$decoded_profile" 2>/dev/null)" || profile_app_identifier=""
+  profile_app_identifier="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:com.apple.application-identifier' "$decoded_profile" 2>/dev/null)" || profile_app_identifier=""
   profile_groups="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:com.apple.security.application-groups' "$decoded_profile" 2>/dev/null)" || profile_groups=""
   /bin/rm -f "$decoded_profile"
 

@@ -152,7 +152,7 @@ verify_provisioned_app_group() {
   [ -f "$profile" ] || fail "缺少 provisioning profile: $(basename "$bundle")"
   "$SECURITY_BIN" cms -D -i "$profile" >"$decoded" \
     || fail "无法解码 provisioning profile: $(basename "$bundle")"
-  app_identifier="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:application-identifier' "$decoded" 2>/dev/null || true)"
+  app_identifier="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:com.apple.application-identifier' "$decoded" 2>/dev/null || true)"
   groups="$("$PLIST_BUDDY_BIN" -c 'Print :Entitlements:com.apple.security.application-groups' "$decoded" 2>/dev/null || true)"
   [ "$app_identifier" = "$DEVELOPMENT_TEAM.$bundle_id" ] \
     || fail "provisioning profile 的应用标识不匹配: $(basename "$bundle")"

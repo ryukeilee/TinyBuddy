@@ -171,6 +171,10 @@ public final class TinyBuddyCombinedSnapshotStore {
     private let writeValue: (Any, String) -> Bool
     private let synchronizeWrites: () -> Bool
     private let readFailureProvider: () -> TinyBuddySharedSnapshotReason?
+    /// The raw App Group preferences plist is a redundant read source. On
+    /// newer macOS releases a Widget extension may be denied direct file
+    /// access while its App Group UserDefaults suite remains readable.
+    private let readFailureIsAdvisory: Bool
 
     // The main app is the only semantic writer, enforced by the cross-process
     // TinyBuddyInstanceCoordinator (flock-based exclusive lock in the App Group
@@ -214,7 +218,8 @@ public final class TinyBuddyCombinedSnapshotStore {
                     && TinyBuddySharedData.isAppGroupDefaultsAvailable()
                     ? nil
                     : .appGroupUnavailable
-            }
+            },
+            readFailureIsAdvisory: true
         )
     }
 
@@ -224,7 +229,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             TinyBuddySharedData.loadAppGroupPreferencesDictionary()
         },
         repairOnLoad: Bool = true,
-        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason? = { nil }
+        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason? = { nil },
+        readFailureIsAdvisory: Bool = false
     ) {
         self.init(
             directPreferencesProvider: {
@@ -240,7 +246,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             synchronizeWrites: {
                 preferencesStore.synchronize()
             },
-            readFailureProvider: readFailureProvider
+            readFailureProvider: readFailureProvider,
+            readFailureIsAdvisory: readFailureIsAdvisory
         )
     }
 
@@ -286,7 +293,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         repairOnLoad: Bool = true,
         writeValue: @escaping (Any, String) -> Bool,
         synchronizeWrites: @escaping () -> Bool,
-        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason? = { nil }
+        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason? = { nil },
+        readFailureIsAdvisory: Bool = false
     ) {
         self.init(
             directPreferencesProvider: {
@@ -300,7 +308,8 @@ public final class TinyBuddyCombinedSnapshotStore {
             repairOnLoad: repairOnLoad,
             writeValue: writeValue,
             synchronizeWrites: synchronizeWrites,
-            readFailureProvider: readFailureProvider
+            readFailureProvider: readFailureProvider,
+            readFailureIsAdvisory: readFailureIsAdvisory
         )
     }
 
@@ -312,7 +321,8 @@ public final class TinyBuddyCombinedSnapshotStore {
         repairOnLoad: Bool,
         writeValue: @escaping (Any, String) -> Bool,
         synchronizeWrites: @escaping () -> Bool,
-        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason?
+        readFailureProvider: @escaping () -> TinyBuddySharedSnapshotReason?,
+        readFailureIsAdvisory: Bool = false
     ) {
         self.directPreferencesProvider = directPreferencesProvider
         self.synchronizeReads = synchronizeReads
@@ -322,6 +332,7 @@ public final class TinyBuddyCombinedSnapshotStore {
         self.writeValue = writeValue
         self.synchronizeWrites = synchronizeWrites
         self.readFailureProvider = readFailureProvider
+        self.readFailureIsAdvisory = readFailureIsAdvisory
     }
 
     private static func combinedPreferenceValues(from defaults: UserDefaults) -> [String: Any] {
@@ -437,7 +448,10 @@ public final class TinyBuddyCombinedSnapshotStore {
             repair: false,
             expectedDayIdentifier: expectedDayIdentifier
         )
-        let firstReason = readFailureProvider() ?? first.diagnosticReason
+        let firstFailure = readFailureProvider()
+        let firstReason = readFailureIsAdvisory && first.snapshot != nil
+            ? first.diagnosticReason
+            : firstFailure ?? first.diagnosticReason
         guard let firstReason else {
             return validatedRead(
                 from: first.snapshot,
@@ -468,7 +482,10 @@ public final class TinyBuddyCombinedSnapshotStore {
             repair: false,
             expectedDayIdentifier: expectedDayIdentifier
         )
-        let secondReason = readFailureProvider() ?? second.diagnosticReason
+        let secondFailure = readFailureProvider()
+        let secondReason = readFailureIsAdvisory && second.snapshot != nil
+            ? second.diagnosticReason
+            : secondFailure ?? second.diagnosticReason
         let secondSnapshot = safeSnapshot(
             second.snapshot,
             expectedDayIdentifier: expectedDayIdentifier

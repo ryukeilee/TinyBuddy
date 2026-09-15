@@ -148,6 +148,31 @@ final class SharedSnapshotObservationTests: XCTestCase {
         }
     }
 
+    func testAdvisorySharedFileReadFailureDoesNotHideValidUserDefaultsSnapshot() {
+        let snapshot = makeSnapshot(dayIdentifier: "2026-07-16")
+        let defaults = UserDefaults(
+            suiteName: "SharedSnapshotObservationTests.\(UUID().uuidString)"
+        )!
+        defaults.set(
+            TinyBuddyCombinedSnapshotStore.encode(snapshot),
+            forKey: TinyBuddyCombinedSnapshotStore.Key.snapshot
+        )
+        let store = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil },
+            repairOnLoad: false,
+            writeValue: { _, _ in true },
+            synchronizeWrites: { true },
+            readFailureProvider: { .sandboxReadDenied },
+            readFailureIsAdvisory: true
+        )
+
+        let result = store.readValidated(expectedDayIdentifier: "2026-07-16")
+
+        XCTAssertEqual(result.snapshot, snapshot)
+        XCTAssertNil(result.observation)
+    }
+
     func testUnknownEnvelopeVersionStopsWithoutOverwritingInput() {
         let unknownEnvelope = "4\t17\tchecksum\tpayloadChecksum\tpayload"
         let values: [String: Any] = [
