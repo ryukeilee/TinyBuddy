@@ -1066,6 +1066,50 @@ registered_widget_paths() {
       '
 }
 
+unregister_release_candidate_widget_registration() {
+  local candidate_appex
+  local registered_paths
+  local deadline
+
+  candidate_appex="$(find_widget_extension "$APP_BUNDLE")" || return $?
+  case "$candidate_appex" in
+    "$INSTALLED_APP/"*)
+      # Never remove the registration of the canonical installed bundle.
+      return 0
+      ;;
+  esac
+
+  registered_paths="$(registered_widget_paths)" || return $?
+  if ! printf '%s\n' "$registered_paths" \
+    | /usr/bin/awk -v expected="$candidate_appex" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }'
+  then
+    return 0
+  fi
+
+  if ! "$PLUGINKIT_BIN" -r "$candidate_appex" >/dev/null 2>&1; then
+    echo "failed to unregister the release candidate Widget registration: $candidate_appex" >&2
+    return 1
+  fi
+
+  deadline=$((SECONDS + WIDGET_RUNTIME_TIMEOUT))
+  while [ "$SECONDS" -le "$deadline" ]; do
+    registered_paths="$(registered_widget_paths)" || return $?
+    if ! printf '%s\n' "$registered_paths" \
+      | /usr/bin/awk -v expected="$candidate_appex" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }'
+    then
+      echo "removed release candidate Widget registration: $candidate_appex"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      break
+    fi
+    sleep 1
+  done
+
+  echo "release candidate Widget registration remained after removal: $candidate_appex" >&2
+  return 1
+}
+
 verify_widget_registration_preflight() {
   local expected_appex="$INSTALLED_APP/Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex"
   local registered_paths
@@ -2741,6 +2785,9 @@ activate_and_verify_release_app() {
 verify_release_app_fresh() {
   verify_release_bundle "$INSTALLED_APP" || return $?
   verify_installed_matches_build || return $?
+  if [ -d "$APP_BUNDLE/Contents/PlugIns" ]; then
+    unregister_release_candidate_widget_registration || return $?
+  fi
   verify_widget_registration_preflight || return $?
   RELEASE_AUTHORIZATION_RECORD_COUNT_BEFORE="$(saved_git_scan_root_record_count)" || return $?
   RELEASE_AUTHORIZATION_RECORD_IDENTITY_BEFORE="$(saved_git_scan_root_record_identity)" || return $?
@@ -2752,6 +2799,9 @@ verify_release_app_fresh() {
 install_release_app() {
   local activation_status
 
+  if [ -d "$APP_BUNDLE/Contents/PlugIns" ]; then
+    unregister_release_candidate_widget_registration || return $?
+  fi
   validate_release_install_paths || return $?
   verify_widget_registration_preflight || return $?
   RELEASE_AUTHORIZATION_RECORD_COUNT_BEFORE="$(saved_git_scan_root_record_count)" || return $?
