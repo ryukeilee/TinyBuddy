@@ -8,44 +8,6 @@
 
 
 
-## Loop 13：2026-08-13：无修改轮次（main 最新提交为纯文档变更，内容与实现一致，未发现新的可验证问题）
-
-**Loop 编号**
-- Loop 13。
-
-**日期**
-- 2026-08-13
-
-**观察结果**
-- 工作区：`git status --short` 无输出、无未跟踪文件；HEAD == origin/main == `2027e5a`，仓库干净。
-- 分支：main 与 origin/main 同步；其余 agent/codex 工作分支（`agent/focus-source-tracking`、`codex/reduce-resident-energy-wakeups` 等）未合并，不属于 main 当前状态，本轮不观察。
-- 最近提交：自 Loop 12（`f6e86b2`）以来唯一新提交是 `2027e5a`（"Document development interruption recovery channel"，仅改 `.agent/memory.md` +1、`AGENTS.md` +8/-3、`CLAUDE.md` +10/-4，共 +12/-7）——纯文档变更，业务代码零变化。
-- `2027e5a` 内容核实：三处文档补充的开发中断恢复通道描述（v1 13 字段制表符格式、7 天过期窗口 + 5 分钟未来容忍、成功刷新才写入、失败/跳过不覆盖、路径无关）与 `aec839c` 实现逐项一致；代码实测：`TinyBuddyResetService.swift:330` 重置时清除 `DevelopmentInterruptionSnapshotStore.Key.snapshot`，`PetViewModel.swift:176/703` 启动与刷新时 `clearIfExpired(at:)`，均与文档声明一致。
-- 静态信号：`rg "TODO|FIXME|HACK|XXX"` 无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）；业务代码自 `aec839c`（Loop 12 已全量验证 1554 测试全绿）以来逐字节未变，无新 try!/fatalError/force-unwrap 候选。
-- 测试基线：`swift test --filter GitCommandExecutorTests`：33 个测试通过（环境健康检查）。
-
-**选择的问题及证据**
-- 无。逐项核对后未发现相对 Loop 12 的新证据，候选淘汰理由：
-  - `2027e5a` 文档提交：内容与 `aec839c` 实现及测试一致（重置清除、过期清理、失败不覆盖、路径无关均已代码核实），无错误或误导声明，不构成修改依据。
-  - 脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`：与 Loop 8/9/12 已评估项同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
-- 完成标准：na（无修改轮次）。
-
-**原因分析**
-- 自 Loop 12 以来唯一提交是纯文档变更，业务代码零变化；文档内容经代码核实与实际实现一致。观察范围（工作区、提交历史、静态信号、窄测基线）内不存在触发新一轮的证据门槛。按 loop.md 契约"无证据即无修改，不为了产生修改而修改"。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条，属契约要求的 Record/Maintain 阶段）。
-
-**验证结果**
-- `swift test --filter GitCommandExecutorTests`：33 个测试通过（基线，环境健康检查）。
-- `git diff --check`：通过（history.md 追加仅新增行）。
-- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件为本轮唯一新增。
-
-**剩余风险**
-- 本轮为无修改轮次，无新增风险。开发中断恢复面板的端到端运行行为（真实安装 + 启动展示）仍需用户授权的本机签名安装另行验证（Loop 12 同述）。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
-
 ## Loop 14：2026-08-13：无修改轮次（未提交的“继续专注”一键恢复功能经独立审查与全量回归验证，未发现新的可验证问题）
 
 **Loop 编号**
@@ -398,3 +360,42 @@
 **剩余风险**
 - 本轮为测试夹具修复，未重复运行完整 `swift test`，也未执行会改变外部状态的 App 安装、发布或替换流程。
 - 生产脚本 `d5485cd` 本身沿用已有发布测试/签名约束覆盖；若后续再新增 shell helper，函数抽取型夹具仍需同步更新依赖集合。
+
+## Loop 23：2026-09-19：修复资源采样探针把 rusage 缓冲写进栈上指针变量导致崩溃与零计数
+
+**Loop 编号**
+- Loop 23。
+
+**日期**
+- 2026-09-19
+
+**观察结果**
+- 起始工作区含 Loop 22 遗留改动（`Tests/TinyBuddyAppTests/ReleaseSigningAndWidgetContractTests.swift`、`.agent/history.md`、未跟踪的 `.agent/archive/history-2026-09-19.md`），本轮未覆盖或回滚；HEAD == origin/main == `d5485cd`，自 Loop 22 以来无新提交。
+- 环境：Swift 6.4 / Xcode 27（arm64），负载均值约 2.3–4.4；`rg "TODO|FIXME|HACK|XXX"` 仅命中 `mktemp` 模板，无真实待办；`git diff --check` 通过。
+- `./script/swiftpm.sh test` 全量（Loop 21/22 均未执行过）首次暴露确定性失败：`TinyBuddyAppTests.ResourceStabilityScriptTests.testProbeProcessReturnsCumulativeDarwinCountersForCurrentProcess`（App 616 个测试中 3 个断言失败，两次全量运行结果一致），报错 `resource probe failed for PID ...: `（探针无输出、非零退出）。
+
+**选择的问题及证据**
+- 选择“资源采样探针 `script/process_resource_probe.swift` 把指针变量地址而非采样缓冲地址交给 `proc_pid_rusage`，导致内核写入栈上（SIGABRT）且只能读到全零计数”这一数据正确性/稳定性问题（Loop 优先级第 3、2 位）。
+- 复现条件（确定性）：`./script/verify_resource_stability.sh --probe-process <pid>` 无输出并 exit 1；裸二进制（`swiftc script/process_resource_probe.swift -o probe && ./probe <pid>`）稳定 `Abort trap: 6`（exit 134，无 stderr）。lldb 显示 SIGABRT 发生在 `proc_pid_rusage` 返回之后（栈金丝雀）；把同一调用改为写入 4096 字节堆缓冲仍然崩溃，排除缓冲过小；对照实验中把 `withMemoryRebound` 传入真实缓冲地址后立即返回真实计数。
+- 影响范围：`script/verify_resource_stability.sh` 的 `probe_process`/`record_sample` 在 `set -e` 下首次采样即失败退出，可选资源稳定性验证器不可用；`script/regression_gate.sh` 用 `|| echo "0,0,0,0"` 吞掉探针失败，即使不崩溃也只能得到全零计数，使 disk-read 与 interrupt/idle wakeup 预算成为空检查（既有测试仅校验 4 个字段可解析为数字，全零可以通过）。
+- 完成标准：探针把 rusage 结果写回自身采样缓冲并返回真实计数；`ResourceStabilityScriptTests` 全绿；测试新增“解析后的 `cpu_time_ns` 必须大于 0”断言，使静默全零无法再通过；全量 `swift test` 0 失败。
+
+**原因分析**
+- libproc 的 `int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer)` 声明为 `void **`，但内核把第三个参数当作出参缓冲地址。原实现先把 `&usage` 转成 `rusage_info_t?` 存进局部变量 `usagePointer`，再把 `&usagePointer`（指针变量自身的地址）交给内核；内核把 296 字节的 `rusage_info_v4` 写进该栈槽位，越过栈金丝雀触发 SIGABRT，而在未触发崩溃的布局下读到的 `usage` 仍是零初始化值，故计数恒为 0。改为直接传入采样缓冲地址后，`ri_user_time`/`ri_system_time` 等字段返回真实值。
+
+**修改内容**
+- `script/process_resource_probe.swift`：删除中间指针变量，改为 `withUnsafeMutablePointer(to: &usage)` + `withMemoryRebound(to: rusage_info_t?.self, capacity: MemoryLayout<rusage_info_v4>.size / MemoryLayout<rusage_info_t?>.size)` 直接传入采样缓冲地址，并加注释说明该 API 的实参语义；错误处理、字段拼接与 CSV 输出不变。
+- `Tests/TinyBuddyAppTests/ResourceStabilityScriptTests.swift`：`testProbeProcessReturnsCumulativeDarwinCountersForCurrentProcess` 在既有断言之外新增解析后的 4 个计数与 `cpu_time_ns > 0` 断言（仅强化，未削弱既有断言）。
+
+**验证结果**
+- 修复前（仅加断言）：`./script/swiftpm.sh test --filter ResourceStabilityScriptTests` 复现 13 个测试 5 个失败，含 `resource probe failed for PID 63061` 与 `XCTAssertGreaterThan failed: ("0") is not greater than ("0")`。
+- 修复后：`./script/swiftpm.sh test --filter ResourceStabilityScriptTests` 13 个测试 0 失败。
+- 真实进程采样：`./script/verify_resource_stability.sh --probe-process <sleep pid>` 输出表头 + `58154,0,0,0`，exit 0（修复前为无输出 + exit 1）。
+- `/bin/bash -n script/verify_resource_stability.sh`、`/bin/bash -n script/regression_gate.sh`：通过。
+- `./script/swiftpm.sh test` 全量：TinyBuddyCoreTests 1009 + TinyBuddyAppTests 616 = 1625 个测试，0 失败（修复前同一命令为 3 个失败）。
+- `git diff --check`：通过；`git status --short` 复查：本轮业务改动仅上述 2 个文件，Loop 22 改动原样保留，无越界修改。
+
+**剩余风险**
+- `script/regression_gate.sh` 仍以 `"$PROBE_BINARY" "$app_pid" 2>/dev/null || echo "0,0,0,0"` 静默吞掉探针失败并回退到全零样本，使资源预算在探针失效时产生空洞通过（本轮已验证的新证据，留待下一轮按单一问题处理）。
+- 本轮未运行 `./script/verify_resource_stability.sh` 完整 600 秒流程与 `./script/regression_gate.sh`（需构建并长时间采样本地 App），故修复只在单测与单次真实进程采样层面验证；采样与预算评估逻辑未改动。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch` 死代码可留作纯清理候选。

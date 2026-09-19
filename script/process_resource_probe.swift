@@ -9,11 +9,16 @@ private struct ProcessResourceSample {
 
     init(pid: pid_t) throws {
         var usage = rusage_info_v4()
-        var usagePointer: rusage_info_t? = withUnsafeMutablePointer(to: &usage) { pointer in
-            UnsafeMutableRawPointer(pointer)
-        }
-        let result = withUnsafeMutablePointer(to: &usagePointer) { pointer in
-            proc_pid_rusage(pid, RUSAGE_INFO_V4, pointer)
+        // libproc declares `rusage_info_t *buffer` but treats the argument as the
+        // address of the sample buffer, so hand it that buffer instead of the
+        // address of a pointer variable.
+        let result = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(
+                to: rusage_info_t?.self,
+                capacity: MemoryLayout<rusage_info_v4>.size / MemoryLayout<rusage_info_t?>.size
+            ) { buffer in
+                proc_pid_rusage(pid, RUSAGE_INFO_V4, buffer)
+            }
         }
         guard result == 0 else {
             throw ProbeError.rusageFailed(pid: pid, code: errno)

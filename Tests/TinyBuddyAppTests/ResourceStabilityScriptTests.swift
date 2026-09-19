@@ -134,6 +134,14 @@ final class ResourceStabilityScriptTests: XCTestCase {
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows.last?.split(separator: ",").count, 4)
         XCTAssertTrue(rows.last?.split(separator: ",").allSatisfy { UInt64($0) != nil } ?? false)
+
+        let counters = (rows.last?.split(separator: ",") ?? []).compactMap { UInt64($0) }
+        XCTAssertEqual(counters.count, 4)
+        XCTAssertGreaterThan(
+            counters.first ?? 0,
+            0,
+            "probe must report the probed process's accumulated CPU time"
+        )
     }
 
     func testCompareSummariesRejectsSamplesWithMissingCounters() throws {
