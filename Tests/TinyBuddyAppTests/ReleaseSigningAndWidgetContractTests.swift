@@ -262,6 +262,8 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
     func testCleanInstallActivationFailureUnregistersCandidateAndRemovesAllTransactionResidue() throws {
         let script = try buildAndRunScript()
         let functions = try [
+            "find_widget_extension",
+            "unregister_release_candidate_widget_registration",
             "unregister_widget_extensions",
             "rollback_release_install",
             "install_release_app"
@@ -293,6 +295,7 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         INSTALL_DIR=\(shellQuote(installDirectory.path))
         INSTALLED_APP=\(shellQuote(installedApp.path))
         INSTALLED_WIDGET=\(shellQuote(installedWidget.path))
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
         WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
         WIDGET_RUNTIME_TIMEOUT=0
         PLUGINKIT_BIN=\(shellQuote(fakePluginKit.path))
@@ -356,6 +359,7 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         let functions = try [
             "verify_widget_registration_preflight",
             "register_widget_extension",
+            "unregister_release_candidate_widget_registration",
             "unregister_widget_extensions",
             "rollback_release_install",
             "install_release_app"

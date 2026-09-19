@@ -8,47 +8,6 @@
 
 
 
-## Loop 12：2026-08-13：无修改轮次（main 最新开发中断恢复改动经全量回归验证通过，未发现新的可验证问题）
-
-**Loop 编号**
-- Loop 12。
-
-**日期**
-- 2026-08-13
-
-**观察结果**
-- 工作区：`git status --short` 无输出、`git diff --check` 通过、无未跟踪文件。
-- 分支：`agent/optimize-agent-validation` 领先 main 仅 1 个提交 `408b238`（"Optimize agent validation strategy"，只改 `AGENTS.md`，+9/-3，已推送 origin）；main 最新提交 `aec839c`（"Add development interruption recovery"，15 文件 +884/-57）已在分支历史中，是本轮观察的主要对象。
-- `aec839c` 静态审查（开发中断恢复功能）：
-  - 跨进程格式契约一致：脚本写入 App Group plist 的 `tinybuddy.developmentInterruption.snapshot.v1`，v1 制表符分隔 13 字段（fingerprint/name/branch base64 + staged/modified/untracked/conflicted + commit hash/subject base64 + commit/activity/captured epoch），App `DevelopmentInterruptionSnapshotStore.decode` 逐字段校验（base64 长度上限、计数 0…1,000,000、epoch 有限性与未来容忍 5 分钟、捕获时间不早于活动时间），与脚本写入逐项对应。
-  - 生命周期：7 天过期窗口 + 主 App 启动 `clearIfExpired`；刷新失败路径不写入（保留旧值），脚本签名不变时保留原 activity epoch（跨午夜不虚构新活动时间），签名变化且同 fingerprint 时以刷新时间为新活动时间，语义自洽。
-  - 测试覆盖：`DevelopmentInterruptionSnapshotTests`（解码/拒绝畸形与未来快照/7 天过期清理）、`GitActivityRealRepositoryFixtureTests.testPublishesDevelopmentInterruptionSceneWithoutRepositoryPath`（真实仓库、无仓库路径泄漏）、`GitActivityRefreshScriptTests.testScriptReusesCachedFingerprintsWithOneBoundedInterruptionRead`（缓存复用 + 有界读取）。
-- 静态信号：`rg "TODO|FIXME|HACK|XXX"` 无真实待办（仅 `mktemp` 模板 `XXXXXX`）；`try!`/`fatalError` 无匹配；force-unwrap 无新候选（Loop 8/9 已复核）。
-- 脚本基线：`/bin/bash -n script/update_git_completion_count.sh` 通过。
-- 测试基线：`swift test` 全量 **1554 个测试、0 失败**（后台运行，约 237s）；这是 `aec839c`（Loop 11 之后、无记录在案验证证据的 884 行跨进程改动）的首次全量回归验证。
-
-**选择的问题及证据**
-- 无。逐项核对后未发现相对 Loop 11 的新证据，候选淘汰理由：
-  - **开发中断恢复（`aec839c`）**：格式契约、边界（base64/计数/epoch/未来容忍）、生命周期（过期/失败路径/跨午夜保留）、隐私（只持久化 fingerprint 与展示名，无仓库路径）交叉审查未发现缺陷；新增专项测试 + 全量 1554 测试全绿，无新失败、新复现、新指标或新用户反馈，不构成修改依据。
-  - 脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`：与 Loop 8/9 已评估项同根因，无新证据，不重复处理。
-- 完成标准：na（无修改轮次）。
-
-**原因分析**
-- 本轮实质价值是首次对 `aec839c` 的 884 行跨进程改动（脚本采集 ↔ App 解码 ↔ HUD 面板 ↔ 重置清理）做全量回归验证：1554 测试全绿、静态审查未发现契约或边界缺陷。按 loop.md 契约"无证据即无修改，不为了产生修改而修改"。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条，属契约要求的 Record/Maintain 阶段）。
-
-**验证结果**
-- `swift test` 全量：1554 个测试，0 失败（基线，后台运行记录）。
-- `/bin/bash -n script/update_git_completion_count.sh`：通过。
-- `git diff --check`：通过（history.md 追加仅新增行）。
-- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件为本轮唯一新增。
-
-**剩余风险**
-- 本轮为无修改轮次，无新增风险。开发中断恢复面板的端到端运行行为（真实安装 + 启动展示）由用户授权的本机签名安装运行另行验证；其展示层已有 `PetViewRenderingTests` 覆盖，脚本/解码契约有真实仓库测试覆盖。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-
 ## Loop 13：2026-08-13：无修改轮次（main 最新提交为纯文档变更，内容与实现一致，未发现新的可验证问题）
 
 **Loop 编号**
@@ -402,3 +361,40 @@
 **剩余风险**
 - 按测试-only 低影响改动采用 Focused 验证级别，未重复运行完整 `swift test`；未覆盖测试类仍可能包含与当前 Swift 6.4 无关的既有失败。
 - 未执行 App 安装、发布或替换已安装产物；本轮未修改生产代码、签名配置或安装状态。
+
+## Loop 22：2026-09-19：修复 Widget 注册回滚测试夹具缺少新函数依赖
+
+**Loop 编号**
+- Loop 22。
+
+**日期**
+- 2026-09-19。
+
+**观察结果**
+- 起始工作区干净，`HEAD == origin/main == d5485cd`；最近提交 `d5485cd`（`Clean release candidate Widget registration`）新增了 `unregister_release_candidate_widget_registration` 并在 `install_release_app` / `verify_release_app_fresh` 前置调用，提交未同步更新 `ReleaseSigningAndWidgetContractTests` 的函数抽取夹具。
+- `rg "TODO|FIXME|HACK|XXX"` 仅命中 `mktemp` 的 `XXXXXX` 模板，无真实待办；`/bin/bash -n script/build_and_run.sh` 与初始 `git diff --check` 通过。
+- 首次运行 `swift test --filter 'BuildAndRunScriptTests|ReleaseSigningAndWidgetContractTests|WidgetConfigConsistencyTests'`：79 个测试中 4 个失败；两个 clean-install 回滚/注册失败测试均出现 `/bin/bash: ... unregister_release_candidate_widget_registration: command not found`，证明失败来自测试夹具未提供新 helper，而非产品断言。
+
+**选择的问题及证据**
+- 选择“Widget 注册回滚测试夹具未跟随生产脚本新增函数依赖更新”这一测试稳定性问题。
+- 复现条件：运行上述 79 个受影响测试；`install_release_app` 已调用新 helper，但两个测试只抽取旧函数集合，`set -euo pipefail` 下直接以命令不存在退出，掩盖了实际回滚行为。
+- 影响范围：Widget/Release 注册回滚测试门禁不可用；完成标准是两个夹具抽取新 helper 及其必需的 `find_widget_extension`/`WIDGET_EXTENSION_NAME` 输入后，相关测试恢复通过且生产代码不变。
+
+**原因分析**
+- `d5485cd` 的脚本依赖图新增了 helper，但测试通过 `shellFunction(named:)` 手工抽取函数，未同步新增依赖；首个夹具在补 helper 后还暴露了 `find_widget_extension` 依赖所需的 `WIDGET_EXTENSION_NAME` 未初始化。
+
+**修改内容**
+- `Tests/TinyBuddyAppTests/ReleaseSigningAndWidgetContractTests.swift`：
+  - clean-install activation failure 夹具抽取 `find_widget_extension` 与 `unregister_release_candidate_widget_registration`，并设置 `WIDGET_EXTENSION_NAME`；保留其 `registered_widget_paths` fake 实现。
+  - stale-registration failure 夹具抽取 `unregister_release_candidate_widget_registration`，使现有的 fake `find_widget_extension` 继续生效。
+
+**验证结果**
+- 修复前：`swift test --filter 'BuildAndRunScriptTests|ReleaseSigningAndWidgetContractTests|WidgetConfigConsistencyTests'` 复现 79 个测试中 4 个失败。
+- 修复后：两个针对性 `ReleaseSigningAndWidgetContractTests` 通过（2 个，0 失败）。
+- 修复后完整受影响筛选：`swift test --filter 'BuildAndRunScriptTests|ReleaseSigningAndWidgetContractTests|WidgetConfigConsistencyTests'` 79 个测试通过，0 失败。
+- `/bin/bash -n script/build_and_run.sh`：通过；`git diff --check`：通过。
+- 最终工作区检查确认仅测试文件与本轮 `.agent/` 记录/归档发生改动。
+
+**剩余风险**
+- 本轮为测试夹具修复，未重复运行完整 `swift test`，也未执行会改变外部状态的 App 安装、发布或替换流程。
+- 生产脚本 `d5485cd` 本身沿用已有发布测试/签名约束覆盖；若后续再新增 shell helper，函数抽取型夹具仍需同步更新依赖集合。
