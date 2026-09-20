@@ -142,6 +142,10 @@ fingerprint_cache_hit_count=0
 reflog_unchanged_skip_count=0
 recomputed_repository_count=0
 retained_repository_count=0
+# Discovery-scope counters are filled by refresh_invalidated_repository_roots
+# before reset_activity_snapshot runs, so they live outside that reset.
+evicted_repository_count=0
+retained_cached_repository_count=0
 repository_scan_failed=0
 repository_scan_failure_count=0
 invalid_repository_count=0
@@ -325,14 +329,50 @@ path_is_within_authorized_roots() {
   return 1
 }
 
-path_is_authorized_root() {
-  local candidate_path
+# Resolves how a repository discovery scan rooted at the given path must
+# traverse: `discovery_scan_exclusion_base` anchors relative exclusion rules and
+# `discovery_scan_max_depth` is the find depth budget. Both reproduce the
+# authorized-scan-root semantics for a rescan that starts inside a root.
+resolve_discovery_scan_scope() {
   local authorized_root
-  candidate_path="$(normalized_scan_root_path "$1")"
+  local best_root=""
+  local depth_distance=0
+  local relative_path
+  local remainder
+  local scan_path
+
+  scan_path="$(normalized_scan_root_path "$1")"
+  discovery_scan_exclusion_base="$scan_path"
+  discovery_scan_max_depth=$((REPOSITORY_SCAN_MAX_DEPTH + 1))
+
+  # The longest authorized root that contains the scan path is the reference a
+  # full scan of that root would use; the path itself when it is a root.
   while IFS= read -r authorized_root; do
-    [ "$candidate_path" = "$authorized_root" ] && return 0
+    if ! path_is_within_root "$scan_path" "$authorized_root"; then
+      continue
+    fi
+    if [ -z "$best_root" ] || [ "${#authorized_root}" -gt "${#best_root}" ]; then
+      best_root="$authorized_root"
+    fi
   done < "$scan_roots_file"
-  return 1
+
+  [ -n "$best_root" ] || return 0
+
+  relative_path="${scan_path#"$best_root"}"
+  relative_path="${relative_path#/}"
+  remainder="$relative_path"
+  while [ -n "$remainder" ]; do
+    depth_distance=$((depth_distance + 1))
+    case "$remainder" in
+      */*) remainder="${remainder#*/}" ;;
+      *) break ;;
+    esac
+  done
+
+  discovery_scan_exclusion_base="$best_root"
+  discovery_scan_max_depth=$((REPOSITORY_SCAN_MAX_DEPTH + 1 - depth_distance))
+  [ "$discovery_scan_max_depth" -ge 1 ] || discovery_scan_max_depth=1
+  return 0
 }
 
 path_is_explicitly_excluded() {
@@ -1055,14 +1095,16 @@ reset_activity_snapshot() {
 
 emit_refresh_metrics() {
   local authorized_root_count
+  local invalidated_path_count
   authorized_root_count="$(awk 'END { print NR + 0 }' "$scan_roots_file")"
+  invalidated_path_count="$(awk 'END { print NR + 0 }' "$invalidated_roots_file")"
 
   local refresh_outcome="${refresh_outcome_override:-success}"
   if [ -z "$refresh_outcome_override" ] && [ "$invalid_repository_count" -gt 0 ]; then
     refresh_outcome="partial"
   fi
 
-  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\tfingerprint_cache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tretained_repository_count=%s\tshared_data_written=%s\n' \
+  printf 'TINYBUDDY_REFRESH_METRICS\tauthorized_root_count=%s\trepository_count=%s\tinvalid_repository_count=%s\trefresh_outcome=%s\tcache_hit_count=%s\tfingerprint_cache_hit_count=%s\treflog_unchanged_skip_count=%s\trecomputed_repository_count=%s\tretained_repository_count=%s\tshared_data_written=%s\tinvalidated_path_count=%s\tevicted_repository_count=%s\tretained_cached_repository_count=%s\n' \
     "$authorized_root_count" \
     "$repository_count" \
     "$invalid_repository_count" \
@@ -1072,7 +1114,10 @@ emit_refresh_metrics() {
     "$reflog_unchanged_skip_count" \
     "$recomputed_repository_count" \
     "$retained_repository_count" \
-    "$shared_data_rewritten"
+    "$shared_data_rewritten" \
+    "$invalidated_path_count" \
+    "$evicted_repository_count" \
+    "$retained_cached_repository_count"
 }
 
 build_scan_root_signature() {
@@ -1110,9 +1155,10 @@ build_scan_root_signature() {
 
 refresh_repository_list_from_scan() {
   local bare_root
+  local discovery_scan_exclusion_base
+  local discovery_scan_max_depth
   local exclusion
   local find_exit_code=0
-  local find_max_depth=$((REPOSITORY_SCAN_MAX_DEPTH + 1))
   local scan_root
   local roots_to_scan_file="${1:-$scan_roots_file}"
   local resolve_symlink_exit_code
@@ -1130,6 +1176,14 @@ refresh_repository_list_from_scan() {
       continue
     fi
 
+    # A discovery rescan is rooted either at an authorized scan root or at one
+    # repository path inside it. The second form must see exactly the entries a
+    # full scan of the enclosing authorized root would see, so the find depth
+    # budget shrinks by the distance to that root and relative exclusion rules
+    # stay anchored to it. Otherwise a narrower rescan could discover a
+    # repository nested below the configured scan depth, or bypass an exclusion.
+    resolve_discovery_scan_scope "$scan_root"
+
     prune_expression=( \( \
         -path "$USER_HOME/Library" -o \
         -path "$USER_HOME/.Trash" -o \
@@ -1142,7 +1196,7 @@ refresh_repository_list_from_scan() {
         -path '*/DerivedData' )
     while IFS= read -r exclusion; do
       if [[ "$exclusion" == */* ]]; then
-        prune_expression+=( -o -path "$scan_root/$exclusion" )
+        prune_expression+=( -o -path "$discovery_scan_exclusion_base/$exclusion" )
       else
         prune_expression+=( -o -type d -name "$exclusion" )
       fi
@@ -1150,7 +1204,7 @@ refresh_repository_list_from_scan() {
     prune_expression+=( \) -prune -o )
 
     run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" "$FIND_BIN" "$scan_root" \
-      -mindepth 1 -maxdepth "$find_max_depth" \
+      -mindepth 1 -maxdepth "$discovery_scan_max_depth" \
       "${prune_expression[@]}" \
       -type d -name .git -print0 -prune -o \
       -type f -name .git -print0 -o \
@@ -1317,6 +1371,11 @@ refresh_invalidated_repository_roots() {
     done < "$invalidated_roots_file"
     if [ "$should_retain" -eq 1 ]; then
       printf '%s\n' "$cached_repo" >> "$retained_repositories_file"
+      # A retained entry keeps its cached discovery row: it is neither
+      # re-discovered by a scan nor dropped from the repository list cache.
+      retained_cached_repository_count=$((retained_cached_repository_count + 1))
+    else
+      evicted_repository_count=$((evicted_repository_count + 1))
     fi
   done < "$CACHE_REPO_LIST_FILE"
 
@@ -2603,7 +2662,7 @@ printf '%s' "$INVALIDATED_ROOTS" | while IFS= read -r invalidated_root || [ -n "
 done
 while IFS= read -r invalidated_root; do
   normalized_invalidated_root="$(normalized_scan_root_path "$invalidated_root")"
-  if ! path_is_authorized_root "$normalized_invalidated_root"; then
+  if ! path_is_within_authorized_roots "$normalized_invalidated_root"; then
     log_error "repository discovery invalidation escaped authorized roots; preserving previous shared data"
     refresh_outcome_override="failed"
     emit_refresh_metrics

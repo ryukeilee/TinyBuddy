@@ -367,7 +367,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
         activeRefreshExecution != nil
     }
     private var repositoryDiscoveryRescanPending = false
-    private var repositoryDiscoveryInvalidatedRootPaths = Set<String>()
+    private var repositoryDiscoveryInvalidatedPaths = Set<String>()
     private var isPeriodicRefreshSuspended = false
     private var scheduledRefreshInterval: TimeInterval?
     private var unchangedRefreshStreak = 0
@@ -722,7 +722,7 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
 
         if let impact, impact.requiresRepositoryDiscoveryRescan {
             repositoryDiscoveryRescanPending = true
-            repositoryDiscoveryInvalidatedRootPaths.formUnion(impact.affectedRootPaths)
+            repositoryDiscoveryInvalidatedPaths.formUnion(impact.affectedRepositoryPaths)
         }
         unchangedRefreshStreak = 0
         repositoryChangeDebounceTimer?.invalidate()
@@ -1240,12 +1240,12 @@ final class GitActivityRefreshCoordinator: @unchecked Sendable {
             return false
         }
 
-        let invalidatedRootPaths = repositoryDiscoveryInvalidatedRootPaths.sorted()
+        let invalidatedRootPaths = repositoryDiscoveryInvalidatedPaths.sorted()
         if repositoryDiscoveryRescanPending && invalidatedRootPaths.isEmpty {
             repositoryDiscoveryCacheInvalidator()
         }
         repositoryDiscoveryRescanPending = false
-        repositoryDiscoveryInvalidatedRootPaths.removeAll()
+        repositoryDiscoveryInvalidatedPaths.removeAll()
 
         isPeriodicRefreshSuspended = false
         let refreshExecution = beginRefreshExecution()

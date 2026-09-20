@@ -83,7 +83,7 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
 
         XCTAssertEqual(state.changeCount, 1)
         XCTAssertTrue(state.lastChangeRequiredDiscoveryRescan)
-        XCTAssertEqual(state.lastAffectedRootPaths, ["/Authorized/Project"])
+        XCTAssertEqual(state.lastAffectedRepositoryPaths, ["/Authorized/Project"])
 
         stream.emit([
             "/Authorized/Project/Sources/App.swift",
@@ -217,18 +217,180 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
             path: "/Authorized/Project/.gitmodules"
         ))
         XCTAssertTrue(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Project/.git"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Project/Sub/.gitmodules"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Archives/Project.git/config"
+        ))
+        XCTAssertTrue(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
             path: "/Authorized/Project/.git/config"
         ))
         XCTAssertFalse(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
             path: "/Authorized/Project/.git/logs/HEAD"
         ))
+        XCTAssertFalse(GitRepositoryChangeMonitor.requiresRepositoryDiscoveryRescan(
+            path: "/Authorized/Project/.git/refs/heads/main"
+        ))
+    }
+
+    func testAffectedRepositoryPathsResolveRepositoryRootsInsteadOfScanRoots() {
+        let watchedRoots = ["/Authorized/Workspace"]
+        let alwaysExists: (String) -> Bool = { _ in true }
+
         XCTAssertEqual(
-            GitRepositoryChangeMonitor.affectedRootPaths(
-                for: ["/Authorized/Project/Nested/.git"],
-                watchedRoots: ["/Authorized", "/Authorized/Project"]
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Alpha/.git/config"],
+                watchedRoots: watchedRoots,
+                directoryExists: alwaysExists
             ),
-            ["/Authorized/Project"]
+            ["/Authorized/Workspace/Alpha"]
         )
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Beta/.git"],
+                watchedRoots: watchedRoots,
+                directoryExists: alwaysExists
+            ),
+            ["/Authorized/Workspace/Beta"]
+        )
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Gamma/.gitmodules"],
+                watchedRoots: watchedRoots,
+                directoryExists: alwaysExists
+            ),
+            ["/Authorized/Workspace/Gamma"]
+        )
+        // A path inside `.git` still belongs to the repository that owns it, and
+        // a nested repository keeps its own directory instead of its parent.
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: [
+                    "/Authorized/Workspace/Delta/.git/modules/sub/logs/HEAD",
+                    "/Authorized/Workspace/Delta/Nested/.git/config"
+                ],
+                watchedRoots: watchedRoots,
+                directoryExists: alwaysExists
+            ),
+            ["/Authorized/Workspace/Delta", "/Authorized/Workspace/Delta/Nested"]
+        )
+        // A `<name>.git` component may be a bare repository itself or a separate
+        // Git directory for a work tree elsewhere, so the parent directory is the
+        // narrowest unambiguous scope.
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Archives/Project.git/refs/heads/main"],
+                watchedRoots: watchedRoots,
+                directoryExists: alwaysExists
+            ),
+            ["/Authorized/Workspace/Archives"]
+        )
+        // An event on the scan root's own `.git` entry cannot narrow further.
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/.git/config"],
+                watchedRoots: watchedRoots,
+                directoryExists: alwaysExists
+            ),
+            ["/Authorized/Workspace"]
+        )
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Alpha/.git/config"],
+                watchedRoots: ["/Authorized/Workspace", "/Authorized/Workspace/Alpha"],
+                directoryExists: alwaysExists
+            ),
+            ["/Authorized/Workspace/Alpha"]
+        )
+    }
+
+    func testAffectedRepositoryPathsFallBackToWatchedRootWhenRepositoryIsUnresolvable() {
+        let watchedRoots = ["/Authorized/Workspace"]
+        let missingRepository: (String) -> Bool = { $0 != "/Authorized/Workspace/Alpha" }
+
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Alpha/.git/config"],
+                watchedRoots: watchedRoots,
+                directoryExists: missingRepository
+            ),
+            ["/Authorized/Workspace"]
+        )
+        // Events outside every watched root cannot be attributed at all; the
+        // coordinator falls back to its global discovery cache invalidation.
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Elsewhere/Project/.git/config"],
+                watchedRoots: watchedRoots,
+                directoryExists: { _ in true }
+            ),
+            []
+        )
+        // A repository directory that cannot be confirmed falls back to its
+        // watched root even for a `.gitmodules` change.
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: ["/Authorized/Workspace/Alpha/.gitmodules"],
+                watchedRoots: watchedRoots,
+                directoryExists: { _ in false }
+            ),
+            ["/Authorized/Workspace"]
+        )
+    }
+
+    func testAffectedRepositoryPathsUseRealDirectoryEvidence() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("TinyBuddyChangeImpact-\(UUID().uuidString)", isDirectory: true)
+        let repositoryURL = rootURL.appendingPathComponent("Repository", isDirectory: true)
+        let removedRepositoryURL = rootURL.appendingPathComponent("Removed", isDirectory: true)
+        try fileManager.createDirectory(
+            at: repositoryURL.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: [repositoryURL.appendingPathComponent(".git/config").path],
+                watchedRoots: [rootURL.path]
+            ),
+            [repositoryURL.standardizedFileURL.path]
+        )
+        XCTAssertEqual(
+            GitRepositoryChangeMonitor.affectedRepositoryPaths(
+                for: [removedRepositoryURL.appendingPathComponent(".git/config").path],
+                watchedRoots: [rootURL.path]
+            ),
+            [rootURL.standardizedFileURL.path]
+        )
+    }
+
+    func testDiscoveryEventEmitsNarrowedRepositoryPathToChangeHandler() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("TinyBuddyChangeMonitor-\(UUID().uuidString)", isDirectory: true)
+        let repositoryURL = rootURL.appendingPathComponent("Alpha", isDirectory: true)
+        try fileManager.createDirectory(
+            at: repositoryURL.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let state = State(rootPaths: [rootURL.path])
+        let stream = FakeEventStream()
+        let monitor = makeMonitor(state: state, stream: stream)
+        XCTAssertTrue(monitor.start())
+
+        stream.emit([repositoryURL.appendingPathComponent(".git/config").path])
+
+        XCTAssertEqual(state.changeCount, 1)
+        XCTAssertTrue(state.lastChangeRequiredDiscoveryRescan)
+        XCTAssertEqual(state.lastAffectedRepositoryPaths, [repositoryURL.standardizedFileURL.path])
+        monitor.stop()
     }
 
     private func makeMonitor(
@@ -240,7 +402,7 @@ final class GitRepositoryChangeMonitorTests: XCTestCase {
             changeHandler: { impact in
                 state.changeCount += 1
                 state.lastChangeRequiredDiscoveryRescan = impact.requiresRepositoryDiscoveryRescan
-                state.lastAffectedRootPaths = impact.affectedRootPaths
+                state.lastAffectedRepositoryPaths = impact.affectedRepositoryPaths
             },
             eventStreamFactory: { _, handler in
                 stream.eventHandler = handler
@@ -285,16 +447,21 @@ private final class State {
     var rootStopCount = 0
     var changeCount = 0
     var lastChangeRequiredDiscoveryRescan = false
-    var lastAffectedRootPaths: [String] = []
+    var lastAffectedRepositoryPaths: [String] = []
+    let rootPaths: [String]
+
+    init(rootPaths: [String] = ["/Authorized/Project"]) {
+        self.rootPaths = rootPaths
+    }
 
     func makeAccessResult() -> GitScanRootAccessResult {
         rootAccessCount += 1
         return GitScanRootAccessResult(
-            roots: [
-                ScopedGitScanRoot(url: URL(fileURLWithPath: "/Authorized/Project")) { [weak self] in
+            roots: rootPaths.map { path in
+                ScopedGitScanRoot(url: URL(fileURLWithPath: path)) { [weak self] in
                     self?.rootStopCount += 1
                 }
-            ],
+            },
             issue: nil
         )
     }

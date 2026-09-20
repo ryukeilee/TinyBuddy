@@ -18,7 +18,11 @@ protocol GitRepositoryChangeEventStream: AnyObject {
 
 struct GitRepositoryChangeImpact: Equatable, Sendable {
     let requiresRepositoryDiscoveryRescan: Bool
-    let affectedRootPaths: [String]
+    /// Repository paths whose cached discovery entry must be recomputed. Each
+    /// entry is either the repository that owns a changed `.git` entry or, when
+    /// that repository cannot be resolved precisely, the watched scan root that
+    /// contains the event, so a discovery rescan never silently skips a change.
+    let affectedRepositoryPaths: [String]
 }
 
 final class GitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
@@ -183,27 +187,84 @@ final class GitRepositoryChangeMonitor: GitRepositoryChangeMonitoring {
         stateLock.lock()
         watchedRoots = activeResources?.roots.map { $0.url.standardizedFileURL.path } ?? []
         stateLock.unlock()
-        let affectedRoots = requiresDiscoveryRescan
-            ? Self.affectedRootPaths(for: relevantPaths, watchedRoots: watchedRoots)
+        let affectedRepositories = requiresDiscoveryRescan
+            ? Self.affectedRepositoryPaths(for: relevantPaths, watchedRoots: watchedRoots)
             : []
         changeHandler(GitRepositoryChangeImpact(
             requiresRepositoryDiscoveryRescan: requiresDiscoveryRescan,
-            affectedRootPaths: affectedRoots
+            affectedRepositoryPaths: affectedRepositories
         ))
     }
 
-    static func affectedRootPaths(for eventPaths: [String], watchedRoots: [String]) -> [String] {
+    /// Narrows a batch of Git metadata event paths to the repositories it can
+    /// actually affect.
+    ///
+    /// The narrowest safe invalidation scope is the directory that contains the
+    /// changed `.git` entry, because `.git` always belongs to the repository it
+    /// sits in. A `<name>.git` directory is only the parent scope (it can be a
+    /// bare repository or a separate Git directory for a work tree elsewhere),
+    /// and a `.gitmodules` file marks its own directory. Anything that cannot be
+    /// resolved to an existing repository directory falls back to the watched
+    /// scan root that contains the event, which keeps repository discovery
+    /// correct for a removed repository while still never narrowing further
+    /// than today's scan-root scope.
+    static func affectedRepositoryPaths(
+        for eventPaths: [String],
+        watchedRoots: [String],
+        directoryExists: (String) -> Bool = isExistingDirectory(path:)
+    ) -> [String] {
+        let normalizedRoots = watchedRoots.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         var affected = Set<String>()
         for eventPath in eventPaths {
             let normalizedEventPath = URL(fileURLWithPath: eventPath).standardizedFileURL.path
-            if let root = watchedRoots
-                .map({ URL(fileURLWithPath: $0).standardizedFileURL.path })
+            guard let watchedRoot = normalizedRoots
                 .filter({ normalizedEventPath == $0 || normalizedEventPath.hasPrefix($0 + "/") })
-                .max(by: { $0.count < $1.count }) {
-                affected.insert(root)
+                .max(by: { $0.count < $1.count }) else {
+                continue
             }
+            guard let repositoryPath = repositoryRootPath(
+                for: normalizedEventPath,
+                within: watchedRoot
+            ), directoryExists(repositoryPath) else {
+                affected.insert(watchedRoot)
+                continue
+            }
+            affected.insert(repositoryPath)
         }
         return affected.sorted()
+    }
+
+    static func isExistingDirectory(path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return false
+        }
+        return isDirectory.boolValue
+    }
+
+    private static func repositoryRootPath(for normalizedEventPath: String, within watchedRoot: String) -> String? {
+        let components = URL(fileURLWithPath: normalizedEventPath).pathComponents
+        let repositoryComponents: ArraySlice<String>
+        if components.last == ".gitmodules" {
+            repositoryComponents = components.dropLast()
+        } else if let gitComponentIndex = components.firstIndex(where: {
+            $0 == ".git" || ($0.hasSuffix(".git") && $0.count > ".git".count)
+        }) {
+            // Use the outermost `.git` component: a path below it belongs to
+            // that repository's metadata, which a repository scan prunes.
+            repositoryComponents = components[..<gitComponentIndex]
+        } else {
+            return nil
+        }
+
+        let repositoryPath = NSString.path(withComponents: Array(repositoryComponents))
+        guard !repositoryPath.isEmpty,
+              repositoryPath != "/",
+              repositoryPath != watchedRoot,
+              repositoryPath.hasPrefix(watchedRoot + "/") else {
+            return nil
+        }
+        return repositoryPath
     }
 
     private static func stopAccessing(_ roots: [ScopedGitScanRoot]) {

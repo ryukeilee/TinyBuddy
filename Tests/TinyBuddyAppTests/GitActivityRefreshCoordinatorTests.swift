@@ -2380,7 +2380,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(harness.statusHistory.count, 2)
     }
 
-    func testDiscoveryChangePassesAffectedRootWithoutGlobalCacheInvalidation() {
+    func testDiscoveryChangePassesAffectedRepositoryWithoutGlobalCacheInvalidation() {
         let harness = makeHarness()
         harness.performAndWaitForStatusCount(1) {
             harness.coordinator.start()
@@ -2393,27 +2393,50 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.waitForNoRefresh()
 
         XCTAssertEqual(harness.scriptRunCount, 2)
-        XCTAssertEqual(harness.capturedInvalidatedRootPaths, ["/Authorized/TinyBuddyProject"])
+        XCTAssertEqual(harness.capturedInvalidatedRootPaths, ["/Authorized/TinyBuddyProject/Sources"])
+        XCTAssertEqual(harness.capturedRootPaths, ["/Authorized/TinyBuddyProject"])
         XCTAssertEqual(harness.repositoryDiscoveryCacheInvalidationCount, 0)
     }
 
-    func testDiscoveryChangesCoalesceAffectedRootsBeforeOneRefresh() {
-        let roots = ["/Authorized/A", "/Authorized/B"]
-        let harness = makeHarness(authorizedRoots: roots.map(URL.init(fileURLWithPath:)))
+    func testDiscoveryChangesCoalesceAffectedRepositoriesBeforeOneRefresh() {
+        let repositories = [
+            "/Authorized/A/Alpha",
+            "/Authorized/A/Beta",
+            "/Authorized/B/Gamma"
+        ]
+        let harness = makeHarness(authorizedRoots: ["/Authorized/A", "/Authorized/B"].map(URL.init(fileURLWithPath:)))
         harness.performAndWaitForStatusCount(1) { harness.coordinator.start() }
         harness.advanceCurrentDate(by: 61)
 
         harness.performAndWaitForStatusCount(2) {
-            for root in roots {
+            for repository in repositories {
                 harness.coordinator.handleRepositoryContentsChanged(impact: GitRepositoryChangeImpact(
                     requiresRepositoryDiscoveryRescan: true,
-                    affectedRootPaths: [root]
+                    affectedRepositoryPaths: [repository]
                 ))
             }
         }
 
         XCTAssertEqual(harness.scriptRunCount, 2)
-        XCTAssertEqual(harness.capturedInvalidatedRootPaths, roots)
+        XCTAssertEqual(harness.capturedInvalidatedRootPaths, repositories)
+        XCTAssertEqual(harness.repositoryDiscoveryCacheInvalidationCount, 0)
+    }
+
+    func testRepositoryContentChangeWithoutDiscoveryRescanInvalidatesNothing() {
+        let harness = makeHarness()
+        harness.performAndWaitForStatusCount(1) { harness.coordinator.start() }
+        harness.advanceCurrentDate(by: 61)
+
+        harness.performAndWaitForStatusCount(2) {
+            harness.coordinator.handleRepositoryContentsChanged(impact: GitRepositoryChangeImpact(
+                requiresRepositoryDiscoveryRescan: false,
+                affectedRepositoryPaths: []
+            ))
+        }
+        harness.waitForNoRefresh()
+
+        XCTAssertEqual(harness.scriptRunCount, 2)
+        XCTAssertEqual(harness.capturedInvalidatedRootPaths, [])
         XCTAssertEqual(harness.repositoryDiscoveryCacheInvalidationCount, 0)
     }
 
@@ -2425,7 +2448,7 @@ final class GitActivityRefreshCoordinatorTests: XCTestCase {
         harness.performAndWaitForStatusCount(2) {
             harness.coordinator.handleRepositoryContentsChanged(impact: GitRepositoryChangeImpact(
                 requiresRepositoryDiscoveryRescan: true,
-                affectedRootPaths: []
+                affectedRepositoryPaths: []
             ))
         }
 
@@ -3445,7 +3468,9 @@ private final class TestGitRepositoryChangeMonitor: GitRepositoryChangeMonitorin
         }
         changeHandler(GitRepositoryChangeImpact(
             requiresRepositoryDiscoveryRescan: requiresRepositoryDiscoveryRescan,
-            affectedRootPaths: requiresRepositoryDiscoveryRescan ? ["/Authorized/TinyBuddyProject"] : []
+            affectedRepositoryPaths: requiresRepositoryDiscoveryRescan
+                ? ["/Authorized/TinyBuddyProject/Sources"]
+                : []
         ))
     }
 }
