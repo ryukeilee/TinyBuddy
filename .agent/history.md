@@ -8,44 +8,6 @@
 
 
 
-## Loop 15：2026-08-13：修复 idleDetected 长缺席结束路径残留陈旧 pendingSwitch（切换边界误用）
-
-**Loop 编号**
-- Loop 15。
-
-**日期**
-- 2026-08-13
-
-**观察结果**
-- 工作区：`git status --short` 显示 17 个已修改文件 + 2 个未跟踪新文件——即自动专注确认门功能（`FocusSessionConfirmationGate` 及其测试，前一轮未提交改动），本轮未覆盖或回滚；`.agent/` 无在途修改（Loop 14 记录已随 `2772659` 提交）。最近提交：`2772659`（Loop 14 记录）、`c8c92f9`（继续专注一键恢复）、`2027e5a`（文档）。
-- `rg "TODO|FIXME|HACK|XXX"`：无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）。
-- 在途确认门改动逐点复核中，对照引擎全部 `pendingSwitch` 清理点（12 处）发现唯一不一致：`idleDetected` 长缺席结束路径（`FocusSessionEngine.swift`）结束时**未清空 `pendingSwitch`**，其余所有会话结束路径（`endPausedSessionAfterLongAbsence`、锁屏、解锁、日切、手动接管、`finalizeOpen`、`edit` 等）均清空。
-
-**选择的问题及证据**
-- 选择"idleDetected 长缺席结束路径残留陈旧 pendingSwitch"这一数据正确性问题（Loop 优先级第 3 位）。
-- 复现条件（确定性）：会话 A 打开 → 前台切到 B（A 暂停、pendingSwitch=(A, away, B)）→ 已暂停状态下 `idleDetected` 且暂停时长 ≥ `longAbsenceThreshold`（A 结束，pendingSwitch 残留）→ 新活动打开 B 会话 → 单次活动切到 C：确认门配置为 `confirmationMinimumActiveDuration ≤ 0`（即时确认）时，确认路径消费陈旧边界：`transitionTime` 把 B 钳制到**自身起点**结束（时长清零），C 从陈旧边界开始，B 的专注时长被错误归属到 C。
-- 修复前运行新测试 `test_idle_long_absence_end_clears_stale_pending_switch` 按预期失败（调试输出实证：B endedAt=自身起点、activeDuration=0；C startedAt=陈旧边界而非活动时刻）。
-- 完成标准：`idleDetected` 结束路径与其他结束路径一致清空 `pendingSwitch`；新测试全绿；焦点类与全量回归无失败。
-
-**原因分析**
-- `idleDetected` 的已暂停分支只处理"暂停超时结束"，遗漏了与 `endPausedSessionAfterLongAbsence` 相同的清理职责（后者清空 `pendingSwitch`）。生产默认阈值（确认门 120s）下陈旧边界总会在被消费前被未确认的首事件替换，实际影响限于即时确认配置（`≤ 0`，恰为全部测试 harness 与"legacy 即时开始"配置所用）；属引擎内既有的潜在数据归属缺陷，此前从未记录或覆盖。
-
-**修改内容**
-- `Sources/TinyBuddyCore/FocusSessionEngine.swift`：`idleDetected` 长缺席结束分支在 `endSession` 后补 `pendingSwitch = nil`（一行，与 `endPausedSessionAfterLongAbsence` 一致）。
-- `Tests/TinyBuddyCoreTests/FocusSessionEngineTests.swift`：新增 `test_idle_long_absence_end_clears_stale_pending_switch`（确定性时钟驱动真实引擎：A→pending B→idle 结束→B 新会话→C 切换，断言 B 时长 30s 保留、C 从真实活动时刻开始）。
-
-**验证结果**
-- 修复前新测试失败（`c.startedAt`=陈旧边界、`b.endedAt`=B 起点、`b.activeDuration`=0）：缺陷真实存在。
-- 修复后新测试通过；焦点类 8 个相关测试类 225 个测试 0 失败。
-- `swift test` 全量：1595 个测试（+1），0 失败。
-- `git diff --check`：通过。
-- `git status --short` 复查：本轮改动仅 `FocusSessionEngine.swift` 与 `FocusSessionEngineTests.swift` 各一处；在途确认门改动原样保留，无越界修改。
-
-**剩余风险**
-- 生产默认阈值下该路径需"即时确认配置 + 精确时序"才可达，属防御性修复；本次以测试固定行为，无新增风险。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
-
 ## Loop 16：2026-08-14：修复确认门在生产事件流下永远无法确认持续输入（周期性活动心跳）
 
 **Loop 编号**
@@ -406,3 +368,49 @@
 - 同一函数内的第二个空洞通过点（本轮不作为单一问题）：`evaluate_resource_budgets` 接收 `-v cpuCap`/`-v cpuSamples`，但其 AWK 从不使用这两个变量，`TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT`（默认 15）实际上从未参与判定（证据：`grep -n "cpuCap\|cpuSamples" script/regression_gate.sh` 仅命中定义与 `-v` 传参处）；持续 CPU 预算留待后续轮次。
 - `evaluate_resource_budgets` 本身仍不校验表头与字段数字性（本轮由 `probe_counters` 在上游拦截非法输出），若未来出现绕过采样入口的输入，仍需补强。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
+
+## Loop 25：2026-09-22：修复回归门禁持续 CPU 预算从未参与判定（空洞通过）
+
+**Loop 编号**
+- Loop 25。
+
+**日期**
+- 2026-09-22。
+
+**观察结果**
+- 工作区：`git status --short` 无输出，干净；HEAD == `67e6b0d`（Loop 24 的提交，Coordinator 已 fast-forward 到 `main` 并推送），当前分支 `hp/tinybuddy/t-0004-loop-24` 与 `main` 一致，无需 rebase/merge。
+- 读取 `.agent/loop.md`、`.agent/rules.md`、`.agent/memory.md`、`.agent/history.md`（10 条：Loop 15–24）与 `.agent/archive/`。Loop 24 记录中列为候选 (2) 的问题即本轮任务首选；候选 (1)（端到端跑 `--quick`/`--stage 5`）按本轮任务约束仍不执行，候选 (3)（`evaluate_resource_budgets` 不校验表头与字段数字性）无新证据、留待后续轮次。
+- `rg "TODO|FIXME|HACK|XXX" script Tests Sources Widget`：仅 `mktemp` 模板命中，无真实待办；`git diff --check` 通过。
+- 候选核对（`script/regression_gate.sh`）：`SUSTAINED_CPU_PERCENT`/`SUSTAINED_CPU_SAMPLES` 在 L83–86 定义为「Resource stability: sustained CPU percent / consecutive samples」，并作为 `-v cpuCap`/`-v cpuSamples` 传入 `evaluate_resource_budgets`（L545–546），但其 AWK 程序体内除 `-v` 传参与 `cpuTime` 暂存外再无任何引用 —— 该预算从不参与判定；`warmCPUTime`/`finalCPUTime` 被赋值后闲置。姊妹脚本 `verify_resource_stability.sh:399` 有完整实现（`cpuRun` 连续计数 + `cpuRate >= cpuCap` 判定），两者语义不一致。环境：Swift 6.4 / Xcode 27（arm64）。
+
+**选择的问题及证据**
+- 选择「`script/regression_gate.sh:evaluate_resource_budgets` 的持续 CPU 预算恒不生效，使 `TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT`（默认 15、连续 3 个采样窗口）成为空洞通过」这一问题（Loop 优先级第 4 位性能问题 + 第 5 位错误处理问题；与 Loop 24 同属门禁空洞通过但根因不同：Loop 24 是采样数据被伪造，本轮是预算判定整体缺失，因此不是重复问题）。
+- 复现条件（确定性，不需要真实 App）：source 门禁脚本后直接调用 `evaluate_resource_budgets`（Loop 24 加入的 source 守卫使该调用可行），喂入「warm + 3 个采样窗口」的 CSV，每个窗口的累计 CPU 时间增量为 10s 内 2s CPU（即 20%），并设 `TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT=15`、`TINYBUDDY_GATE_SUSTAINED_CPU_SAMPLES=3`。
+  - 修复前（HEAD 的 AWK）：`RSS delta=0KB threads delta=0 disk=0bytes interrupt_wakeups=0.0/min idle_wakeups=0.0/min` + `PASS`，exit 0 —— 20% 持续超过 15% 预算仍被放过。
+  - 修复后：`sustained CPU 20% for 3 samples;`，exit 1。
+- 影响范围：`script/regression_gate.sh` 的 resource-monitor 阶段（`--stage 5`、`--quick` 与默认全量运行）；任何持续 CPU 回归（忙等、轮询加剧、快照/Widget 反复重算）都不会被门禁发现，该阶段的能量预算实际只覆盖 RSS/线程/磁盘/唤醒四项。
+- 完成标准：持续 CPU 预算按与 `verify_resource_stability.sh` 相同的语义参与判定（由累计 CPU 时间导出的窗口速率、连续 N 个窗口达到预算即失败）；新增测试在修复前失败、修复后通过。
+
+**原因分析**
+- `evaluate_resource_budgets` 只实现了 RSS delta、线程 delta、disk delta 与 interrupt/idle wakeup 速率四项判定，AWK 程序从未使用 `cpuCap`/`cpuSamples`。常量定义、注释与 `-v` 传参齐备，造成「该预算已实现」的假象，实际判定缺失。姊妹脚本 `verify_resource_stability.sh` 早在 `99e9422` 就实现了同一预算，回归门禁由 `55415f2` 复制该 AWK 时漏掉了这一段，且脚本此前无任何自动化测试，漏项无从暴露。
+
+**修改内容**
+- `script/regression_gate.sh`（`evaluate_resource_budgets` 的 AWK，纯新增 15 行，不改动既有四项判定）：
+  - warm 行记录 `previousSampleElapsed = warmElapsed`、`previousSampleCPUTime = warmCPUTime`，并置 `havePreviousSample = 1`；
+  - 每个 warm 之后的行按 `cpuRate = (cpuTime - previousSampleCPUTime) * 100 / ((elapsed - previousSampleElapsed) * 1000000000)` 计算窗口速率；`cpuRate >= cpuCap` 时 `cpuRun++`，否则 `cpuRun = 0`；`cpuRun >= cpuSamples` 时 `fail("sustained CPU " cpuRate "% for " cpuRun " samples")`（与 `verify_resource_stability.sh` 完全一致，含 `>=` 边界语义）。
+- `Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`：新增 5 个测试（超预算 20%/3 窗口 → 失败；10% → 通过；20% 后回落到 10% → 连续计数清零、通过；恰好 15% → 失败（边界与姊妹脚本一致）；`TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT`/`_SAMPLES` 覆盖生效）。
+
+**验证结果**
+- 修复前/后同一 harness（仅替换 source 的门禁脚本）：20%/3 窗口 `PASS`(exit 0) → `sustained CPU 20% for 3 samples;`(exit 1)；10%/3 窗口两态均 `PASS`；20%→10%→10% 两态均 `PASS`（无单窗口误报）；恰好 15% `PASS` → `FAIL`（`>=` 语义）。
+- 覆盖项实测：`TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT=50` 时 20% 通过；`_SAMPLES=1` 时单窗口即失败；`_SAMPLES=4` 时 3 窗口通过；`TINYBUDDY_GATE_DISK_READ_DELTA_BYTES=100` 时 101 字节仍失败（既有预算未被破坏）。
+- `./script/swiftpm.sh test --filter RegressionGateScriptTests`：11 个测试，0 失败（Loop 24 的 6 个 + 本轮新增 5 个）。
+- `./script/swiftpm.sh test --filter 'RegressionGateScriptTests|ResourceStabilityScriptTests'`：24 个测试，0 失败（姊妹脚本 13 个既有测试未变动，确认其探针与预算契约不受影响）。
+- `/bin/bash -n script/regression_gate.sh` 通过；`--list-stages`、`--help`、`--stage 0`（exit 2）确认执行路径与参数校验未变。
+- `git diff --check` 干净；`git status --short` 仅 `script/regression_gate.sh`（修改）与 `Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`（修改，同文件追加测试）。
+- 验证级别：按 `AGENTS.md` 取 **Focused**。改动是脚本层纯新增判定 + 同目标测试类扩展，不触及共享契约、持久化、跨进程边界或 App/Widget 共享状态；未运行 `swift test` 全量（生产 Swift 代码与既有测试断言未变，Loop 23/24 在同一代码基线的全量 0 失败证据输入未变，本轮新增测试已在窄测中编译并全绿）。
+
+**剩余风险**
+- 新启用的阈值未在真实 Debug App 上端到端校准：门禁采样间隔为 10s（`RESOURCE_DURATION` 默认 60 → 约 6 个窗口），姊妹脚本默认 30s；若真实 Debug App 冷启动后的采样窗口持续超过 15%，门禁会在阈值层面失败（属阈值问题而非缺陷），调整路径是既有的 `TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT`/`TINYBUDDY_GATE_SUSTAINED_CPU_SAMPLES` 覆盖。本轮未运行 `--stage 5`/`--quick`，故该阈值未经真实运行验证。
+- Loop 24 候选 (1) 仍未闭环：未端到端运行 `--stage 5`/`--quick`（会 `pkill -x TinyBuddy` 终止本机已安装运行的 App 并构建启动 Debug App，属仓库外可见状态变更）。
+- Loop 24 候选 (3) 仍未处理：`evaluate_resource_budgets` 不校验表头与字段数字性；CPU 判定沿用 `$7 + 0` 数值化，非数字字段会退化为 0 速率。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）；Loop 23 的完整 600 秒 `verify_resource_stability.sh` 仍未真实运行。

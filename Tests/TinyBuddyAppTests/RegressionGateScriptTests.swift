@@ -1,11 +1,12 @@
 import Foundation
 import XCTest
 
-/// Covers `script/regression_gate.sh` resource sampling: a Darwin rusage probe
-/// that fails or returns malformed counters must fail the resource-monitor
-/// stage.  Replacing a failed probe with fabricated zero counters would leave
-/// the disk-read and interrupt/idle-wakeup budgets unverified while still
-/// reporting PASS.
+/// Covers `script/regression_gate.sh` resource sampling and budgets: a Darwin
+/// rusage probe that fails or returns malformed counters must fail the
+/// resource-monitor stage, and the sustained CPU budget must actually be
+/// evaluated.  Replacing a failed probe with fabricated zero counters, or
+/// accepting the budget without judging it, would report PASS for a run that
+/// was never verified.
 final class RegressionGateScriptTests: XCTestCase {
     func testSourcingScriptExposesStageHelpersWithoutRunningTheCli() throws {
         let result = try runBash("""
@@ -147,6 +148,73 @@ final class RegressionGateScriptTests: XCTestCase {
         }
     }
 
+    func testBudgetEvaluationRejectsSustainedCPUAboveBudget() throws {
+        let result = try evaluateBudgets(
+            cpuBudgetSamples(cpuNanoseconds: [2_000_000_000, 4_000_000_000, 6_000_000_000]),
+            environment: sustainedCPUEnvironment
+        )
+
+        XCTAssertEqual(result.exitCode, 1, result.output)
+        XCTAssertTrue(result.output.contains("sustained CPU 20% for 3 samples"), result.output)
+        XCTAssertFalse(result.output.contains("PASS"), result.output)
+    }
+
+    func testBudgetEvaluationAcceptsSustainedCPUBelowBudget() throws {
+        let result = try evaluateBudgets(
+            cpuBudgetSamples(cpuNanoseconds: [1_000_000_000, 2_000_000_000, 3_000_000_000]),
+            environment: sustainedCPUEnvironment
+        )
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(result.output.contains("PASS"), result.output)
+    }
+
+    func testBudgetEvaluationResetsSustainedCPURunWhenLoadDrops() throws {
+        // One 20% window followed by 10% windows must not accumulate a run.
+        let result = try evaluateBudgets(
+            cpuBudgetSamples(cpuNanoseconds: [2_000_000_000, 3_000_000_000, 4_000_000_000]),
+            environment: sustainedCPUEnvironment
+        )
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(result.output.contains("PASS"), result.output)
+    }
+
+    func testBudgetEvaluationCountsCPURateAtTheBudgetBoundary() throws {
+        // The budget is inclusive, matching verify_resource_stability.sh.
+        let result = try evaluateBudgets(
+            cpuBudgetSamples(cpuNanoseconds: [1_500_000_000, 3_000_000_000, 4_500_000_000]),
+            environment: sustainedCPUEnvironment
+        )
+
+        XCTAssertEqual(result.exitCode, 1, result.output)
+        XCTAssertTrue(result.output.contains("sustained CPU 15% for 3 samples"), result.output)
+    }
+
+    func testBudgetEvaluationHonoursSustainedCPUOverrides() throws {
+        let samples = cpuBudgetSamples(cpuNanoseconds: [2_000_000_000, 4_000_000_000, 6_000_000_000])
+
+        let raisedPercent = try evaluateBudgets(samples, environment: [
+            "TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT": "50",
+            "TINYBUDDY_GATE_SUSTAINED_CPU_SAMPLES": "3"
+        ])
+        let singleSample = try evaluateBudgets(samples, environment: [
+            "TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT": "15",
+            "TINYBUDDY_GATE_SUSTAINED_CPU_SAMPLES": "1"
+        ])
+        let moreSamplesThanRecorded = try evaluateBudgets(samples, environment: [
+            "TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT": "15",
+            "TINYBUDDY_GATE_SUSTAINED_CPU_SAMPLES": "4"
+        ])
+
+        XCTAssertEqual(raisedPercent.exitCode, 0, raisedPercent.error)
+        XCTAssertTrue(raisedPercent.output.contains("PASS"), raisedPercent.output)
+        XCTAssertEqual(singleSample.exitCode, 1, singleSample.output)
+        XCTAssertTrue(singleSample.output.contains("sustained CPU 20% for 1 samples"), singleSample.output)
+        XCTAssertEqual(moreSamplesThanRecorded.exitCode, 0, moreSamplesThanRecorded.error)
+        XCTAssertTrue(moreSamplesThanRecorded.output.contains("PASS"), moreSamplesThanRecorded.output)
+    }
+
     func testScriptDoesNotFabricateZeroProbeSamples() throws {
         let script = try String(contentsOf: scriptURL(), encoding: .utf8)
 
@@ -171,6 +239,40 @@ final class RegressionGateScriptTests: XCTestCase {
             """,
             environment: ["FAKE_PROBE": probe.path, "PROBE_PID": pid]
         )
+    }
+
+    private func evaluateBudgets(
+        _ lines: [String],
+        environment: [String: String] = [:]
+    ) throws -> (exitCode: Int32, output: String, error: String) {
+        let fixtureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tinybuddy-regression-gate-samples-\(UUID().uuidString).csv")
+        try lines.joined(separator: "\n").write(to: fixtureURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: fixtureURL) }
+
+        return try runBash(
+            """
+            source "$GATE_SCRIPT"
+            evaluate_resource_budgets "$SAMPLES_PATH"
+            """,
+            environment: environment.merging(["SAMPLES_PATH": fixtureURL.path]) { _, new in new }
+        )
+    }
+
+    /// Cumulative CPU time that yields the wanted rate for each 10s window.
+    private func cpuBudgetSamples(cpuNanoseconds: [UInt64]) -> [String] {
+        var rows = [sampleHeader, "10,1000,0.0,4,1,warm,0,0,0,0"]
+        for (index, cpuTime) in cpuNanoseconds.enumerated() {
+            rows.append("\(20 + index * 10),1000,0.0,4,1,sample,\(cpuTime),0,0,0")
+        }
+        return rows
+    }
+
+    private var sustainedCPUEnvironment: [String: String] {
+        [
+            "TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT": "15",
+            "TINYBUDDY_GATE_SUSTAINED_CPU_SAMPLES": "3"
+        ]
     }
 
     private func standInCount(in output: String) -> Int {

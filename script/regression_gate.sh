@@ -564,6 +564,9 @@ evaluate_resource_budgets() {
         warmDiskReadBytes = $8 + 0
         warmInterruptWakeups = $9 + 0
         warmIdleWakeups = $10 + 0
+        previousSampleElapsed = warmElapsed
+        previousSampleCPUTime = warmCPUTime
+        havePreviousSample = 1
         next
       }
       if (!warmSeen) { fail("no warm baseline"); next }
@@ -575,6 +578,18 @@ evaluate_resource_budgets() {
       finalInterruptWakeups = interruptWakeups; finalIdleWakeups = idleWakeups
       measurementCount++
       if (threads - warmThreads > maxThreadDelta) maxThreadDelta = threads - warmThreads
+      # Sustained CPU: consecutive measurement windows whose rate derived from
+      # cumulative CPU time reaches the budget, as verify_resource_stability.sh
+      # does.  Without this the cpuCap/cpuSamples budget is never evaluated.
+      if (havePreviousSample && elapsed > previousSampleElapsed) {
+        cpuRate = (cpuTime - previousSampleCPUTime) * 100 / ((elapsed - previousSampleElapsed) * 1000000000)
+        if (cpuRate >= cpuCap) cpuRun++; else cpuRun = 0
+        if (cpuRun >= cpuSamples)
+          fail("sustained CPU " cpuRate "% for " cpuRun " samples")
+      }
+      previousSampleElapsed = elapsed
+      previousSampleCPUTime = cpuTime
+      havePreviousSample = 1
       if (!havePrevious || rss < previousRSS) { runStartRSS = rss; nondecreasingRun = 1 }
       else { nondecreasingRun++ }
       if (nondecreasingRun >= monotonicSamples && rss - runStartRSS >= monotonicGrowth)
