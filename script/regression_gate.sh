@@ -630,6 +630,7 @@ run_widget_reload() {
   local widget_pid=""
   local deadline
   local appex
+  local registered_executable
   local expected_executable
 
   appex="$("$PLUGINKIT_BIN" -m -A -D -v -i "$WIDGET_BUNDLE_ID" 2>/dev/null \
@@ -640,16 +641,31 @@ run_widget_reload() {
     return "$STAGE_SKIP"
   fi
 
-  expected_executable="$appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
-  if [ ! -f "$expected_executable" ]; then
-    stage_skip "widget executable not found: $expected_executable"
+  # The registration only finds the live widget process: an installed copy
+  # registers the same bundle identifier, so it must never become the target of
+  # the verification below.
+  registered_executable="$appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
+  if [ ! -f "$registered_executable" ]; then
+    stage_skip "widget executable not found: $registered_executable"
     return "$STAGE_SKIP"
   fi
+
+  expected_executable="$APP_BUNDLE/Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"
+  if [ ! -f "$expected_executable" ]; then
+    stage_fail "widget executable is missing from the build under test: $expected_executable"
+    return "$STAGE_FAIL"
+  fi
+
+  local expected_hash
+  expected_hash="$(LC_ALL=C /usr/bin/shasum -a 256 "$expected_executable" | /usr/bin/awk '{print $1}')" || {
+    stage_fail "failed to hash the widget executable of the build under test: $expected_executable"
+    return "$STAGE_FAIL"
+  }
 
   # Wait for widget process
   deadline=$((SECONDS + WIDGET_TIMEOUT))
   while [ "$SECONDS" -le "$deadline" ]; do
-    widget_pid="$("$PS_BIN" -axo pid=,comm= 2>/dev/null | /usr/bin/awk -v exe="$expected_executable" '
+    widget_pid="$("$PS_BIN" -axo pid=,comm= 2>/dev/null | /usr/bin/awk -v exe="$registered_executable" '
       { comm = ""; for (i = 2; i <= NF; i++) comm = comm (i > 2 ? " " : "") $i; if (comm == exe) { print $1; exit } }')" || true
     if [ -n "$widget_pid" ]; then
       break
@@ -661,17 +677,28 @@ run_widget_reload() {
     /bin/sleep 1
   done
 
-  # Verify the widget process executable hash matches our build
-  local expected_hash
-  local executable_hash
-  expected_hash="$(LC_ALL=C /usr/bin/shasum -a 256 "$expected_executable" | /usr/bin/awk '{print $1}')" || {
-    stage_fail "failed to hash widget executable"
+  # Verify that the running widget process executes the widget of the build
+  # under test.  A mismatching or unresolvable executable fails the stage
+  # instead of passing without the verification it claims.
+  local running_executable
+  local running_hash
+  running_executable="$("$PS_BIN" -p "$widget_pid" -o comm= 2>/dev/null || true)"
+  running_executable="${running_executable#"${running_executable%%[![:space:]]*}"}"
+  running_executable="${running_executable%"${running_executable##*[![:space:]]}"}"
+  if [ -z "$running_executable" ] || [ ! -f "$running_executable" ]; then
+    stage_fail "widget process executable is missing before verification: pid=$widget_pid path=${running_executable:-unknown}"
+    return "$STAGE_FAIL"
+  fi
+  running_hash="$(LC_ALL=C /usr/bin/shasum -a 256 "$running_executable" | /usr/bin/awk '{print $1}')" || {
+    stage_fail "failed to hash the running widget executable: $running_executable"
     return "$STAGE_FAIL"
   }
-  executable_hash="$(LC_ALL=C /usr/bin/shasum -a 256 "/proc/$widget_pid/exe" 2>/dev/null \
-    || "$PS_BIN" -p "$widget_pid" -o comm= 2>/dev/null | /usr/bin/xargs | LC_ALL=C /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')" || true
+  if [ "$running_hash" != "$expected_hash" ]; then
+    stage_fail "running widget executable is not the build under test: pid=$widget_pid running=$running_executable expected=$expected_executable"
+    return "$STAGE_FAIL"
+  fi
 
-  echo "widget extension: pid=$widget_pid executable=$expected_executable"
+  echo "verified running widget extension: pid=$widget_pid executable=$running_executable sha256=$running_hash"
 
   stage_pass
 }

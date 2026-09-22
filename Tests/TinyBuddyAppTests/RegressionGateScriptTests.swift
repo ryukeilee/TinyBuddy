@@ -225,7 +225,181 @@ final class RegressionGateScriptTests: XCTestCase {
         XCTAssertTrue(script.contains("probe_counters() {"), "the probe sampling helper is missing")
     }
 
+    // MARK: - Stage 6: widget reload verification
+
+    func testWidgetReloadFailsWhenRunningExecutableIsNotTheBuildUnderTest() throws {
+        // The registered extension is only the discovery handle: an installed
+        // copy registers the same bundle identifier, so a widget process
+        // running it must not be certified as the build under test.
+        let result = try runWidgetReload(runningExecutable: .registered)
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(result.error.contains(">>> FAIL: widget-reload"), result.error)
+        XCTAssertTrue(
+            result.error.contains("running widget executable is not the build under test"),
+            result.error
+        )
+        XCTAssertTrue(result.output.contains("STAGE-STATUS=1"), result.output)
+        XCTAssertTrue(result.output.contains("OVERALL_STATUS=1"), result.output)
+        XCTAssertFalse(result.output.contains(">>> PASS: widget-reload"), result.output)
+    }
+
+    func testWidgetReloadVerifiesRunningExecutableOfTheBuildUnderTest() throws {
+        let result = try runWidgetReload(runningExecutable: .build)
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(result.output.contains(">>> PASS: widget-reload"), result.output)
+        XCTAssertTrue(result.output.contains("STAGE-STATUS=0"), result.output)
+        XCTAssertTrue(
+            result.output.contains("verified running widget extension: pid=4242"),
+            result.output
+        )
+        XCTAssertTrue(result.output.contains("sha256="), result.output)
+    }
+
+    func testWidgetReloadFailsWhenBuildUnderTestHasNoWidgetExecutable() throws {
+        let result = try runWidgetReload(runningExecutable: .build, includeBuildWidget: false)
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(
+            result.error.contains("widget executable is missing from the build under test"),
+            result.error
+        )
+        XCTAssertTrue(result.output.contains("STAGE-STATUS=1"), result.output)
+        XCTAssertTrue(result.output.contains("OVERALL_STATUS=1"), result.output)
+    }
+
+    func testWidgetReloadFailsWhenRunningExecutableCannotBeResolved() throws {
+        let result = try runWidgetReload(runningExecutable: .missing)
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(
+            result.error.contains("widget process executable is missing before verification"),
+            result.error
+        )
+        XCTAssertTrue(result.output.contains("STAGE-STATUS=1"), result.output)
+        XCTAssertTrue(result.output.contains("OVERALL_STATUS=1"), result.output)
+    }
+
+    func testWidgetReloadSkipsWhenNoWidgetExtensionIsRegistered() throws {
+        let result = try runWidgetReload(runningExecutable: .registered, registerExtension: false)
+
+        XCTAssertEqual(result.exitCode, 0, result.error)
+        XCTAssertTrue(result.output.contains(">>> SKIP: widget-reload"), result.output)
+        XCTAssertTrue(result.output.contains("STAGE-STATUS=77"), result.output)
+        XCTAssertTrue(result.output.contains("OVERALL_STATUS=0"), result.output)
+    }
+
+    func testWidgetReloadTargetsTheBuildUnderTestInsteadOfProcPaths() throws {
+        let script = try String(contentsOf: scriptURL(), encoding: .utf8)
+
+        XCTAssertFalse(
+            script.contains("/proc/"),
+            "the widget verification must not hash a /proc path that does not exist on macOS"
+        )
+        XCTAssertTrue(
+            script.contains("Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex"),
+            "the widget verification must target the widget executable of the build under test"
+        )
+    }
+
     // MARK: - Helpers
+
+    private enum WidgetExecutableChoice {
+        case build
+        case registered
+        case missing
+    }
+
+    /// Runs `run_widget_reload` against a fabricated app bundle, a fabricated
+    /// registration and a fabricated process table, so the verification can be
+    /// exercised without a real app, widget or installed copy.
+    private func runWidgetReload(
+        runningExecutable: WidgetExecutableChoice,
+        includeBuildWidget: Bool = true,
+        registerExtension: Bool = true
+    ) throws -> (exitCode: Int32, output: String, error: String) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tinybuddy-regression-gate-widget-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let appBundle = directory.appendingPathComponent("build/TinyBuddy.app", isDirectory: true)
+        let buildExecutable = appBundle.appendingPathComponent(
+            "Contents/PlugIns/\(widgetExtensionName).appex/Contents/MacOS/\(widgetExtensionName)"
+        )
+        let registeredAppex = directory.appendingPathComponent(
+            "registered/\(widgetExtensionName).appex",
+            isDirectory: true
+        )
+        let registeredExecutable = registeredAppex
+            .appendingPathComponent("Contents/MacOS/\(widgetExtensionName)")
+        try writeExecutableFile("build-under-test-widget-binary\n", at: buildExecutable)
+        try writeExecutableFile("installed-widget-binary\n", at: registeredExecutable)
+        if !includeBuildWidget {
+            try FileManager.default.removeItem(at: buildExecutable)
+        }
+
+        let runningPath: String
+        switch runningExecutable {
+        case .build:
+            runningPath = buildExecutable.path
+        case .registered:
+            runningPath = registeredExecutable.path
+        case .missing:
+            runningPath = ""
+        }
+
+        let fakePS = try writeExecutable(
+            """
+            #!/bin/bash
+            case "$*" in
+              *"-axo pid=,comm="*) printf '%s %s\\n' "$FAKE_WIDGET_PID" "$FAKE_REGISTERED_EXECUTABLE" ;;
+              *"-o comm="*) printf '%s\\n' "$FAKE_RUNNING_EXECUTABLE" ;;
+              *) printf '1000 0.0\\n' ;;
+            esac
+            """,
+            named: "fake-ps-widget",
+            in: directory
+        )
+        let fakePluginKit = try writeExecutable(
+            """
+            #!/bin/bash
+            if [ -n "${FAKE_REGISTERED_APPEX:-}" ]; then
+              printf '+    widget(1.0)\tUUID\t2026-09-15 16:07:36 +0000\t%s\\n' "$FAKE_REGISTERED_APPEX"
+            fi
+            """,
+            named: "fake-pluginkit-widget",
+            in: directory
+        )
+
+        return try runBash(
+            """
+            source "$GATE_SCRIPT"
+            init_evidence
+            APP_BUNDLE="$FAKE_APP_BUNDLE"
+            PLUGINKIT_BIN="$FAKE_PLUGINKIT"
+            PS_BIN="$FAKE_PS"
+            WIDGET_TIMEOUT=1
+            if run_widget_reload; then
+              echo "STAGE-STATUS=0"
+            else
+              echo "STAGE-STATUS=$?"
+            fi
+            echo "OVERALL_STATUS=$OVERALL_STATUS"
+            """,
+            environment: [
+                "TINYBUDDY_REGRESSION_EVIDENCE_DIR": directory.appendingPathComponent("evidence").path,
+                "FAKE_APP_BUNDLE": appBundle.path,
+                "FAKE_PLUGINKIT": fakePluginKit.path,
+                "FAKE_PS": fakePS.path,
+                "FAKE_REGISTERED_APPEX": registerExtension ? registeredAppex.path : "",
+                "FAKE_REGISTERED_EXECUTABLE": registeredExecutable.path,
+                "FAKE_RUNNING_EXECUTABLE": runningPath,
+                "FAKE_WIDGET_PID": "4242"
+            ]
+        )
+    }
 
     private func probeCounters(
         probe: URL,
@@ -306,7 +480,15 @@ final class RegressionGateScriptTests: XCTestCase {
 
     @discardableResult
     private func writeExecutable(_ contents: String, named name: String, in directory: URL) throws -> URL {
-        let url = directory.appendingPathComponent(name)
+        return try writeExecutableFile(contents, at: directory.appendingPathComponent(name))
+    }
+
+    @discardableResult
+    private func writeExecutableFile(_ contents: String, at url: URL) throws -> URL {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         try contents.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
@@ -345,4 +527,6 @@ final class RegressionGateScriptTests: XCTestCase {
     }
 
     private let sampleHeader = "elapsed_seconds,rss_kb,cpu_percent,thread_count,alive,state,cpu_time_ns,disk_read_bytes,interrupt_wakeups,idle_wakeups"
+
+    private let widgetExtensionName = "TinyBuddyWidgetExtension"
 }

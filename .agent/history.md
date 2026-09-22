@@ -5,47 +5,6 @@
 - 本文件始终保留最近约 10 条轮次记录。
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
-
-
-
-## Loop 16：2026-08-14：修复确认门在生产事件流下永远无法确认持续输入（周期性活动心跳）
-
-**Loop 编号**
-- Loop 16。
-
-**日期**
-- 2026-08-14
-
-**观察结果**
-- 工作区干净（`git status --short` 无输出），HEAD == origin/main == `d0b980c`（Loop 15 记录）；自 Loop 15 以来唯一新提交是 `1ebef5e`（"Gate automatic focus on sustained activity"，+929 行：新增 `FocusSessionConfirmationGate`、`FocusSessionEngine` 确认门接线、规则版本 1.0→1.1、594 行确认门测试），即 Loop 15 观察到的在途确认门改动已提交（含 Loop 15 修复的 `pendingSwitch = nil`）。
-- 静态信号：`rg "TODO|FIXME|HACK|XXX"` 无真实待办（仅 `mktemp` 模板）；`try!`/`fatalError` 无匹配；`git diff --check` 通过。
-- 接线审查（关键发现）：App 事件流未随提交改动——引擎 `userActivity` 事件仅来自 (a) idle→active 转换（`FocusSessionAppBridge.swift:251`，每轮询周期一次，默认轮询 15s）、(b) 非自动化 Git 提交（`TinyBuddyApp.swift:798`）、(c) 解锁/唤醒/启动单次事件（`reportActiveAfterIdle`）；持续活动期间（`!isNowIdle` 分支，line 253-258）轮询仅递增 `activeCount`（该变量本身是既有无读死变量），不产生任何引擎事件。
-
-**选择的问题及证据**
-- 选择"确认门在生产事件流下无法确认持续输入"这一用户影响 Bug（Loop 优先级第 1 位）。
-- 复现条件（确定性）：默认 `confirmationMinimumActiveDuration = 120`，而"持续输入（无提交、无 ≥120s idle）"在整个工作时段只产生 1 个引擎事件 → 门累计 0 < 120 → 自动焦点会话**永不启动**；规则 1.0（`1ebef5e^`）下首个事件即 `startSession`，属用户可见回归（HUD/Widget 焦点统计对纯输入型工作静默丢失）。自动项目切换同根因：pending switch 后在新项目持续输入但无事件 → 门无法确认 → 切换永不提交（该路径在门前后均有缺陷，一并修复）。
-- 与设计意图矛盾：门文档明示"短暂输入不启动、持续活动确认"，而接线使"持续输入"与"短暂输入"（同为单事件）不可区分。
-- 完成标准：新增周期性心跳只喂确认门（不改写已打开同项目会话、零持久化抖动）；确定性测试覆盖 持续输入启动 / 心跳不改写不落盘 / 心跳确认切换；相关窄测全绿；全量回归除预先存在的环境计时失败外无失败。
-
-**原因分析**
-- 门的累计模型（事件间隔计入活跃时间）假设生产事件流近似活跃时间；实际接线只在转换/提交/解锁时上报，持续输入在首个事件后静默，门无法确认。修复方向：在活跃轮询分支周期性喂门，同时保持"打开的同项目会话零写入"（活会话本就按设计不产生 journal 写入）。
-
-**修改内容**
-- `Sources/TinyBuddyCore/FocusSessionEngine.swift`：新增 `reportSustainedActivity(in:at:)`——按轮询节奏喂确认门；手动会话/无项目直接跳过；无打开会话时确认即 `startSession`；打开会话同项目为纯 no-op（不触碰 `lastUserActivityAt`/`lastStateChangeAt`，零写入）；不同项目走 `differentProjectActivity`（未确认仅累计，已确认按 away 边界切换）。
-- `Sources/TinyBuddyCore/FocusSessionCoordinator.swift`：新增 `reportSustainedActivity(at:)`（复用 `focusProject()` 归属逻辑与排除门）。
-- `Sources/TinyBuddy/FocusSessionAppBridge.swift`：`checkIdleState` 活跃（`!isNowIdle`）分支每轮询调用 `coordinator.reportSustainedActivity()`（与 `reportUserInput` 同风格，受 `isStopped` 防护）。
-- `Tests/TinyBuddyCoreTests/FocusSessionConfirmationGateTests.swift`：新增 3 个确定性测试（生产喂入节奏：转换事件 + 15s 心跳）：`testConfirmationGate_heartbeatStartsSessionForContinuousTyping`（8 个心跳累计 120s 后会话在确认心跳时刻启动，先于首个事件的时间不计入）、`testConfirmationGate_heartbeatDoesNotMutateOrPersistOpenSession`（`.noChange`、`saveCount` 不变）、`testConfirmationGate_heartbeatConfirmsSwitchForContinuousTypingInNewProject`（9 个心跳累计 120s 后按 away 边界切换，away 间隔归属到达项目）。
-
-**验证结果**
-- 红→绿：新测试先以编译失败证明 API 缺失；修复后 3 个心跳测试全绿（过程中修正 2 处测试自身错误：门重置后首心跳只开始跟踪需 9 个心跳；B 活跃时长 = away 间隔 135s 属边界设计语义，非缺陷）。
-- `swift test --filter 'FocusSessionEngineTests|FocusSessionCoordinatorTests|FocusSessionAppBridgeResetGateTests|FocusSessionDecisionTrackingTests'`：110 个测试 0 失败。
-- `swift test` 全量：1598 个测试，仅**预先存在的环境计时失败**：`GitActivityRefreshScriptTests` 脚本超时墙钟断言（~6.5-7.4s > 4.0s 预算）2 个、`testWakeNotificationRetriesWhenFirstWakeRefreshCannotStart` 高负载下偶发 1 个；决定性证据：在**原始树**（`git stash` 暂存本次改动后）该脚本超时测试同样失败（7.4s），且脚本/测试文件自 `aec839c`（Loop 12 全量 1554 绿）以来未变；当前系统负载均值 4.47（WebKit/WindowServer/WeChat 高占用），属环境条件而非代码回归，与本次焦点会话改动零交集。
-- `git diff --check`：通过；`git status --short` 复查：仅 4 个目标文件改动（+143），无越界；无用户在途修改。
-
-**剩余风险**
-- 全量门禁受本机当前高负载影响：脚本超时墙钟测试与 wake 重试测试在本机重负载下失败（原始树复现，预先存在）；负载回落或换机后应复跑 `swift test` 确认全绿。已记录"脚本超时测试 4.0s 墙钟断言环境敏感"候选，留待出现新证据（脚本或测试变更）时处理。
-- 心跳节奏固定为轮询间隔（默认 15s），确认延迟 ≈ 默认最小活跃时长（120s），属确认门设计权衡；纯门语义未改动（未在 idle 时重置门，间隔计入活跃时间符合既有纯机语义与既有测试）。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch`（`FocusSessionEngine.swift`）自 `72ac058` 起从未被调用（本次提交还给其死体加了确认门守卫），属既有死代码，可留作纯清理候选。
 ## Loop 17：2026-08-15：无修改轮次（在途“焦点识别解释”功能经独立审查、全量回归与本机签名安装运行验证通过）
 
 **Loop 编号**
@@ -414,3 +373,70 @@
 - Loop 24 候选 (1) 仍未闭环：未端到端运行 `--stage 5`/`--quick`（会 `pkill -x TinyBuddy` 终止本机已安装运行的 App 并构建启动 Debug App，属仓库外可见状态变更）。
 - Loop 24 候选 (3) 仍未处理：`evaluate_resource_budgets` 不校验表头与字段数字性；CPU 判定沿用 `$7 + 0` 数值化，非数字字段会退化为 0 速率。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）；Loop 23 的完整 600 秒 `verify_resource_stability.sh` 仍未真实运行。
+
+## Loop 26：2026-09-23：修复回归门禁 Widget 阶段哈希校验从未执行（空洞通过）
+
+**Loop 编号**
+- Loop 26。
+
+**日期**
+- 2026-09-23。
+
+**观察结果**
+- 工作区：`git status --short` 与 `git diff --check` 均无输出，干净；`git stash list` 为空；HEAD == `origin/main` == `2d1d8ce`（Loop 25 的提交 `Evaluate the regression gate's sustained CPU budget`），自 Loop 25 以来无新提交。
+- 读取 `.agent/loop.md`、`.agent/rules.md`、`.agent/memory.md`、`.agent/history.md`（10 条：Loop 16–25）与 `.agent/archive/`（含 Loop 9–16 等历史条目，用于去重核对）。
+- 静态信号：`rg "TODO|FIXME|HACK|XXX" Sources Tests Widget script` 仅命中 `mktemp` 的 `XXXXXX` 模板，无真实待办；窄测基线 `./script/swiftpm.sh test --filter RegressionGateScriptTests`：11 个测试 0 失败（环境健康检查）。
+- 关键发现（`script/regression_gate.sh` 的 `run_widget_reload`，stage 6 widget-reload）：
+  - `local expected_hash` / `local executable_hash` 被赋值后全脚本再无任何引用（`git show HEAD:script/regression_gate.sh | grep -c '\$expected_hash\|\$executable_hash'` = 0），注释却写着 “Verify the widget process executable hash matches our build”；赋值与 `stage_pass` 之间没有任何比较，找到进程即无条件 PASS。
+  - 运行侧哈希取 `"/proc/$widget_pid/exe"`：macOS 无 `/proc`（`ls -d /proc` → `No such file or directory`），该分支必然失败并回退为 `"$PS_BIN" -p "$widget_pid" -o comm= | xargs | shasum -a 256`，即对**路径文本**取哈希。实测：`ps -p 972 -o comm= | xargs | shasum -a 256` = `c672d5d312dbf9c782f6f8905ebb3f189b4e970dda2a0cd767d1d0faa3a9cc23`，而该可执行文件真实哈希为 `56e74a201fd1d51ceef613f4c7a0ddab6be506900682488aa6ac42d85ec71de3`。
+  - 校验目标来自注册表首条记录而非本次构建：`pluginkit -m -A -D -v -i com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension` 只返回 `/Applications/TinyBuddy.app/Contents/PlugIns/TinyBuddyWidgetExtension.appex`（注册时间 2026-09-15），运行中的 widget 进程（pid 972）恰是这一已安装副本；`project.yml` 将 widget 作为 app-extension 内嵌（`Contents/PlugIns/TinyBuddyWidgetExtension.appex`），`script/build_and_run.sh:721` 也是从被验证的 app bundle 以同一路径推导 appex。
+- 去重核对：Loop 24/25 修的是同一门禁的 stage 5（探针采样、持续 CPU 预算），未触及 stage 6；`history.md` 与 `.agent/archive/` 中没有任何关于 `expected_hash`/`executable_hash` 的记录。
+
+**选择的问题及证据**
+- 选择「`script/regression_gate.sh` 的 stage 6（widget-reload）声称校验 widget 进程可执行文件哈希与本次构建一致，实际从不比较哈希、且校验基准取自注册表首条记录，导致找到进程即无条件 PASS」这一稳定性/错误处理问题（Loop 优先级第 2、5 位）。
+- 与已完成轮次的差异：Loop 24 是探针失败被伪造成全零采样，Loop 25 是 `evaluate_resource_budgets` 的 AWK 从未使用 `cpuCap`/`cpuSamples`；本轮是另一个 stage 的校验整体未执行、且校验对象错误，属新证据（新复现、新静态证据），不是同根因重复处理。
+- 复现条件（确定性，不需要真实 App）：source 门禁脚本（入口有 `BASH_SOURCE` 守卫），注入 `APP_BUNDLE`（假 app bundle，含内容为 `build-under-test-widget-binary` 的自有 widget 可执行文件）、`PLUGINKIT_BIN`（注册另一个 appex）、`PS_BIN`（分别桩化 `-axo pid=,comm=` 与 `-p <pid> -o comm=`）与 `WIDGET_TIMEOUT=1`，再调用 `run_widget_reload`。
+  - 修复前（HEAD 脚本）：运行进程指向注册的已安装副本、与构建的 widget 二进制不同时，仍输出 `>>> PASS: widget-reload`、`STAGE-STATUS=0`、`OVERALL_STATUS=0`。
+  - 修复后（同一 harness）：`>>> FAIL: widget-reload — running widget executable is not the build under test: pid=4242 running=…/registered/… expected=…/build/TinyBuddy.app/Contents/PlugIns/…`、`STAGE-STATUS=1`、`OVERALL_STATUS=1`；运行进程指向本次构建的 widget 时 `>>> PASS: widget-reload` 并打印 `sha256=…`。
+- 影响范围：`script/regression_gate.sh` 的 `--stage 6`、`--quick` 与默认全量运行的 widget-reload 阶段；「widget 进程不是本次构建的产物」「可执行文件缺失或已被替换」都会以 PASS 记录，门禁据以宣称校验过 widget 可执行文件。
+- 完成标准：找到 widget 进程后必须把该进程自身报告的可执行文件内容哈希与本次构建的 widget 可执行文件哈希比较，路径不可解析或哈希不一致时 fail closed；注册缺失仍是 SKIP；新增测试在修复前失败、修复后通过。
+
+**原因分析**
+- 原实现从未完成它声称的校验：`expected_hash`/`executable_hash` 赋值后无人读取；运行侧哈希来源 `"/proc/$widget_pid/exe"` 是 Linux 语义，在 macOS 上必然失败，回退分支又把 `ps -o comm=` 的路径文本当作可执行文件内容哈希；校验基准取 `pluginkit` 返回的首条 appex，而本次构建与已安装副本注册同一 bundle id（顺序不确定），因此「匹配本次构建」既没有比较，也没有以本次构建为基准。该 stage 此前没有任何自动化测试，缺陷无从暴露。
+- 仓库已有的正确模式可直接复用：`script/build_and_run.sh:verify_running_bundle_process` 先从运行进程读回其自身可执行文件路径，再对**该文件**取 sha256 与期望值比较，不一致即失败；`"$APP_BUNDLE/Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex"` 也是该脚本既有的 appex 推导方式。
+
+**修改内容**
+- `script/regression_gate.sh`（仅 `run_widget_reload`，+39/−12）：
+  - 注册表结果改名 `registered_executable`，只用于发现运行中的 widget 进程（保留“未注册 → SKIP”“注册的可执行文件缺失 → SKIP”语义与消息）。
+  - 新增校验基准 `expected_executable="$APP_BUNDLE/Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex/Contents/MacOS/$WIDGET_EXTENSION_NAME"`；该文件缺失 → `stage_fail "widget executable is missing from the build under test: …"`（构建产物不完整不再以 SKIP 掩盖）；随后计算 `expected_hash`。
+  - 删除 `"/proc/$widget_pid/exe"` 与路径文本哈希；改为读取运行进程自身报告的可执行文件路径（自动 trim 空白）：路径为空或文件不存在 → `stage_fail "widget process executable is missing before verification: …"`；再对该文件取 sha256，与 `expected_hash` 不一致 → `stage_fail "running widget executable is not the build under test: …"`。
+  - PASS 时打印 `verified running widget extension: pid=… executable=… sha256=…`，使校验可审计（原输出只打印期望路径，与实际校验对象无关）。
+- `Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`（+186）：新增 6 个确定性测试与夹具（`runWidgetReload` + 假 `pluginkit`/`ps` + 临时 app bundle，`WIDGET_TIMEOUT=1`，无需真实 App 或进程）：
+  - `testWidgetReloadFailsWhenRunningExecutableIsNotTheBuildUnderTest`（核心回归：运行已安装副本 → FAIL、`OVERALL_STATUS=1`、无 PASS）；
+  - `testWidgetReloadVerifiesRunningExecutableOfTheBuildUnderTest`（运行本次构建 → PASS 且输出 `sha256=`）；
+  - `testWidgetReloadFailsWhenBuildUnderTestHasNoWidgetExecutable`；
+  - `testWidgetReloadFailsWhenRunningExecutableCannotBeResolved`（路径不可解析 → FAIL）；
+  - `testWidgetReloadSkipsWhenNoWidgetExtensionIsRegistered`（未注册 → 仍 SKIP、`STAGE-STATUS=77`、`OVERALL_STATUS=0`）；
+  - `testWidgetReloadTargetsTheBuildUnderTestInsteadOfProcPaths`（静态：脚本不再出现 `/proc/`，且以 `Contents/PlugIns/$WIDGET_EXTENSION_NAME.appex` 为校验目标）。
+  - 辅助：新增 `writeExecutableFile(_:at:)`（按完整路径写可执行文件）；既有 `writeExecutable(_:named:in:)` 改为其薄封装，行为不变。
+- 撤销方法：`git checkout -- script/regression_gate.sh Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`；从 `.agent/history.md` 删除本条，并把 `.agent/archive/history-2026-09-23.md` 中的 Loop 16 原样移回。
+
+**验证结果**
+- 红→绿（同一 harness，仅更换被 source 的门禁脚本）：修复前 `>>> PASS: widget-reload`/`OVERALL_STATUS=0` → 修复后 `>>> FAIL: widget-reload — running widget executable is not the build under test: …`/`OVERALL_STATUS=1`；运行本次构建的场景修复前后均 PASS，修复后额外打印 `sha256=…`。
+- 反向验证（新测试确实约束修复）：把工作区脚本临时替换为 `git show HEAD:script/regression_gate.sh` 后运行 `./script/swiftpm.sh test --filter RegressionGateScriptTests`：17 个测试 15 个断言失败，6 个新测试中 5 个失败、`testWidgetReloadSkipsWhenNoWidgetExtensionIsRegistered` 通过（符合“既有 SKIP 语义保留”预期）；随后按 sha256 恢复修复后脚本（与运行前留存副本一致：`36830775a03942cd89d804e02c27c6eb398ab7c23a3174b767e4b190fae86db2`）。
+- 修复后 `./script/swiftpm.sh test --filter RegressionGateScriptTests`：17 个测试（Loop 24/25 的 11 个 + 本轮 6 个），0 失败。
+- 修复后 `./script/swiftpm.sh test --filter 'RegressionGateScriptTests|ResourceStabilityScriptTests'`：30 个测试，0 失败（姊妹脚本 13 个既有测试未受影响）。
+- 真实系统校验（只读，未启动、未终止任何 App）：source 门禁脚本后以 `APP_BUNDLE=/Applications/TinyBuddy.app`、`WIDGET_TIMEOUT=2` 直接调用 `run_widget_reload`，对真实 `pluginkit`/`ps`/`shasum` 与该机运行中的 widget 进程（pid 972）校验通过：`verified running widget extension: pid=972 executable=/Applications/TinyBuddy.app/Contents/PlugIns/TinyBuddyWidgetExtension.appex/Contents/MacOS/TinyBuddyWidgetExtension sha256=56e74a201fd1d51ceef613f4c7a0ddab6be506900682488aa6ac42d85ec71de3`、`>>> PASS: widget-reload`、`OVERALL_STATUS=0`（该哈希正是修复前实测的真实可执行文件哈希，而旧回退分支给出的是路径文本哈希 `c672d5d3…`）。
+- `/bin/bash -n script/regression_gate.sh`：通过；`bash script/regression_gate.sh --list-stages`（rc=0）、`--help`（rc=0）、`--stage 0`（rc=2，参数校验未变）。
+- `git diff --check`：通过；`git status --short`：仅 `script/regression_gate.sh` 与 `Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`（外加本轮 `.agent/` 记录/归档）。
+- 验证级别：按 `AGENTS.md` 取 **Focused**（脚本层局部实现改动 + 同一测试类扩展，不触及共享契约、持久化、跨进程边界或 App/Widget 共享状态）；未运行 `swift test` 全量，理由见剩余风险。
+
+**剩余风险**
+- 未端到端运行 `--stage 6` / `--quick` / 全量门禁：该路径会 `pkill -x TinyBuddy`（终止本机已安装运行的 App）并构建启动 Debug App，属未授权的外部状态变更（本轮任务约束明确禁止）；本轮以注入式 harness + 一次只读真实系统调用覆盖 stage 逻辑。
+- 行为语义变化（已实证，需用户知悉）：当系统为该 bundle id 注册的 widget 扩展不是本次构建的 appex（本机当前注册的就是 `/Applications/TinyBuddy.app` 的副本）时，修复前该阶段以「已安装副本」通过，修复后会 FAIL 并明确指出运行中的 widget 不是 build under test。这是 fail closed 的正确结论，但会改变本机此前的 PASS 观感；若该场景应视为环境条件而非门禁失败，需用户决定保留 FAIL 还是改为 SKIP（本轮按 Loop 24 的 fail-closed 原则选择 FAIL）。
+- `run_widget_reload` 仍以 bundle id 的注册表（`pluginkit`）作为发现入口；若 macOS 只注册了本次构建的扩展而 `$PS_BIN -p … -o comm=` 输出与 `$APP_BUNDLE` 存在符号链接/路径差异，哈希比较不受影响（比较内容而非路径），但该路径未在真实 Debug 构建上验证。
+- 同 stage 内既有未处理项：当 widget 进程中途消失时仍走既有 `stage_fail "widget extension did not start within …s"` 超时分支（最长 `WIDGET_TIMEOUT`，默认 30s），本轮未改动该分支语义。
+- Loop 24 遗留候选仍在：`evaluate_resource_budgets` 不校验表头与字段数字性（无新证据、未发现可达的生产输入路径）。
+- Loop 25 遗留候选仍在：新启用的持续 CPU 阈值未经真实 Debug App 端到端校准（需授权运行 `--stage 5`）。
+- 未处理项（本轮观察到的其他候选，留待后续轮次并保持单一问题边界）：`GIT_COLD_WALL_TOLERANCE`、`WIDGET_START_TOLERANCE`、`APP_RUNTIME_TIMEOUT` 定义后从未被引用；`record_baseline` 写出的 `TINYBUDDY_BASELINE_GIT_COLD_*`、`TINYBUDDY_BASELINE_RESOURCE_*` 与 `resolve_baseline_value` 生成的键名（`TINYBUDDY_BASELINE_<STAGE>_<KEY>`）不匹配，且除 COLD/WARM start 外无人读取。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向：误拒优于误放行）。
