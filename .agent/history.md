@@ -8,47 +8,6 @@
 
 
 
-## Loop 14：2026-08-13：无修改轮次（未提交的“继续专注”一键恢复功能经独立审查与全量回归验证，未发现新的可验证问题）
-
-**Loop 编号**
-- Loop 14。
-
-**日期**
-- 2026-08-13
-
-**观察结果**
-- 工作区：`git status --short` 显示 8 个已修改文件 + 2 个未跟踪新文件（`Sources/TinyBuddyCore/DevelopmentInterruptionRecovery.swift`、`Tests/TinyBuddyAppTests/PetViewModelDevelopmentInterruptionResumeTests.swift`、`Tests/TinyBuddyCoreTests/DevelopmentInterruptionResumeDecisionTests.swift`）——即开发中断“继续专注”一键恢复功能（334 行改动），尚未提交；`.agent/history.md` 与 `.agent/archive/history-2026-08-13.md` 为 Loop 13 遗留的 Record/Maintain 未提交改动（归档 1 条 + 追加 Loop 13 记录），与业务改动无重叠，原样保留。
-- 最近提交：`2027e5a`（Document development interruption recovery channel）；HEAD == origin/main。
-- `rg "TODO|FIXME|HACK|XXX"`：无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）；`git diff --check` 通过。
-- 测试基线：`swift test --filter GitCommandExecutorTests|DevelopmentInterruptionResumeDecisionTests|PetViewModelDevelopmentInterruptionResumeTests`：50 个测试全绿；功能改动自上一轮全量验证（1572 测试 0 失败）以来代码未变，按“输入未变不重复昂贵门禁”复用该全量证据。
-
-**选择的问题及证据**
-- 无。本轮对未提交的“继续专注”功能（`aec839c` 开发中断恢复的后续升级）做独立静态审查，逐项核实通过：
-  - 精确匹配门控：fingerprint 大小写折叠精确匹配（与注册表 `lowercased()` 约定一致）、kind 为 git、state 为 active、stored fingerprint 非空；名称/别名不参与匹配（测试覆盖仅同名不同 fingerprint、nil fingerprint、archived/temporarilyUnavailable/removed、非 git kind、空 fingerprint 全部 blocked）。
-  - 多匹配确定性：active 优先 + 稳定 id 最小（`usableProject`），测试覆盖。
-  - 会话冲突：基于引擎当前打开会话（含自动会话，新增 `FocusSessionEngine.currentSessionStatus` 最小扩展）而非 `manualControlState`；同项目 → inProgress(active/paused)，他项目 → blocked；测试覆盖自动会话在 `manualControlState == .idle` 时仍正确判定 inProgress。
-  - 一键恢复：`resumeDevelopmentInterruption()` 调用时先重算再走既有 `startManualFocus` 链路（context = 匹配项目 id + displayName），非 `.available` 一律 no-op；测试覆盖无会话启动成功（会话 key = 注册 id）、阻断态 no-op（引擎无新会话、manualControlState 不变）。
-  - 边界与隐私：会话记录无仓库路径、defaults 无新增 key（测试覆盖）；`DevelopmentInterruptionSnapshot.swift` 与 `script/update_git_completion_count.sh` 零改动（快照 v1 格式与采集链路未变）；diff 中无新 Git 命令/脚本调用。
-  - 生命周期：重算钩子覆盖 init、快照重载、手动状态刷新（含 1s timer，纯计算开销可忽略）、`focusSessionStatsDidChange`、前台恢复、`TinyBuddy.projectRegistryDidChange` 通知；新增观察者随 deinit 移除。
-  - 既有候选（脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`）：与 Loop 8/9/12/13 同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
-- 完成标准：na（无修改轮次）。
-
-**原因分析**
-- 功能实现经 9 项静态审查点逐一核实 + 50 个窄测全绿 + 上一轮 1572 全量全绿，未发现真实可复现缺陷；唯一观察到的冗余（`DevelopmentInterruptionResumeState.matchedProject` 仅测试使用）属最小 API 表面冗余，不构成修改依据。按 loop.md 契约“无证据即无修改，不为了产生修改而修改”。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条，属契约要求的 Record/Maintain 阶段）。
-
-**验证结果**
-- `swift test --filter GitCommandExecutorTests|DevelopmentInterruptionResumeDecisionTests|PetViewModelDevelopmentInterruptionResumeTests`：50 个测试，0 失败。
-- 全量回归：复用上一轮 1572 个测试 0 失败证据（本轮代码未变）。
-- `git diff --check`：通过。
-- `git status --short` 复查：业务改动（继续专注功能）与 `.agent/` 记录改动均原样保留，无越界修改。
-
-**剩余风险**
-- 本轮为无修改轮次，无新增风险。“继续专注”功能尚未提交；用户已授权后续签名安装运行与提交推送，端到端运行行为由安装运行验证（Loop 12/13 同述的待办）。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。
-- Loop 11 记录的次优先检查点仍无新失败证据：`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口，留待出现实际失败时处理。
 ## Loop 15：2026-08-13：修复 idleDetected 长缺席结束路径残留陈旧 pendingSwitch（切换边界误用）
 
 **Loop 编号**
@@ -399,3 +358,51 @@
 - `script/regression_gate.sh` 仍以 `"$PROBE_BINARY" "$app_pid" 2>/dev/null || echo "0,0,0,0"` 静默吞掉探针失败并回退到全零样本，使资源预算在探针失效时产生空洞通过（本轮已验证的新证据，留待下一轮按单一问题处理）。
 - 本轮未运行 `./script/verify_resource_stability.sh` 完整 600 秒流程与 `./script/regression_gate.sh`（需构建并长时间采样本地 App），故修复只在单测与单次真实进程采样层面验证；采样与预算评估逻辑未改动。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch` 死代码可留作纯清理候选。
+
+## Loop 24：2026-09-22：修复回归门禁资源阶段在探针失败时伪造全零采样（空洞通过）
+
+**Loop 编号**
+- Loop 24。
+
+**日期**
+- 2026-09-22。
+
+**观察结果**
+- 工作区：`git status --short` 无输出，干净；HEAD == `cbf42ef`（Scope repository-change refresh to affected repositories），与 `origin/main` 一致；自 Loop 23 以来无新提交（Loop 23 的探针修复已随 `f34eeaa` 落地）。
+- 读取 `.agent/loop.md`、`.agent/rules.md`、`.agent/memory.md`、`.agent/history.md`（10 条：Loop 14–23）与 `.agent/archive/`。Loop 23 在「剩余风险」留下两条未处理项：(a) `script/regression_gate.sh` 用 `"$PROBE_BINARY" "$app_pid" 2>/dev/null || echo "0,0,0,0"` 吞掉资源探针失败并回退全零样本；(b) 完整 600 秒 `verify_resource_stability.sh` 与 `regression_gate.sh` 尚未真实运行。
+- `rg "TODO|FIXME|HACK|XXX" script Tests Sources Widget`：仅 `mktemp` 模板命中，无真实待办；`git diff --check` 通过。
+- 环境：Swift 6.4 / Xcode 27（arm64）；当前运行中的 TinyBuddy 来自 `/Applications/TinyBuddy.app`（pid 1322），本工作树 `.build/xcode` 不存在。
+- 候选核对：`script/regression_gate.sh:run_resource_monitor` 有两处探针采样（warm 基线、监控循环），均在探针失败时注入 `0,0,0,0`；`evaluate_resource_budgets` 只用 `$8+0`… 计算 delta 与每分钟唤醒率，全零样本必然得到 `diskDelta=0`、`interrupt/idle wakeups=0/min` → `PASS`。姊妹脚本 `verify_resource_stability.sh` 的 `probe_process`/`record_sample` 在探针失败时直接中止，两者行为不一致。候选 (b) 属验证债务而非缺陷，按契约不单独处理（保留在本轮剩余风险）。
+
+**选择的问题及证据**
+- 选择「`script/regression_gate.sh` 的资源阶段在 Darwin rusage 探针失败时伪造全零采样，使 disk-read 与 interrupt/idle wakeup 预算空洞通过」这一问题（Loop 优先级第 2 位稳定性风险 + 第 5 位错误处理问题；同时是本仓库规则明确禁止的「隐藏错误、吞掉失败」）。
+- 复现条件（确定性，不需要真实 App）：用 `sed -n '1,/^# Entry point$/p'` 取出未修改的 stage 代码到临时文件，桩化 `PS_BIN`（`comm=` 打印 `fake-app-binary`，其余打印 `1000 0.0`）、`PROBE_BINARY`（stderr 打印模拟 rusage 失败并 `exit 1`），用自建 `/bin/sleep 60` 进程 + `APP_NAME=sleep` 满足 `pgrep -x`，`RESOURCE_DURATION=1`，然后调用 `run_resource_monitor`。
+  - 修复前（HEAD 的 stage 代码）：`>>> PASS: resource-monitor`、`OVERALL_STATUS=0`；采样 CSV 为 `10,1000,0.0,0,1,warm,0,0,0,0` 与 `20,1000,0.0,0,1,sample,0,0,0,0` —— 探针完全失败仍 PASS。
+  - 修复后（source 真实脚本的同一 harness）：`>>> FAIL: resource-monitor — resource probe unavailable for PID ...`、`OVERALL_STATUS=1`、CSV 仅剩表头（无任何伪造样本行）。
+- 影响范围：`script/regression_gate.sh` 的 `--stage 5`、`--quick` 与默认全量运行的 resource-monitor 阶段。探针一旦失效（Loop 23 已实证 `proc_pid_rusage` 崩溃过），磁盘读与系统唤醒预算成为空洞通过，能量/资源回归不会被门禁发现。
+- 完成标准：探针失败或输出格式不合法时该阶段必须 fail closed（不写任何伪造的全零采样）；新增测试在修复前失败、修复后通过。
+
+**原因分析**
+- `run_resource_monitor` 用 `... 2>/dev/null || echo "0,0,0,0"` 同时丢弃了探针 stderr 与其失败状态，把「无法测量」伪装成「测量值为 0」；`evaluate_resource_budgets` 只把字段做数值化（`$8 + 0`），因此全零样本必然满足 disk-read 上限（`0 <= 67108864`）与 wakeup 上限（`0/min <= 600`），形成空洞通过。该脚本此前没有任何自动化测试，两处采样点重复且无输出校验。
+- 正确的失败语义在姊妹脚本中已经存在（`verify_resource_stability.sh:probe_process` 校验 4 个非负整数字段并在失败时中止），本仓库规则也要求保留失败的可见性；缺的是把该语义落到回归门禁上。
+
+**修改内容**
+- `script/regression_gate.sh`：
+  - 新增 `probe_counters()`：调用探针并对输出用 `awk` 校验「恰好 4 个非负整数字段」，失败时向 stderr 打印 `resource probe failed for PID ...`（含探针自身诊断）或 `resource probe returned malformed counters for PID ...` 并返回 1（与 `verify_resource_stability.sh:probe_process` 同语义）。
+  - `run_resource_monitor` 的 warm 基线与监控采样两处改为 `if ! probe_raw="$(probe_counters "$app_pid")"; then stage_fail "resource probe unavailable for PID $app_pid; disk read and wakeup budgets cannot be evaluated"; return "$STAGE_FAIL"; fi`，删除 `|| echo "0,0,0,0"` 兜底。
+  - 入口处新增 sourced 守卫 `if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi`，使测试能直接 source 脚本调用 stage helper（执行脚本时 CLI 行为完全不变）。
+- `Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`（新增，6 个测试）：source 脚本不触发 CLI；`probe_counters` 接受合法计数、拒绝探针失败、拒绝字段缺失/非数字；resource-monitor 在探针失败时 fail closed（桩化 ps/probe + 自建 stand-in 进程，断言 FAIL、`OVERALL_STATUS=1`、采样文件仅剩表头）；脚本不再包含 `"0,0,0,0"` 兜底。
+
+**验证结果**
+- `./script/swiftpm.sh test --filter RegressionGateScriptTests`：6 个测试，0 失败。
+- `./script/swiftpm.sh test --filter 'RegressionGateScriptTests|ResourceStabilityScriptTests'`：19 个测试，0 失败（含姊妹脚本 13 个既有测试，确认 `process_resource_probe.swift` 与预算契约未变）。
+- `/bin/bash -n script/regression_gate.sh`：通过；`bash script/regression_gate.sh --list-stages`、`--help`、`--stage 0`（exit 2）确认执行路径与参数校验未变。
+- 修复前后 harness 证据见上（同一 harness，`PASS` → `FAIL`）；`git show HEAD:script/regression_gate.sh | grep -n '0,0,0,0'` 为 2 处，修复后 `grep` 无匹配。
+- `git diff --check`：通过；`git status --short`：仅 `script/regression_gate.sh`（修改）与 `Tests/TinyBuddyAppTests/RegressionGateScriptTests.swift`（新增）。
+- 验证级别：按 `AGENTS.md` 取 **Focused**。本改动是脚本层局部实现改动，不触及共享契约、持久化、跨进程边界或 App/Widget 共享状态，故运行直接受影响的测试类、脚本语法检查与最小真实路径检查；未运行 `swift test` 全量（生产 Swift 代码与既有测试断言未变，Loop 23 在 `f34eeaa`/`cbf42ef` 基线有 1625 测试 0 失败的证据，新增测试类已在窄测中编译并全绿）。
+
+**剩余风险**
+- 未真实运行 `./script/regression_gate.sh --stage 5` / `--quick`：该路径会 `teardown_app`（`pkill -x TinyBuddy`）并启动 Debug 构建，而本机运行中的 TinyBuddy 来自 `/Applications/TinyBuddy.app`（pid 1322）；为避免终止用户已安装运行的 App 并引入无授权的外部状态变更，本轮用桩化 harness 覆盖 stage 逻辑，未做端到端门禁运行（Loop 23 的 (b) 仍未闭环）。
+- 同一函数内的第二个空洞通过点（本轮不作为单一问题）：`evaluate_resource_budgets` 接收 `-v cpuCap`/`-v cpuSamples`，但其 AWK 从不使用这两个变量，`TINYBUDDY_GATE_SUSTAINED_CPU_PERCENT`（默认 15）实际上从未参与判定（证据：`grep -n "cpuCap\|cpuSamples" script/regression_gate.sh` 仅命中定义与 `-v` 传参处）；持续 CPU 预算留待后续轮次。
+- `evaluate_resource_budgets` 本身仍不校验表头与字段数字性（本轮由 `probe_counters` 在上游拦截非法输出），若未来出现绕过采样入口的输入，仍需补强。
+- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向，误拒优于误放行）。

@@ -410,6 +410,25 @@ run_app_cold_start() {
 # ---------------------------------------------------------------------------
 # Stage 5: Resource stability (short monitoring window)
 # ---------------------------------------------------------------------------
+# Sample one process with the Darwin rusage probe.  A probe that fails or
+# returns anything other than four non-negative counters is a hard error: the
+# disk-read and wakeup budgets must never be evaluated from fabricated zeros.
+probe_counters() {
+  local pid="$1" raw
+  if ! raw="$("$PROBE_BINARY" "$pid" 2>&1)"; then
+    echo "resource probe failed for PID $pid: $raw" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$raw" | /usr/bin/awk -F, '
+    NF != 4 { exit 1 }
+    { for (fieldNumber = 1; fieldNumber <= 4; fieldNumber++) if ($fieldNumber !~ /^[0-9]+$/) exit 1 }
+  '; then
+    echo "resource probe returned malformed counters for PID $pid: $raw" >&2
+    return 1
+  fi
+  printf '%s\n' "$raw"
+}
+
 run_resource_monitor() {
   stage_start "resource-monitor"
 
@@ -460,7 +479,10 @@ run_resource_monitor() {
   raw="$("$PS_BIN" -p "$app_pid" -o rss= -o %cpu= 2>/dev/null || true)"
   read -r rss cpu <<< "$(printf '%s\n' "$raw" | /usr/bin/awk '{ print $1, $2 }')"
   threads="$("$PS_BIN" -M -p "$app_pid" -o pid= 2>/dev/null | /usr/bin/awk 'NR > 1 && NF { count++ } END { print count + 0 }')"
-  probe_raw="$("$PROBE_BINARY" "$app_pid" 2>/dev/null || echo "0,0,0,0")"
+  if ! probe_raw="$(probe_counters "$app_pid")"; then
+    stage_fail "resource probe unavailable for PID $app_pid; disk read and wakeup budgets cannot be evaluated"
+    return "$STAGE_FAIL"
+  fi
   IFS=, read -r cpu_time_ns disk_read_bytes interrupt_wakeups idle_wakeups <<< "$probe_raw"
   printf '%d,%s,%s,%s,1,warm,%s,%s,%s,%s\n' \
     "$elapsed" "${rss:-0}" "${cpu:-0}" "${threads:-0}" \
@@ -478,7 +500,10 @@ run_resource_monitor() {
     raw="$("$PS_BIN" -p "$app_pid" -o rss= -o %cpu= 2>/dev/null || { echo "0 0"; })"
     read -r rss cpu <<< "$(printf '%s\n' "$raw" | /usr/bin/awk '{ print $1, $2 }')"
     threads="$("$PS_BIN" -M -p "$app_pid" -o pid= 2>/dev/null | /usr/bin/awk 'NR > 1 && NF { count++ } END { print count + 0 }')"
-    probe_raw="$("$PROBE_BINARY" "$app_pid" 2>/dev/null || echo "0,0,0,0")"
+    if ! probe_raw="$(probe_counters "$app_pid")"; then
+      stage_fail "resource probe unavailable for PID $app_pid; disk read and wakeup budgets cannot be evaluated"
+      return "$STAGE_FAIL"
+    fi
     IFS=, read -r cpu_time_ns disk_read_bytes interrupt_wakeups idle_wakeups <<< "$probe_raw"
 
     if [ -z "${rss:-}" ] || [ "$rss" = "0" ] && [ "$sample_count" -gt 0 ]; then
@@ -901,6 +926,12 @@ run_single_stage() {
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+# Let tests source this file to exercise the stage helpers directly instead of
+# copying them; executing the file still runs the CLI below.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 cd "$ROOT_DIR"
 
 case "${1:-}" in
