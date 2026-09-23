@@ -5,50 +5,6 @@
 - 本文件始终保留最近约 10 条轮次记录。
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
-## Loop 17：2026-08-15：无修改轮次（在途“焦点识别解释”功能经独立审查、全量回归与本机签名安装运行验证通过）
-
-**Loop 编号**
-- Loop 17。
-
-**日期**
-- 2026-08-15
-
-**观察结果**
-- 工作区：`git status --short` 显示 4 个已修改文件 + 3 个未跟踪新文件——即“焦点识别解释”功能（未提交）：`Sources/TinyBuddyCore/FocusRecognitionExplanation.swift`（新增 166 行，纯展示解释器）、`Sources/TinyBuddyCore/FocusSessionEngine.swift`（+84：只读 accessors `confirmationGateSnapshot`/`confirmationCandidateProject`/`pendingSwitchCandidateProject`/`currentSessionMode`/`confirmationMinimumActiveDuration`/`mostRecentDecisionExplanation` + `confirmationCandidate` 展示态）、`Sources/TinyBuddy/PetViewModel.swift`（+32：`refreshFocusRecognitionExplanation` 纯读桥接）、`Sources/TinyBuddy/PetView.swift`（+112：FOCUS CONTROL 面板 info 按钮 + popover 展示）、`Tests/TinyBuddyCoreTests/FocusRecognitionExplanationTests.swift`（392 行，含两个测试类）、`Tests/TinyBuddyAppTests/PetViewModelFocusRecognitionTests.swift`（178 行）、`TinyBuddy.xcodeproj/project.pbxproj`（+4，新源文件注册）。用户/前一轮在途修改，本轮未覆盖或回滚。
-- 最近提交：`167ce07`（Loop 16 记录）、`37e134b`（心跳喂确认门）；HEAD == origin/main。
-- 依赖类型核实：`FocusSessionConfirmationGate`（`FocusSessionConfirmationGate.swift:20`）与 `FocusSessionDecisionExplanation`（`FocusSessionEvidence.swift:88`）均已在 HEAD 存在。
-- `rg "TODO|FIXME|HACK|XXX"`：无真实待办（仅 `script/` 下 `mktemp` 模板 `XXXXXX`）；`git diff --check` 通过。
-- 签名身份：本机唯一 Apple Development 身份（`C6B16796...`）。
-
-**选择的问题及证据**
-- 无。对在途“焦点识别解释”功能做独立静态审查，逐项核实通过：
-  - 职责边界：`FocusRecognitionExplainer` 纯函数分类引擎已持有状态（gate 快照、会话、pendingSwitch、决策证据），不重算确认门决策；注释明确“gate 保持唯一权威”，无决策逻辑复制。
-  - 引擎 accessor：全部在锁内读、值类型拷贝、只读；`mostRecentDecisionExplanation` 的“最新”比较（at 时间戳 → 会话序 → 事件序三级 tie-break）与事件流顺序一致（生命周期决策回填到会话边界，同时间戳按事件序裁决），遍历仅内存会话事件且按需调用，非高频路径。
-  - `confirmationCandidate` 展示态：每次 gate 喂入（`recordConfirmation` 入口，含 `differentProjectActivity` 内部路径）先赋值再喂门，与 `gate.trackedProjectKey` 一致；gate `reset()` 后 `isTracking=false`，explainer 走 `notEntered` 分支不读候选，陈旧值不可达；注释明示“ignored whenever the gate is not tracking”，属文档化约定而非缺陷。
-  - ViewModel 桥接：`refreshFocusRecognitionExplanation` 纯读（引擎 nil 时清空发布值，引擎存在时构造 Context 调 explainer，值相等不重复发布）；App 测试 `testOnDemandRefreshIsPureRead` 覆盖零变异。
-  - UI：popover 按需打开时刷新，展示 title/detail/最近判断（脱敏解释原文复用），无新持久化、无新 Git 读取、无仓库路径泄漏。
-  - pbxproj：xcodegen 重生成后 diff 仅 +4 行（新文件注册），无无关 churn。
-- 既有候选（脚本 focus_block dead code、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`、脚本超时墙钟断言环境敏感）：与 Loop 8/9/12/13/16 同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
-- 完成标准：na（无修改轮次）。
-
-**原因分析**
-- 功能实现经 6 项静态审查点逐一核实 + 15 个窄测全绿 + 全量回归无新失败 + 本机签名安装运行验证通过，未发现真实可复现缺陷。按 loop.md 契约“无证据即无修改，不为了产生修改而修改”。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条 Loop 7 至 `.agent/archive/history-2026-08-15.md`，属契约要求的 Record/Maintain 阶段）。
-
-**验证结果**
-- `swift test --filter 'FocusRecognition|PetViewModelFocusRecognition'`：15 个测试（核心 11 + App 4），0 失败。
-- `swift test` 全量：1613 个测试（+15），仅 2 个**预先存在的环境性失败**：`GitActivityRefreshScriptTests` 脚本超时墙钟断言（`testScriptTimesOutSlowRepositoryMetadataAndRetainsItsLastValidResult` 7.49s > 4.0s、`testScriptTimesOutSlowRepositoryParsingAndRetainsItsLastValidResult` 7.26s > 4.0s）——Loop 16 已用原始树复现归因（脚本/测试自 `aec839c` 未变，本机负载环境条件），与本次纯展示层改动零交集。
-- `script/tb-install.sh`（用户授权本机签名安装）：工程过期自动 `xcodegen generate` → Debug 构建成功 → Apple Development 签名（Widget + App + 嵌套）验证通过 → 安装 `/Applications/TinyBuddy.app` → 启动成功。
-- 安装运行验证：运行中 App（PID 49668）executable 路径来自已安装 bundle；`codesign --verify --deep --strict` 通过；安装 bundle 与构建产物 MD5 一致（`61fb8001766a181eae89878817405154`）。
-- `git diff --check`：通过；`git status --short` 复查：本轮改动仅 `.agent/` 记录/归档；在途功能改动原样保留，无越界修改。
-
-**剩余风险**
-- 全量门禁仍受本机环境负载影响：脚本超时墙钟测试在本机重负载下失败（预先存在，Loop 16 同述）；负载回落或换机后应复跑 `swift test` 确认全绿。
-- 在途“焦点识别解释”功能尚未提交；用户已授权提交推送，随本轮一并处理。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch` 死代码可留作纯清理候选；`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口仍无新失败证据。
-
 ## Loop 18：2026-08-16：无修改轮次（自 Loop 17 以来业务代码零变化，未发现新的可验证问题）
 
 **Loop 编号**
@@ -440,3 +396,35 @@
 - Loop 25 遗留候选仍在：新启用的持续 CPU 阈值未经真实 Debug App 端到端校准（需授权运行 `--stage 5`）。
 - 未处理项（本轮观察到的其他候选，留待后续轮次并保持单一问题边界）：`GIT_COLD_WALL_TOLERANCE`、`WIDGET_START_TOLERANCE`、`APP_RUNTIME_TIMEOUT` 定义后从未被引用；`record_baseline` 写出的 `TINYBUDDY_BASELINE_GIT_COLD_*`、`TINYBUDDY_BASELINE_RESOURCE_*` 与 `resolve_baseline_value` 生成的键名（`TINYBUDDY_BASELINE_<STAGE>_<KEY>`）不匹配，且除 COLD/WARM start 外无人读取。
 - 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`（保守方向：误拒优于误放行）。
+
+## Loop 27：2026-09-23：无修改轮次（未发现新的可验证剩余风险）
+
+**Loop 编号**
+- Loop 27。
+
+**日期**
+- 2026-09-23。
+
+**观察结果**
+- 起始工作区干净；当前分支 `hp/tinybuddy/t-0010-evidence-driven-maintenance-loop`，HEAD `d5e9dbb`，与 `origin/main` 一致。最近提交为 Loop 26 的 stage 6 widget 可执行文件哈希校验修复。
+- 阅读近期 history 和 archive 去重。静态搜索 `rg -n "TODO|FIXME|HACK|XXX" Sources Tests Widget script` 只命中 `mktemp` 模板，无真实待办；`git diff --check` 起始状态干净。
+- 复核 Loop 26 遗留的 baseline 记录疑点：`record_baseline` 对 Git/resource 记录了变量，但 `resolve_baseline_value` 只在 app cold/warm 两处被调用；未找到该差异导致当前门禁错误判定的复现或新失败证据。Loop 26 另记的端到端运行限制仍不适合在本轮触碰（会结束运行中的 App）。
+
+**选择的问题及证据**
+- 无。Loop 26 修复已在当前 HEAD；其余已知候选是历史观察而非本轮出现的新复现/失败/指标。依据 loop.md 的证据门槛，本轮不把静态疑点扩大为产品修改。
+- 完成标准：工作区仅包含本轮 history 记录及按规则进行的最旧记录归档，无业务文件改动；diff 检查通过。
+
+**原因分析**
+- 观察范围内未发现新的证据确立一个比既有候选更值得处理且能安全验证的风险。对历史遗留疑点不重复制造任务，也不执行会结束已安装 App 的端到端门禁。
+
+**修改内容**
+- 无业务修改。`.agent/history.md` 追加本条，并依 Maintain 规则将 Loop 17 原样移至 `.agent/archive/history-2026-09-23.md`。
+
+**验证结果**
+- `git status --short --branch`、`git show --format=fuller --no-patch HEAD`：确认分支/提交状态。
+- `rg -n "TODO|FIXME|HACK|XXX" Sources Tests Widget script`：仅模板命中。
+- `rg` 核查 `record_baseline`/`resolve_baseline_value` 的调用关系及现有 baseline 测试搜索：未发现该历史疑点的现行失败用例；未运行 Swift 测试（本轮无业务代码更改）。
+- 验证级别：文档/维护记录级；按契约仅需内容、范围和 diff 验证。
+
+**剩余风险**
+- Loop 26 记录的 baseline 度量键未被当前 resolver 消费，仍是待进一步确定预期契约的维护候选；本轮没有运行端到端 regression gate。未改动或掩盖该风险。
