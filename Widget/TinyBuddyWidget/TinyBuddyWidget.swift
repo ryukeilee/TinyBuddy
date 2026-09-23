@@ -422,8 +422,8 @@ struct TinyBuddyWidgetView: View {
     }
 
     private var focusWeekSummary: String? {
-        guard let week = entry.focusHistoryPublication?.snapshot.currentWeek,
-              let duration = week.focusDuration else {
+        guard let publication = entry.focusHistoryPublication,
+              let duration = publication.currentWeekDuration(at: entry.date) else {
             return nil
         }
         let minutes = Int(duration / 60)

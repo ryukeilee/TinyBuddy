@@ -9,6 +9,7 @@ final class TinyBuddyWidgetTimelinePolicyTests: XCTestCase {
     // MARK: - Live focus self-scheduling
 
     func testActiveFocusSessionSchedulesBoundedLiveRefresh() {
+        XCTAssertEqual(TinyBuddyWidgetTimelinePolicy.liveFocusRefreshInterval, 120)
         let date = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
             state: .focusing,
             isFocusSessionActive: true,
@@ -16,7 +17,7 @@ final class TinyBuddyWidgetTimelinePolicyTests: XCTestCase {
             now: now,
             dayBoundary: dayBoundary
         )
-        XCTAssertEqual(date, now.addingTimeInterval(TinyBuddyWidgetTimelinePolicy.liveFocusRefreshInterval))
+        XCTAssertEqual(date, now.addingTimeInterval(120))
     }
 
     func testPausedLiveSessionStillSchedulesRefresh() {

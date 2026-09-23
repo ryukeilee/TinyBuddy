@@ -42,7 +42,7 @@ struct PetView: View {
         viewModel.displayPresentation
     }
 
-    private var focusWeekSummary: String? {
+    private func focusWeekSummary(at now: Date) -> String? {
         guard let history = viewModel.focusHistoryPublication else { return nil }
         switch history.snapshot.state {
         case .unknown:
@@ -50,7 +50,7 @@ struct PetView: View {
         case .noHistory:
             return "本周暂无专注历史"
         case .available, .partial:
-            guard let seconds = history.snapshot.currentWeek.focusDuration else {
+            guard let seconds = history.currentWeekDuration(at: now) else {
                 return "本周专注历史未知"
             }
             let minutes = Int(seconds / 60)
@@ -65,20 +65,20 @@ struct PetView: View {
         viewModel.focusHistoryPublication?.snapshot.recentDays.last
     }
 
-    private var focusMetricDuration: TimeInterval? {
-        viewModel.focusHistoryPublication?.currentDayDuration(at: Date())
+    private func focusMetricDuration(at now: Date) -> TimeInterval? {
+        viewModel.focusHistoryPublication?.currentDayDuration(at: now)
     }
 
-    private var focusMetricText: String {
-        FocusHistoryDurationFormatter.text(for: focusMetricDuration)
+    private func focusMetricText(at now: Date) -> String {
+        FocusHistoryDurationFormatter.text(for: focusMetricDuration(at: now))
     }
 
-    private var focusMetricNumericValue: Int {
-        max(0, Int((focusMetricDuration ?? 0) / 60))
+    private func focusMetricNumericValue(at now: Date) -> Int {
+        max(0, Int((focusMetricDuration(at: now) ?? 0) / 60))
     }
 
-    private var focusMetricIsKnown: Bool {
-        focusMetricDuration != nil
+    private func focusMetricIsKnown(at now: Date) -> Bool {
+        focusMetricDuration(at: now) != nil
     }
 
     private var increasedContrast: Bool {
@@ -135,10 +135,13 @@ struct PetView: View {
 
                 header
                     .focusable(false)
-                heroPanel
+                if viewModel.focusHistoryPublication?.isFocusSessionActive == true {
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        focusPanels(at: context.date)
+                    }
                     .focusable(false)
-                if displayLayout.showsMetrics {
-                    metricsPanel
+                } else {
+                    focusPanels(at: Date())
                         .focusable(false)
                 }
                 displayStatePanel
@@ -241,7 +244,7 @@ struct PetView: View {
         }
     }
 
-    private var heroPanel: some View {
+    private func heroPanel(at now: Date) -> some View {
         HStack(alignment: .center, spacing: 12) {
             if displayLayout.showsExpression {
                 TinyBuddyArcReactorCore(showsLabel: false)
@@ -279,7 +282,7 @@ struct PetView: View {
                         .truncationMode(.middle)
                 }
 
-                if let focusWeekSummary {
+                if let focusWeekSummary = focusWeekSummary(at: now) {
                     Text(focusWeekSummary)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(secondaryText)
@@ -294,7 +297,7 @@ struct PetView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(heroAccessibilityLabel)
+            .accessibilityLabel(heroAccessibilityLabel(at: now))
         }
         .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
         .padding(10)
@@ -304,14 +307,14 @@ struct PetView: View {
         .animation(semanticAnimation, value: presentation.transitionIdentity)
     }
 
-    private var heroAccessibilityLabel: String {
+    private func heroAccessibilityLabel(at now: Date) -> String {
         var parts = ["状态：\(presentation.statusTitle)"]
         if let projectName = presentation.recentProjectName {
             parts.append("最近项目：\(projectName)")
         }
-        if focusMetricIsKnown {
-            parts.append("专注：\(focusMetricText)")
-        } else if !focusMetricIsKnown {
+        if focusMetricIsKnown(at: now) {
+            parts.append("专注：\(focusMetricText(at: now))")
+        } else {
             parts.append("今日专注未知")
         }
         if presentation.completionCount > 0 {
@@ -321,12 +324,22 @@ struct PetView: View {
     }
 
     @ViewBuilder
-    private var metricsPanel: some View {
+    private func focusPanels(at now: Date) -> some View {
+        heroPanel(at: now)
+            .focusable(false)
+        if displayLayout.showsMetrics {
+            metricsPanel(at: now)
+                .focusable(false)
+        }
+    }
+
+    @ViewBuilder
+    private func metricsPanel(at now: Date) -> some View {
         let metrics = Group {
             CounterView(
                 title: "今日专注",
-                value: focusMetricText,
-                numericValue: focusMetricNumericValue,
+                value: focusMetricText(at: now),
+                numericValue: focusMetricNumericValue(at: now),
                 accent: HUDTheme.energyBlueWhite,
                 primaryText: primaryText,
                 secondaryText: secondaryText,
@@ -336,7 +349,7 @@ struct PetView: View {
                     increasedContrast: increasedContrast
                 ),
                 animation: semanticAnimation,
-                isUnknown: !focusMetricIsKnown
+                isUnknown: !focusMetricIsKnown(at: now)
             )
             CounterView(
                 title: "今日完成",

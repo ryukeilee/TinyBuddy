@@ -232,8 +232,24 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
 
     public func currentDayDuration(at now: Date) -> TimeInterval? {
         guard let day = snapshot.recentDays.last, let stored = day.focusDuration else { return nil }
-        guard let anchor = liveDurationAnchor, anchor.dayIdentifier == day.dayIdentifier else { return stored }
-        return anchor.duration(at: now)
+        guard let anchor = liveDurationAnchor,
+              anchor.isRunning,
+              anchor.dayIdentifier == day.dayIdentifier else {
+            return stored
+        }
+        return stored + max(0, anchor.duration(at: now) - anchor.accumulatedDuration)
+    }
+
+    /// Projects the live session's elapsed time into the weekly summary without
+    /// advancing or rewriting the revision-bound snapshot.
+    public func currentWeekDuration(at now: Date) -> TimeInterval? {
+        guard let stored = snapshot.currentWeek.focusDuration else { return nil }
+        guard let anchor = liveDurationAnchor,
+              anchor.isRunning,
+              anchor.dayIdentifier == snapshot.recentDays.last?.dayIdentifier else {
+            return stored
+        }
+        return stored + max(0, anchor.duration(at: now) - anchor.accumulatedDuration)
     }
 
     public init(

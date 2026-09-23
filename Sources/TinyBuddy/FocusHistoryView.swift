@@ -25,7 +25,13 @@ struct FocusHistoryView: View {
     var body: some View {
         Group {
             if let publication {
-                history(publication.snapshot)
+                if publication.isFocusSessionActive {
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        history(publication, at: context.date)
+                    }
+                } else {
+                    history(publication, at: Date())
+                }
             } else {
                 ContentUnavailableView(
                     "专注历史尚未就绪",
@@ -51,7 +57,8 @@ struct FocusHistoryView: View {
     }
 
     @ViewBuilder
-    private func history(_ snapshot: FocusHistorySnapshot) -> some View {
+    private func history(_ publication: FocusHistoryPublication, at now: Date) -> some View {
+        let snapshot = publication.snapshot
         switch snapshot.state {
         case .noHistory:
             VStack {
@@ -79,7 +86,7 @@ struct FocusHistoryView: View {
 
                 Section("最近七天") {
                     ForEach(snapshot.recentDays, id: \.dayIdentifier) { day in
-                        recentDayRow(day)
+                        recentDayRow(day, publication: publication, at: now)
                     }
                 }
 
@@ -87,7 +94,11 @@ struct FocusHistoryView: View {
                     Text("目标进度按当前每日目标设置计算；修改目标不会改写已确认会话。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    weekSummary(snapshot.currentWeek, streak: snapshot.currentGoalStreakDays)
+                    weekSummary(
+                        snapshot.currentWeek,
+                        liveDuration: publication.currentWeekDuration(at: now),
+                        streak: snapshot.currentGoalStreakDays
+                    )
                 }
 
                 Section("主要项目") {
@@ -127,7 +138,11 @@ struct FocusHistoryView: View {
     }
 
     @ViewBuilder
-    private func recentDayRow(_ day: FocusHistoryDay) -> some View {
+    private func recentDayRow(
+        _ day: FocusHistoryDay,
+        publication: FocusHistoryPublication,
+        at now: Date
+    ) -> some View {
         HStack {
             Text(day.dayIdentifier)
                 .frame(minWidth: 90, alignment: .leading)
@@ -141,7 +156,10 @@ struct FocusHistoryView: View {
                     .foregroundStyle(.secondary)
             case .sessions:
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(duration(day.focusDuration)) · \(count(day.completedSessionCount)) 个会话")
+                    let dayDuration = publication.liveDurationAnchor?.dayIdentifier == day.dayIdentifier
+                        ? publication.currentDayDuration(at: now)
+                        : day.focusDuration
+                    Text("\(duration(dayDuration)) · \(count(day.completedSessionCount)) 个会话")
                     goalText(rate: day.goalCompletionRate, goalMinutes: day.goalMinutes)
                     if let ids = day.contributingSessionIDs {
                         Text("依据 \(ids.count) 条权威会话记录")
@@ -159,9 +177,13 @@ struct FocusHistoryView: View {
     }
 
     @ViewBuilder
-    private func weekSummary(_ week: FocusHistoryWeek, streak: Int?) -> some View {
+    private func weekSummary(
+        _ week: FocusHistoryWeek,
+        liveDuration: TimeInterval?,
+        streak: Int?
+    ) -> some View {
         LabeledContent("周区间", value: "\(week.startDayIdentifier) – \(week.endDayIdentifier)")
-        LabeledContent("总专注", value: duration(week.focusDuration))
+        LabeledContent("总专注", value: duration(liveDuration))
         LabeledContent("完成会话", value: count(week.completedSessionCount))
 
         if let rate = week.goalCompletionRate {

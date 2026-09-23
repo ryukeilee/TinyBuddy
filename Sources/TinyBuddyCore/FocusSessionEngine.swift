@@ -89,6 +89,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// persistence read it directly) without requesting a WidgetKit reload —
     /// the Widget self-schedules its own refresh while a session is live.
     public var liveMinuteRepublishHandler: (@Sendable (FocusHistoryPublication) -> Void)?
+#if DEBUG
+    /// Test instrumentation for measuring whether a sustained heartbeat enters
+    /// the session mutation/validation path. Not present in release builds.
+    var sustainedActivityApplyObserver: (@Sendable () -> Void)?
+#endif
 
     private struct PendingSwitch: Equatable {
         let fromSessionId: UUID
@@ -256,25 +261,40 @@ public final class FocusSessionEngine: @unchecked Sendable {
     @discardableResult
     public func reportSustainedActivity(in project: FocusProjectContext?, at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
-        return apply { sessions in
+        lock.lock()
+        guard let project else {
+            lock.unlock()
+            return .noChange
+        }
+        if let current = sessions.first(where: \.isOpen),
+           current.mode == .manual || current.project == project {
+            lock.unlock()
+            return .noChange
+        }
+#if DEBUG
+        sustainedActivityApplyObserver?()
+#endif
+        let result = applyLocked { sessions in
             guard !sessions.contains(where: { $0.isOpen && $0.mode == .manual }) else { return }
-            guard let p = project else { return }
             guard let idx = sessions.firstIndex(where: \.isOpen) else {
-                if recordConfirmation(project: p, at: when) {
-                    startSession(in: p, at: when, reason: .userActivity, into: &sessions)
+                if recordConfirmation(project: project, at: when) {
+                    startSession(in: project, at: when, reason: .userActivity, into: &sessions)
                 }
                 return
             }
-            let cur = sessions[idx]
-            guard cur.project != p else { return }
+            let current = sessions[idx]
+            guard current.project != project else { return }
             differentProjectActivity(
                 idx: idx,
                 sessions: &sessions,
-                candidate: p,
+                candidate: project,
                 when: when,
                 reason: .userActivity
             )
         }
+        lock.unlock()
+        publish(result)
+        return result.outcome
     }
 
     /// The foreground app changed.  This only sets up a pending switch; a real
@@ -1343,7 +1363,8 @@ private extension FocusSessionEngine {
             activeProjectKeys: historyActiveProjectKeysProvider(sessions),
             defaultDailyGoalMinutes: goalMinutes
         )
-        guard let snapshot = try? historyCache.snapshot(for: query, now: clock.now) else {
+        let now = clock.now
+        guard let snapshot = try? historyCache.snapshot(for: query, now: now) else {
             return nil
         }
         let liveSession = sessions.first { $0.isOpen && $0.dayIdentifier == currentDay }
@@ -1355,8 +1376,8 @@ private extension FocusSessionEngine {
             liveDurationAnchor: liveSession.map {
                 FocusHistoryLiveDurationAnchor(
                     dayIdentifier: currentDay,
-                    accumulatedDuration: $0.activeDuration(now: clock.now),
-                    capturedAt: clock.now,
+                    accumulatedDuration: $0.activeDuration(now: now),
+                    capturedAt: now,
                     isRunning: $0.status == .active
                 )
             }

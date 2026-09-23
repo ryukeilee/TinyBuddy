@@ -15,6 +15,9 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertTrue(app.contains("engine.republishFocusHistory()"))
 
         XCTAssertTrue(report.contains("let publicationProvider: () -> FocusHistoryPublication?"))
+        XCTAssertTrue(report.contains("TimelineView(.periodic(from: .now, by: 60))"))
+        XCTAssertTrue(report.contains("currentDayDuration(at: now)"))
+        XCTAssertTrue(report.contains("currentWeekDuration(at: now)"))
         XCTAssertFalse(report.contains("allSessions"))
         XCTAssertFalse(report.contains("FocusHistoryAggregationCache"))
 
@@ -30,7 +33,7 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
 
         XCTAssertTrue(report.contains("publication = publicationProvider()"))
         XCTAssertFalse(report.contains("} { _ in\n            refreshHistory()"))
-        XCTAssertTrue(hud.contains("FocusHistoryDurationFormatter.text(for: focusMetricDuration)"))
+        XCTAssertTrue(hud.contains("FocusHistoryDurationFormatter.text(for: focusMetricDuration(at: now))"))
         XCTAssertTrue(widget.contains("FocusHistoryDurationFormatter.text(for: focusMetricDuration)"))
         XCTAssertFalse(hud.contains("presentation.focusCountText"))
         XCTAssertFalse(widget.contains("presentation.focusCountText"))
@@ -48,8 +51,10 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertTrue(menu.contains("let state = engine.manualControlState"))
     }
 
-    func testLiveHistoryUsesExistingIdleSamplingAndAdvancesSnapshotWithoutWidgetReload() throws {
+    func testLiveDurationProjectsFromCommittedAnchorWithoutMinuteSnapshotRepublish() throws {
         let bridge = try source("Sources/TinyBuddy/FocusSessionAppBridge.swift")
+        let hud = try source("Sources/TinyBuddy/PetView.swift")
+        let widget = try source("Widget/TinyBuddyWidget/TinyBuddyWidget.swift")
         let viewModel = try source("Sources/TinyBuddy/PetViewModel.swift")
         let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
 
@@ -58,6 +63,10 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertFalse(bridge.contains("engine.republishFocusHistory(shouldReloadWidget: false)"))
         XCTAssertFalse(bridge.contains("lastPublishedFocusMinute"))
         XCTAssertFalse(bridge.contains("Timer("))
+        XCTAssertTrue(hud.contains("TimelineView(.periodic(from: .now, by: 60))"))
+        XCTAssertTrue(hud.contains("currentWeekDuration(at: now)"))
+        XCTAssertTrue(widget.contains("currentDayDuration(at: entry.date)"))
+        XCTAssertTrue(widget.contains("currentWeekDuration(at: entry.date)"))
 
         XCTAssertTrue(app.contains("liveMinuteRepublishHandler"))
         XCTAssertTrue(app.contains("reloadWidget: false"))
