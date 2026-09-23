@@ -69,6 +69,27 @@ final class FocusHistoryCombinedSnapshotTests: XCTestCase {
         XCTAssertEqual(decoded.snapshot, current.snapshot)
         XCTAssertFalse(decoded.isFocusSessionActive)
         XCTAssertFalse(decoded.isFocusSessionPaused)
+        XCTAssertNil(decoded.liveDurationAnchor)
+    }
+
+    func testLiveDurationAnchorProjectsElapsedTimeAndFreezesWhilePaused() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let running = FocusHistoryLiveDurationAnchor(
+            dayIdentifier: "2026-07-20",
+            accumulatedDuration: 600,
+            capturedAt: start,
+            isRunning: true
+        )
+        let paused = FocusHistoryLiveDurationAnchor(
+            dayIdentifier: "2026-07-20",
+            accumulatedDuration: 600,
+            capturedAt: start,
+            isRunning: false
+        )
+
+        XCTAssertEqual(running.duration(at: start.addingTimeInterval(120)), 720)
+        XCTAssertEqual(paused.duration(at: start.addingTimeInterval(120)), 600)
+        XCTAssertEqual(running.duration(at: start.addingTimeInterval(-10)), 600)
     }
 
     func testHistoryUpdateRejectsOlderArchiveRevisionButAcceptsEqualRevisionConfigurationRefresh() {

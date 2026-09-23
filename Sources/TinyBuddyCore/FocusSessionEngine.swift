@@ -1346,14 +1346,19 @@ private extension FocusSessionEngine {
         guard let snapshot = try? historyCache.snapshot(for: query, now: clock.now) else {
             return nil
         }
+        let liveSession = sessions.first { $0.isOpen && $0.dayIdentifier == currentDay }
         return FocusHistoryPublication(
             revision: archiveRevision,
             snapshot: snapshot,
-            isFocusSessionActive: sessions.contains {
-                $0.isOpen && $0.status == .active
-            },
-            isFocusSessionPaused: sessions.contains {
-                $0.isOpen && $0.status == .paused
+            isFocusSessionActive: liveSession?.status == .active,
+            isFocusSessionPaused: liveSession?.status == .paused,
+            liveDurationAnchor: liveSession.map {
+                FocusHistoryLiveDurationAnchor(
+                    dayIdentifier: currentDay,
+                    accumulatedDuration: $0.activeDuration(now: clock.now),
+                    capturedAt: clock.now,
+                    isRunning: $0.status == .active
+                )
             }
         )
     }

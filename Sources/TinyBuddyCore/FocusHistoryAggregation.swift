@@ -193,10 +193,31 @@ public struct FocusHistorySnapshot: Codable, Equatable, Sendable {
     public let currentGoalStreakDays: Int?
 }
 
+/// A persisted duration base plus wall-clock anchor for read-time live duration.
+public struct FocusHistoryLiveDurationAnchor: Codable, Equatable, Sendable {
+    public let dayIdentifier: String
+    public let accumulatedDuration: TimeInterval
+    public let capturedAt: Date
+    public let isRunning: Bool
+
+    public init(dayIdentifier: String, accumulatedDuration: TimeInterval, capturedAt: Date, isRunning: Bool) {
+        self.dayIdentifier = dayIdentifier
+        self.accumulatedDuration = max(0, accumulatedDuration)
+        self.capturedAt = capturedAt
+        self.isRunning = isRunning
+    }
+
+    public func duration(at now: Date) -> TimeInterval {
+        accumulatedDuration + (isRunning ? max(0, now.timeIntervalSince(capturedAt)) : 0)
+    }
+}
+
 /// The revision-bound publication used by shared snapshots. It is derived
 /// from the atomic session archive revision, never from an entry-local counter.
 public struct FocusHistoryPublication: Codable, Equatable, Sendable {
     public let revision: Int64
+    /// Optional read-time clock for the current live session. Older payloads omit it.
+    public let liveDurationAnchor: FocusHistoryLiveDurationAnchor?
     public let snapshot: FocusHistorySnapshot
     /// Whether the exact authoritative-session state represented by this
     /// publication has a running session. Keeping this fact on the same
@@ -209,14 +230,22 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
     /// process-local manual-control projection.
     public let isFocusSessionPaused: Bool
 
+    public func currentDayDuration(at now: Date) -> TimeInterval? {
+        guard let day = snapshot.recentDays.last, let stored = day.focusDuration else { return nil }
+        guard let anchor = liveDurationAnchor, anchor.dayIdentifier == day.dayIdentifier else { return stored }
+        return anchor.duration(at: now)
+    }
+
     public init(
         revision: Int64,
         snapshot: FocusHistorySnapshot,
         isFocusSessionActive: Bool = false,
-        isFocusSessionPaused: Bool = false
+        isFocusSessionPaused: Bool = false,
+        liveDurationAnchor: FocusHistoryLiveDurationAnchor? = nil
     ) {
         self.revision = max(0, revision)
         self.snapshot = snapshot
+        self.liveDurationAnchor = liveDurationAnchor
         self.isFocusSessionActive = isFocusSessionActive
         self.isFocusSessionPaused = isFocusSessionPaused
     }
@@ -224,6 +253,7 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case revision
         case snapshot
+        case liveDurationAnchor
         case isFocusSessionActive
         case isFocusSessionPaused
     }
@@ -235,6 +265,7 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         revision = try container.decode(Int64.self, forKey: .revision)
         snapshot = try container.decode(FocusHistorySnapshot.self, forKey: .snapshot)
+        liveDurationAnchor = try container.decodeIfPresent(FocusHistoryLiveDurationAnchor.self, forKey: .liveDurationAnchor)
         isFocusSessionActive = try container.decodeIfPresent(
             Bool.self,
             forKey: .isFocusSessionActive
@@ -249,6 +280,7 @@ public struct FocusHistoryPublication: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(revision, forKey: .revision)
         try container.encode(snapshot, forKey: .snapshot)
+        try container.encodeIfPresent(liveDurationAnchor, forKey: .liveDurationAnchor)
         try container.encode(isFocusSessionActive, forKey: .isFocusSessionActive)
         try container.encode(isFocusSessionPaused, forKey: .isFocusSessionPaused)
     }

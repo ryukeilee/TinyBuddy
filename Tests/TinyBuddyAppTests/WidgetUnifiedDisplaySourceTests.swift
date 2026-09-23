@@ -8,7 +8,7 @@ final class WidgetUnifiedDisplaySourceTests: XCTestCase {
         XCTAssertTrue(source.contains("let presentation: TinyBuddyDisplayPresentation"))
         XCTAssertTrue(source.contains("presentation: TinyBuddyDisplayPresentation("))
         XCTAssertTrue(source.contains("TinyBuddyDisplayLayout("))
-        XCTAssertTrue(source.contains("FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)"))
+        XCTAssertTrue(source.contains("FocusHistoryDurationFormatter.text(for: focusMetricDuration)"))
         XCTAssertTrue(source.contains("presentation.completionCountText"))
         XCTAssertTrue(source.contains("presentation.recentProjectName"))
         XCTAssertTrue(source.contains("presentation.dataDateText"))

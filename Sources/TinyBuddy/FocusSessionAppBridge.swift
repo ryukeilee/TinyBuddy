@@ -59,7 +59,6 @@ final class FocusSessionAppBridge {
     // was already typing when TinyBuddy launched.
     private var wasIdle: Bool = true
     private var activeCount: Int = 0
-    private var lastPublishedFocusMinute: Int?
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.ryukeili.TinyBuddy",
@@ -237,7 +236,6 @@ final class FocusSessionAppBridge {
 
         if isNowIdle, !wasIdle {
             wasIdle = true
-            lastPublishedFocusMinute = nil
             checkDayChange()
             coordinator.reportIdle()
         } else if isNowIdle, wasIdle {
@@ -249,7 +247,6 @@ final class FocusSessionAppBridge {
             wasIdle = false
             checkDayChange()
             coordinator.reportUserInput()
-            publishLiveFocusHistoryIfNeeded()
         } else if !isNowIdle {
             activeCount += 1
             // Check day change every active poll (not just every 6th) so
@@ -259,7 +256,6 @@ final class FocusSessionAppBridge {
             // transition event after the first, so the confirmation gate
             // needs this periodic feed to recognize real work.
             coordinator.reportSustainedActivity()
-            publishLiveFocusHistoryIfNeeded()
         }
 
         // A live open session accrues time without producing journal writes.
@@ -283,7 +279,6 @@ final class FocusSessionAppBridge {
             // Re‑seed the foreground app so the coordinator has accurate context.
             seedForegroundApp()
             coordinator.reportActiveAfterIdle()
-            publishLiveFocusHistoryIfNeeded()
         } else {
             wasIdle = true
         }
@@ -301,27 +296,8 @@ final class FocusSessionAppBridge {
         if idleSeconds <= idleThreshold {
             wasIdle = false
             coordinator.reportActiveAfterIdle()
-            publishLiveFocusHistoryIfNeeded()
         }
         reminderEvaluationHandler?()
-    }
-
-    /// A live duration changes without a new session-journal fact. Re-publish
-    /// only when its displayed whole minute changes, while an existing 30s idle
-    /// sample is already awake. The Widget self-schedules its own refresh while
-    /// a session is live, so this path advances the authoritative snapshot for
-    /// HUD and persistence without requesting a per-minute WidgetKit reload.
-    /// This adds no timer, disk write, or Widget reload
-    /// while there is no open focus session.
-    private func publishLiveFocusHistoryIfNeeded() {
-        guard !isStopped, engine.currentProject != nil else {
-            lastPublishedFocusMinute = nil
-            return
-        }
-        let wholeMinutes = max(0, Int(engine.focusDurationToday() / 60))
-        guard wholeMinutes != lastPublishedFocusMinute else { return }
-        lastPublishedFocusMinute = wholeMinutes
-        engine.republishFocusHistory(shouldReloadWidget: false)
     }
 
     private func seedForegroundApp() {

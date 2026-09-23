@@ -413,7 +413,7 @@ struct TinyBuddyWidgetView: View {
         guard let day = focusHistoryDay else { return nil }
         switch day.state {
         case .sessions:
-            return "已专注 \(FocusHistoryDurationFormatter.text(for: day.focusDuration)) · \(day.completedSessionCount ?? 0) 段"
+            return "已专注 \(FocusHistoryDurationFormatter.text(for: focusMetricDuration)) · \(day.completedSessionCount ?? 0) 段"
         case .noSessions:
             return "今日暂无专注"
         case .unknown:
@@ -432,12 +432,16 @@ struct TinyBuddyWidgetView: View {
 
     /// Today's primary metric is elapsed time from the same authoritative
     /// publication as the App. Git focus-block counts never substitute for it.
+    private var focusMetricDuration: TimeInterval? {
+        entry.focusHistoryPublication?.currentDayDuration(at: entry.date)
+    }
+
     private var focusMetricText: String {
-        FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)
+        FocusHistoryDurationFormatter.text(for: focusMetricDuration)
     }
 
     private var focusMetricIsKnown: Bool {
-        focusHistoryDay?.focusDuration != nil
+        focusMetricDuration != nil
     }
 
     private var displayEnvironment: TinyBuddyDisplayEnvironment {

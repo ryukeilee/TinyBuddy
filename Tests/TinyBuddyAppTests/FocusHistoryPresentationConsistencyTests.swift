@@ -30,8 +30,8 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
 
         XCTAssertTrue(report.contains("publication = publicationProvider()"))
         XCTAssertFalse(report.contains("} { _ in\n            refreshHistory()"))
-        XCTAssertTrue(hud.contains("FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)"))
-        XCTAssertTrue(widget.contains("FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)"))
+        XCTAssertTrue(hud.contains("FocusHistoryDurationFormatter.text(for: focusMetricDuration)"))
+        XCTAssertTrue(widget.contains("FocusHistoryDurationFormatter.text(for: focusMetricDuration)"))
         XCTAssertFalse(hud.contains("presentation.focusCountText"))
         XCTAssertFalse(widget.contains("presentation.focusCountText"))
         XCTAssertFalse(widget.contains("presentation.focusCount > 0"))
@@ -54,15 +54,9 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
 
         XCTAssertTrue(bridge.contains("private var wasIdle: Bool = true"))
-        XCTAssertTrue(bridge.contains("private func publishLiveFocusHistoryIfNeeded()"))
-        XCTAssertTrue(bridge.contains("wholeMinutes != lastPublishedFocusMinute"))
-        // The periodic live-minute re-emission updates the authoritative
-        // snapshot but does not request a WidgetKit reload: the Widget
-        // self-schedules its refresh while a session is live, so a per-minute
-        // reload would waste WidgetKit's refresh budget.
-        XCTAssertTrue(bridge.contains("engine.republishFocusHistory(shouldReloadWidget: false)"))
-        XCTAssertTrue(bridge.contains("The Widget self-schedules its own refresh while"))
-        XCTAssertTrue(bridge.contains("This adds no timer, disk write, or Widget reload\n    /// while there is no open focus session."))
+        // Live elapsed time is projected from the committed anchor at read time.
+        XCTAssertFalse(bridge.contains("engine.republishFocusHistory(shouldReloadWidget: false)"))
+        XCTAssertFalse(bridge.contains("lastPublishedFocusMinute"))
         XCTAssertFalse(bridge.contains("Timer("))
 
         XCTAssertTrue(app.contains("liveMinuteRepublishHandler"))

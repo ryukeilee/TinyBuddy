@@ -65,16 +65,20 @@ struct PetView: View {
         viewModel.focusHistoryPublication?.snapshot.recentDays.last
     }
 
+    private var focusMetricDuration: TimeInterval? {
+        viewModel.focusHistoryPublication?.currentDayDuration(at: Date())
+    }
+
     private var focusMetricText: String {
-        FocusHistoryDurationFormatter.text(for: focusHistoryDay?.focusDuration)
+        FocusHistoryDurationFormatter.text(for: focusMetricDuration)
     }
 
     private var focusMetricNumericValue: Int {
-        max(0, Int((focusHistoryDay?.focusDuration ?? 0) / 60))
+        max(0, Int((focusMetricDuration ?? 0) / 60))
     }
 
     private var focusMetricIsKnown: Bool {
-        focusHistoryDay?.focusDuration != nil
+        focusMetricDuration != nil
     }
 
     private var increasedContrast: Bool {
