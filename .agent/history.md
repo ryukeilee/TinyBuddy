@@ -5,42 +5,6 @@
 - 本文件始终保留最近约 10 条轮次记录。
 - 当条目数超过 10 条时，最旧的条目原样移动到 `.agent/archive/` 目录下的归档文件（如 `history-YYYY-MM-DD.md`；不存在则创建，头部注明用途与归档时间）；归档条目不丢失、不改写。
 - 观察与决策阶段核对历史时，同时读取本文件与 `.agent/archive/` 归档，避免重复处理已完成的问题。
-## Loop 18：2026-08-16：无修改轮次（自 Loop 17 以来业务代码零变化，未发现新的可验证问题）
-
-**Loop 编号**
-- Loop 18。
-
-**日期**
-- 2026-08-16
-
-**观察结果**
-- 工作区：`git status --short` 与 `git diff --check` 均无输出，仓库干净；`git stash list` 为空；HEAD == origin/main == `5520dfd`（Loop 17 记录提交）。
-- 最近提交：`5520dfd`（Record Loop 17）、`b658efe`（Explain automatic focus recognition in HUD，+962）；两者均为 Loop 17 轮内提交（2026-08-15 10:39），自 Loop 17 以来业务代码零变化。
-- 静态信号：Swift 中无 TODO/FIXME/HACK/XXX；无 `try!`/`fatalError`/XCTSkip；script 中 `mktemp` 模板（`XXXXXX`）为正常用法（grep 工具核实，约 50 处，含 `script/update_git_completion_count.sh` 33 处）。
-- 测试基线：`swift test --filter GitCommandExecutorTests`：33 个测试全绿（环境健康检查）。
-- 系统负载均值 4.71（仍偏高；Loop 16/17 归因的脚本超时墙钟测试环境失败条件仍存在）。
-
-**选择的问题及证据**
-- 无。既有候选逐一核对后均无新证据，淘汰理由：
-  - 脚本 focus_block dead code/UTC 桶（Loop 8 有意设计）、`page.last!`、`TinyBuddyTimeContext(...)!`、`precondition(!days.isEmpty)`、`commitPendingSwitch` 死代码、脚本超时墙钟断言环境敏感、`DeterministicEndToEndFaultSimulationTests` 3.0s REPRO 窗口：与 Loop 8/9/12/13/16/17 同根因，无新失败、新复现、新指标或新用户反馈，不重复处理。
-- Loop 17 记录的“在途焦点识别解释功能尚未提交”待办已闭环：`b658efe` + `5520dfd` 已提交（10:39）。
-- 完成标准：na（无修改轮次）。
-
-**原因分析**
-- 自 Loop 17 以来唯一变化是记录提交（`.agent/` 基础设施），业务代码零变化；观察范围（工作区、提交历史、静态信号、窄测基线）内不存在触发新一轮的证据门槛。按 loop.md 契约“无证据即无修改，不为了产生修改而修改”。
-
-**修改内容**
-- 无（仅 `.agent/history.md` 追加本条记录并按 Maintain 归档最旧 1 条 Loop 8 至 `.agent/archive/history-2026-08-16.md`，属契约要求的 Record/Maintain 阶段）。
-
-**验证结果**
-- `swift test --filter GitCommandExecutorTests`：33 个测试通过（基线，环境健康检查）。
-- `git diff --check`：通过（history.md 追加与归档仅新增/移动行）。
-- `git status --short` 复查：业务文件零改动；`.agent/` 下历史文件为本轮唯一新增。
-
-**剩余风险**
-- 本轮为无修改轮次，无新增风险。全量门禁仍受本机环境负载影响（脚本超时墙钟测试在重负载下失败，Loop 16 原始树复现归因；负载回落或换机后应复跑 `swift test` 确认全绿）。
-- 既有维护提示仍有效：Git 未来若新增带值选项需同步维护 `valueTakingOptions`；`commitPendingSwitch` 死代码可留作纯清理候选；`DeterministicEndToEndFaultSimulationTests` 的 3.0s REPRO 窗口仍无新失败证据。
-
 ## Loop 19：2026-08-20：修复 Git 刷新脚本超时轮询未按配置秒数生效
 
 **Loop 编号**
@@ -428,3 +392,35 @@
 
 **剩余风险**
 - Loop 26 记录的 baseline 度量键未被当前 resolver 消费，仍是待进一步确定预期契约的维护候选；本轮没有运行端到端 regression gate。未改动或掩盖该风险。
+
+## Loop 28：2026-09-25：复核 Widget runtime gate 失败为构建环境不满足验证前提
+
+**Loop 编号**
+- Loop 28。
+
+**日期**
+- 2026-09-25。
+
+**观察结果**
+- 起始工作区干净；HEAD/origin/main 为 `692eb0e`。HEAD 是 `Project live focus duration without minute snapshot writes`，涉及焦点实时投影与测试，不修改 regression gate。
+- `.agent/history.md` Loop 26 记录 stage 6 的目标是验证运行中 Widget executable 与本轮构建一致；注册表只用于发现进程。Loop 26 的只读实测显示注册扩展和运行进程均来自 installed bundle。当前 `script/regression_gate.sh:627-699` 仍先从 `APP_BUNDLE` 取 expected executable，再要求运行进程 executable hash 匹配。
+- `threads/t-0015.md` 在当前仓库中不存在（`find` 未找到）；相关可查证的既有证据在 `.agent/history.md` Loop 26。`.agent/archive/` 全部检索未发现相同 widget runtime gate 问题的其他已处理条目。
+- 当前门禁入口/生命周期（`script/regression_gate.sh:713`、`:853-854`）包含终止 App/Widget 的行为；本轮未运行门禁或操作已安装状态。
+
+**选择的问题及证据**
+- 不作代码修改。已记录的“注册的 installed extension 存在，但没有 workspace/build-under-test extension process”不能证明 gate 缺陷：stage 6 明确比较运行中 executable 与当前 `APP_BUNDLE` 的构建产物；仅有同 bundle id 的 installed 注册扩展，不满足该验证前提。将其改为 PASS/SKIP 或放宽匹配会削弱验证，而当前没有证据表明门禁能在正确启动 workspace extension 后仍错误失败。
+- 复现/修复完成标准：需在不改注册、不终止进程的环境中，观察到本轮构建的 Widget 被正常启动却仍被 gate 错误判定；现有证据不满足该标准。
+
+**原因分析**
+- 这是运行环境未提供 build-under-test Widget 进程的验证限制，而不是已证实的 gate 误判。历史 Loop 26 已分别证明“非本轮构建的 installed executable 应失败”以及真实 installed bundle 被正确识别；本轮没有新的反例。
+
+**修改内容**
+- 无业务修改；仅追加本条并将 Loop 18 原样归档至 `.agent/archive/history-2026-09-25.md`。
+
+**验证结果**
+- 只读检查 `git status`、HEAD 变更摘要、当前 `run_widget_reload` 实现、历史/归档及 `threads/t-0015.md` 文件存在性；未执行测试或 runtime gate（该 gate 路径可能终止 App/Widget，明确禁止）。
+- 验证级别：维护记录/静态复核；没有代码变化，按契约不运行 Swift 测试。
+- 最终对照 diff、`git diff --check` 与 `git status --short`。
+
+**剩余风险**
+- workspace extension 的真实启动路径未验证；没有 `threads/t-0015.md` 的原始上下文，结论仅基于 Loop 26 的仓库记录和当前脚本。要进一步端到端验证需可安全启动 build-under-test Widget 的隔离环境；不得通过改动已安装注册状态或终止用户进程获得证据。
