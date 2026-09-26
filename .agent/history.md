@@ -424,3 +424,24 @@
 
 **剩余风险**
 - workspace extension 的真实启动路径未验证；没有 `threads/t-0015.md` 的原始上下文，结论仅基于 Loop 26 的仓库记录和当前脚本。要进一步端到端验证需可安全启动 build-under-test Widget 的隔离环境；不得通过改动已安装注册状态或终止用户进程获得证据。
+
+## Loop 29：2026-09-26：通过二分定位缩短焦点历史分页游标查找
+
+**观察结果**
+- 起始工作区干净，HEAD/origin/main=`f8d60fa`；阅读 Loop 契约、近期 history 与 archive。最近 performance commits 聚焦实时 focus snapshot/persistence；本轮不重复。
+- `FocusSessionQueryService.execute` 每个分页先全量过滤、排序，然后用 `firstIndex(where:)` 线性定位 cursor；`FocusSessionQueryPerformanceTests.testFullPaginationTime` 以 10,000 sessions、100 pages 可复现该成本。
+- 同一测试修复前两次均通过，耗时 0.729s（[0.719304, 0.735418, 0.731971]）及 0.742s（[0.752031, 0.737059, 0.736963]）。
+
+**选择的问题及证据**
+- 对已排序结果的 cursor 定位为 O(n)，每个分页重复扫描；采用二分查找应降为 O(log n)，且完成标准是排序/分页既有测试通过、全分页相同 workload 性能下降显著。
+
+**修改内容**
+- `Sources/TinyBuddyCore/FocusSessionQueryService.swift`：用排序次序的二分查找替代 `firstIndex(where:)`，其余过滤、排序、cursor-miss 及分页结果语义不变。
+
+**验证结果**
+- 修复后同测试 workload 耗时 0.628s（[0.621527, 0.627593, 0.634967]）、0.630s（[0.636541, 0.629228, 0.625150]）；相对两轮基线中位数 0.7355s，减少约 14.4%（耗时约减少 0.106s/100 pages）。环境 Swift 6.4 / Xcode 27，arm64，本机 SwiftPM Debug。
+- `./script/swiftpm.sh test --filter 'FocusSessionQueryTests|FocusSessionQueryPerformanceTests'`：34 tests，0 failures；`./script/swiftpm.sh build`：通过。Focused/module validation；无持久化或跨进程契约变化。
+- 曾尝试 `TINYBUDDY_FOCUS_BENCHMARK_MODE=baseline ... test --filter SustainedFocusPersistenceBenchmarkTests`，该 unrelated historical comparator 测试失败（基线模式预期 apply passes 480、实际 0）；该失效探针未用于本轮数据。后续分页基准为 HEAD/候选同一 XCT workload 的成功对照。
+
+**剩余风险**
+- 每次查询仍需调用 provider、过滤和排序，因此只优化 cursor 定位；总体提升依赖页数/数据量。本轮未运行全量测试。
