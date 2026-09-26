@@ -47,12 +47,23 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         let startIndex: Int
         var cursorMissed = false
         if let cursor = cursor {
-            if let index = sorted.firstIndex(where: { session in
-                session.startedAt < cursor.lastStartedAt
+            // Find the first session after the cursor in the established sort order.
+            var lowerBound = 0
+            var upperBound = totalCount
+            while lowerBound < upperBound {
+                let middle = lowerBound + (upperBound - lowerBound) / 2
+                let session = sorted[middle]
+                let comesBeforeOrAtCursor = session.startedAt > cursor.lastStartedAt
                     || (session.startedAt == cursor.lastStartedAt
-                        && session.id.uuidString > cursor.lastID.uuidString)
-            }) {
-                startIndex = index
+                        && session.id.uuidString <= cursor.lastID.uuidString)
+                if comesBeforeOrAtCursor {
+                    lowerBound = middle + 1
+                } else {
+                    upperBound = middle
+                }
+            }
+            if lowerBound < totalCount {
+                startIndex = lowerBound
             } else {
                 // The cursor key no longer matches the current result set
                 // (sessions were deleted or reordered between pages).
