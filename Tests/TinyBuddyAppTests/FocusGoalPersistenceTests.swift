@@ -43,11 +43,19 @@ final class FocusGoalPersistenceTests: XCTestCase {
     }
 
     func testFocusGoalConfigurationPreservesNilQuietHours() {
+        let suite = "FocusGoalPersistenceTests.QuietHoursDisabled.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let store = FocusGoalPreferencesStore(userDefaults: defaults)
         let config = FocusGoalConfiguration(
             quietModeStartHour: nil,
             quietModeEndHour: nil
         )
-        XCTAssertNil(config.quietModeStartHour)
-        XCTAssertNil(config.quietModeEndHour)
+
+        XCTAssertTrue(store.saveConfiguration(config))
+        let loaded = store.loadConfiguration()
+        XCTAssertNil(loaded.quietModeStartHour)
+        XCTAssertNil(loaded.quietModeEndHour)
+
+        defaults.removePersistentDomain(forName: suite)
     }
 }
