@@ -13,6 +13,7 @@ struct FocusGoalSettingsView: View {
     @State private var breakDurationMinutes: Double
     @State private var isBreakReminderEnabled: Bool
     @State private var isGoalCompletionEnabled: Bool
+    @State private var isQuietModeEnabled: Bool
     @State private var quietModeStartHour: Double
     @State private var quietModeEndHour: Double
     @State private var notificationStatus: NotificationStatus = .unknown
@@ -41,6 +42,9 @@ struct FocusGoalSettingsView: View {
         _breakDurationMinutes = State(initialValue: Double(config.breakDurationMinutes))
         _isBreakReminderEnabled = State(initialValue: config.isBreakReminderEnabled)
         _isGoalCompletionEnabled = State(initialValue: config.isGoalCompletionEnabled)
+        _isQuietModeEnabled = State(
+            initialValue: config.quietModeStartHour != nil && config.quietModeEndHour != nil
+        )
         _quietModeStartHour = State(initialValue: Double(config.quietModeStartHour ?? 22))
         _quietModeEndHour = State(initialValue: Double(config.quietModeEndHour ?? 8))
     }
@@ -121,26 +125,35 @@ struct FocusGoalSettingsView: View {
 
             // MARK: Quiet Hours
             Section {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("静默时段起始: \(hourLabel(Int(quietModeStartHour)))")
-                    Slider(value: $quietModeStartHour, in: 0...23, step: 1) {
-                        Text("开始")
-                    } onEditingChanged: { _ in
-                        markChanged()
+                Toggle("启用静默时段", isOn: $isQuietModeEnabled)
+                    .onChange(of: isQuietModeEnabled) { _, _ in markChanged() }
+
+                if isQuietModeEnabled {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("静默时段起始: \(hourLabel(Int(quietModeStartHour)))")
+                        Slider(value: $quietModeStartHour, in: 0...23, step: 1) {
+                            Text("开始")
+                        } onEditingChanged: { _ in
+                            markChanged()
+                        }
                     }
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("静默时段结束: \(hourLabel(Int(quietModeEndHour)))")
-                    Slider(value: $quietModeEndHour, in: 0...23, step: 1) {
-                        Text("结束")
-                    } onEditingChanged: { _ in
-                        markChanged()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("静默时段结束: \(hourLabel(Int(quietModeEndHour)))")
+                        Slider(value: $quietModeEndHour, in: 0...23, step: 1) {
+                            Text("结束")
+                        } onEditingChanged: { _ in
+                            markChanged()
+                        }
                     }
                 }
             } header: {
                 Label("静默时段", systemImage: "moon.fill")
             } footer: {
-                Text("静默时段内不会发送任何提醒通知。")
+                Text(
+                    isQuietModeEnabled
+                        ? "静默时段内不会发送任何提醒通知。"
+                        : "关闭后，专注提醒不会因静默时段而暂停。"
+                )
             }
 
             // MARK: Notification Permission
@@ -256,6 +269,7 @@ struct FocusGoalSettingsView: View {
         breakDurationMinutes = Double(config.breakDurationMinutes)
         isBreakReminderEnabled = config.isBreakReminderEnabled
         isGoalCompletionEnabled = config.isGoalCompletionEnabled
+        isQuietModeEnabled = config.quietModeStartHour != nil && config.quietModeEndHour != nil
         quietModeStartHour = Double(config.quietModeStartHour ?? 22)
         quietModeEndHour = Double(config.quietModeEndHour ?? 8)
     }
@@ -299,8 +313,8 @@ struct FocusGoalSettingsView: View {
             breakDurationMinutes: Int(breakDurationMinutes),
             isBreakReminderEnabled: isBreakReminderEnabled,
             isGoalCompletionEnabled: isGoalCompletionEnabled,
-            quietModeStartHour: Int(quietModeStartHour),
-            quietModeEndHour: Int(quietModeEndHour)
+            quietModeStartHour: isQuietModeEnabled ? Int(quietModeStartHour) : nil,
+            quietModeEndHour: isQuietModeEnabled ? Int(quietModeEndHour) : nil
         )
         let saved = coordinator.saveConfiguration(config)
         coordinator.resetEvaluationCache()
