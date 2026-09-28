@@ -149,11 +149,15 @@ struct FocusGoalSettingsView: View {
             } header: {
                 Label("静默时段", systemImage: "moon.fill")
             } footer: {
-                Text(
-                    isQuietModeEnabled
-                        ? "静默时段内不会发送任何提醒通知。"
-                        : "关闭后，专注提醒不会因静默时段而暂停。"
-                )
+                if isQuietModeEnabled, Int(quietModeStartHour) == Int(quietModeEndHour) {
+                    Text("起始和结束时间相同时，所有提醒会全天静默。")
+                } else {
+                    Text(
+                        isQuietModeEnabled
+                            ? "静默时段内不会发送任何提醒通知。"
+                            : "关闭后，专注提醒不会因静默时段而暂停。"
+                    )
+                }
             }
 
             // MARK: Notification Permission
