@@ -232,17 +232,23 @@ final class FocusSessionAppBridge {
         .scrollWheel,
     ]
 
-    /// Returns the age of the most recent keyboard, pointer, or scroll event.
-    /// The query closure keeps the aggregation deterministic in tests.
-    static func secondsSinceLastInputEvent(
+    /// Checks whether any tracked input is recent enough to keep the session
+    /// active. The first qualifying event is sufficient, avoiding needless
+    /// CoreGraphics queries while preserving the full-scan idle decision.
+    /// The query closure keeps the classification deterministic in tests.
+    static func hasRecentInputEvent(
+        within threshold: TimeInterval,
         querying query: (CGEventType) -> TimeInterval = { eventType in
             CGEventSource.secondsSinceLastEventType(
                 .combinedSessionState,
                 eventType: eventType
             )
         }
-    ) -> TimeInterval {
-        trackedInputEventTypes.map(query).min() ?? .infinity
+    ) -> Bool {
+        for eventType in trackedInputEventTypes where query(eventType) <= threshold {
+            return true
+        }
+        return false
     }
 
     private func startIdleDetection() {
@@ -262,8 +268,7 @@ final class FocusSessionAppBridge {
 
     private func checkIdleState() {
         guard !isStopped else { return }
-        let idleSeconds = Self.secondsSinceLastInputEvent()
-        let isNowIdle = idleSeconds > idleThreshold
+        let isNowIdle = !Self.hasRecentInputEvent(within: idleThreshold)
 
         if isNowIdle, !wasIdle {
             wasIdle = true
@@ -299,11 +304,11 @@ final class FocusSessionAppBridge {
     /// immediately start a session instead of waiting for the next idle poll.
     private func reportCurrentStateAfterIdle() {
         guard !isStopped else { return }
-        let idleSeconds = Self.secondsSinceLastInputEvent()
+        let hasRecentInput = Self.hasRecentInputEvent(within: idleThreshold)
 
         checkDayChange()
 
-        if idleSeconds <= idleThreshold {
+        if hasRecentInput {
             wasIdle = false
             // Re‑seed the foreground app so the coordinator has accurate context.
             seedForegroundApp()
@@ -318,9 +323,7 @@ final class FocusSessionAppBridge {
     /// start a session directly instead of waiting for the first idle poll.
     private func sampleInitialActivity() {
         guard !isStopped else { return }
-        let idleSeconds = Self.secondsSinceLastInputEvent()
-
-        if idleSeconds <= idleThreshold {
+        if Self.hasRecentInputEvent(within: idleThreshold) {
             wasIdle = false
             coordinator.reportActiveAfterIdle()
         }
