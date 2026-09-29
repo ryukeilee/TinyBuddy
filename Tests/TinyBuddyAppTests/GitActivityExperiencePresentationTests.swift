@@ -58,6 +58,10 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
         XCTAssertEqual(presentation.displayState, .focusing)
         XCTAssertEqual(presentation.title, "专注中")
         XCTAssertEqual(presentation.message, "保持当前专注，今天的投入会持续累积。")
+        XCTAssertEqual(
+            presentation.focusSessionSummary(publication: publication, at: Date()),
+            "正在专注 · 今日累计 0 小时 0 分"
+        )
         XCTAssertTrue(presentation.showsActivityMetrics)
 
         for size in [TinyBuddyDisplayLayoutSize.standard, .expanded] {
@@ -70,31 +74,96 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
         }
     }
 
-    func testPausedAndNoSessionPathsRemainDistinctWithZeroGitActivity() {
-        let paused = makePresentation(
-            focusHistoryPublication: focusHistoryPublication(
-                active: false,
-                paused: true,
-                dayState: .sessions,
-                focusDuration: 0,
-                completedSessionCount: 0
-            )
+    func testProductionFocusPublicationKeepsZeroGitStateSharedAcrossHudAndWidget() throws {
+        let dayIdentifier = "2026-07-24"
+        let start = ISO8601DateFormatter().date(from: "2026-07-24T10:00:00Z")!
+        let engine = FocusSessionEngine(
+            clock: PresentationTestClock(start),
+            persisting: PresentationTestSessionStore(),
+            dayIdentifier: { _ in dayIdentifier }
         )
+
+        XCTAssertEqual(
+            engine.startManualFocus(
+                project: FocusProjectContext(key: "fixture/project", displayName: "Fixture"),
+                at: start
+            ),
+            .saved
+        )
+        let publication = try XCTUnwrap(engine.focusHistoryPublication())
+        let currentDay = try XCTUnwrap(publication.snapshot.recentDays.last)
+        XCTAssertTrue(publication.isFocusSessionActive)
+        XCTAssertEqual(currentDay.state, .sessions)
+        XCTAssertEqual(currentDay.focusDuration, 0)
+        XCTAssertEqual(currentDay.completedSessionCount, 0)
+
+        let sharedPresentation = TinyBuddyDisplayPresentation(
+            snapshot: TinyBuddySnapshot(
+                status: .focusing,
+                stats: DailyStats(dayIdentifier: dayIdentifier, focusCount: 0, completionCount: 0)
+            ),
+            activitySnapshot: emptyActivity,
+            focusHistoryPublication: publication,
+            refreshStatus: status(outcome: .succeeded, authorizedRootCount: 1, repositoryCount: 1)
+        )
+        let hudPresentation = GitActivityExperiencePresentation.make(from: sharedPresentation)
+
+        XCTAssertEqual(sharedPresentation.state, .focusing)
+        XCTAssertEqual(sharedPresentation.title, "专注中")
+        XCTAssertEqual(
+            sharedPresentation.focusSessionSummary(publication: publication, at: start),
+            "正在专注 · 今日累计 0 小时 0 分"
+        )
+        XCTAssertEqual(hudPresentation.title, sharedPresentation.title)
+        XCTAssertEqual(hudPresentation.message, sharedPresentation.message)
+    }
+
+    func testPausedAndNoSessionPathsRemainDistinctWithZeroGitActivity() {
+        let pausedPublication = focusHistoryPublication(
+            active: false,
+            paused: true,
+            dayState: .sessions,
+            focusDuration: 0,
+            completedSessionCount: 0
+        )
+        let paused = makePresentation(focusHistoryPublication: pausedPublication)
         XCTAssertEqual(paused.state, .paused)
         XCTAssertEqual(paused.title, "已暂停")
+        XCTAssertEqual(
+            paused.focusSessionSummary(publication: pausedPublication, at: Date()),
+            "专注已暂停 · 今日累计 0 小时 0 分"
+        )
 
+        let noSessionPublication = focusHistoryPublication(
+            active: false,
+            paused: false,
+            dayState: .noSessions,
+            focusDuration: 0,
+            completedSessionCount: 0
+        )
         let noSession = makePresentation(
-            focusHistoryPublication: focusHistoryPublication(
-                active: false,
-                paused: false,
-                dayState: .noSessions,
-                focusDuration: 0,
-                completedSessionCount: 0
-            ),
+            focusHistoryPublication: noSessionPublication,
             snapshotStatus: .idle
         )
         XCTAssertEqual(noSession.state, .noActivity)
         XCTAssertEqual(noSession.title, "今日无活动")
+        XCTAssertEqual(
+            noSession.focusSessionSummary(publication: noSessionPublication, at: Date()),
+            "今日暂无专注"
+        )
+
+        let completedPublication = focusHistoryPublication(
+            active: false,
+            paused: false,
+            dayState: .sessions,
+            focusDuration: 3_600,
+            completedSessionCount: 2
+        )
+        let completed = makePresentation(focusHistoryPublication: completedPublication)
+        XCTAssertEqual(
+            completed.focusSessionSummary(publication: completedPublication, at: Date()),
+            "今日专注 1 小时 0 分 · 已完成 2 段"
+        )
     }
 
     func testLiveFocusDoesNotOverrideDataQualityStates() {
@@ -134,6 +203,10 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
         for (presentation, expectedState) in cases {
             XCTAssertEqual(presentation.state, expectedState)
             XCTAssertFalse(presentation.state.isActivityState)
+            XCTAssertNil(
+                presentation.focusSessionSummary(publication: activePublication, at: Date()),
+                "\(expectedState.rawValue) must not expose a retained live-focus summary"
+            )
         }
     }
 
@@ -303,5 +376,30 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
                 repositoryCount: repositoryCount
             )
         )
+    }
+}
+
+private final class PresentationTestClock: FocusClock, @unchecked Sendable {
+    let now: Date
+
+    var monotonic: TimeInterval {
+        now.timeIntervalSinceReferenceDate
+    }
+
+    init(_ now: Date) {
+        self.now = now
+    }
+}
+
+private final class PresentationTestSessionStore: FocusSessionPersisting, @unchecked Sendable {
+    private var sessions: [FocusSession] = []
+
+    func load() -> [FocusSession]? {
+        sessions
+    }
+
+    func save(_ sessions: [FocusSession]) -> Bool {
+        self.sessions = sessions
+        return true
     }
 }

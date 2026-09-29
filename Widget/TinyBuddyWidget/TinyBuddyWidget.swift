@@ -410,20 +410,11 @@ struct TinyBuddyWidgetView: View {
         return entry.focusHistoryPublication
     }
 
-    private var focusHistoryDay: FocusHistoryDay? {
-        visibleFocusHistoryPublication?.snapshot.recentDays.last
-    }
-
     private var focusSessionSummary: String? {
-        guard let day = focusHistoryDay else { return nil }
-        switch day.state {
-        case .sessions:
-            return "已专注 \(FocusHistoryDurationFormatter.text(for: focusMetricDuration)) · \(day.completedSessionCount ?? 0) 段"
-        case .noSessions:
-            return "今日暂无专注"
-        case .unknown:
-            return nil
-        }
+        presentation.focusSessionSummary(
+            publication: visibleFocusHistoryPublication,
+            at: entry.date
+        )
     }
 
     private var focusWeekSummary: String? {

@@ -24,9 +24,21 @@ final class WidgetUnifiedDisplaySourceTests: XCTestCase {
 
         XCTAssertTrue(source.contains("guard presentation.state.isActivityState else { return nil }"))
         XCTAssertTrue(source.contains("return entry.focusHistoryPublication"))
-        XCTAssertTrue(source.contains("visibleFocusHistoryPublication?.snapshot.recentDays.last"))
+        XCTAssertTrue(source.contains("presentation.focusSessionSummary("))
+        XCTAssertTrue(source.contains("publication: visibleFocusHistoryPublication"))
         XCTAssertTrue(source.contains("let publication = visibleFocusHistoryPublication"))
         XCTAssertTrue(source.contains("visibleFocusHistoryPublication?.currentDayDuration(at: entry.date)"))
+    }
+
+    func testWidgetFocusSummaryUsesCompactSingleLineCopy() throws {
+        let source = try widgetSource()
+
+        XCTAssertTrue(source.contains("presentation.focusSessionSummary("))
+        XCTAssertTrue(source.contains("""
+                    Text(focusSessionSummary)
+                        .font(.caption2.weight(.semibold))
+                        .lineLimit(1)
+"""))
     }
 
     func testWidgetSizeAndAccessibilityDegradationContractIsExplicit() throws {
