@@ -233,8 +233,10 @@ final class FocusSessionAppBridge {
     ]
 
     /// Checks whether any tracked input is recent enough to keep the session
-    /// active. The first qualifying event is sufficient, avoiding needless
-    /// CoreGraphics queries while preserving the full-scan idle decision.
+    /// active. The threshold is exclusive: an event exactly this old has
+    /// already satisfied the idle duration. The first qualifying event is
+    /// sufficient, avoiding needless CoreGraphics queries while preserving the
+    /// full-scan idle decision.
     /// The query closure keeps the classification deterministic in tests.
     static func hasRecentInputEvent(
         within threshold: TimeInterval,
@@ -245,7 +247,7 @@ final class FocusSessionAppBridge {
             )
         }
     ) -> Bool {
-        for eventType in trackedInputEventTypes where query(eventType) <= threshold {
+        for eventType in trackedInputEventTypes where query(eventType) < threshold {
             return true
         }
         return false
