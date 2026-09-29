@@ -44,6 +44,99 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
         XCTAssertEqual(expired.actionTitle, "重新授权")
     }
 
+    func testLiveFocusOverridesZeroGitActivityWithoutChangingSharedHudAndWidgetCopy() {
+        let publication = focusHistoryPublication(
+            active: true,
+            paused: false,
+            dayState: .sessions,
+            focusDuration: 0,
+            completedSessionCount: 0
+        )
+        let presentation = makePresentation(focusHistoryPublication: publication)
+
+        XCTAssertEqual(presentation.state, .focusing)
+        XCTAssertEqual(presentation.displayState, .focusing)
+        XCTAssertEqual(presentation.title, "专注中")
+        XCTAssertEqual(presentation.message, "保持当前专注，今天的投入会持续累积。")
+        XCTAssertTrue(presentation.showsActivityMetrics)
+
+        for size in [TinyBuddyDisplayLayoutSize.standard, .expanded] {
+            XCTAssertTrue(
+                TinyBuddyDisplayLayout(
+                    presentation: presentation,
+                    environment: TinyBuddyDisplayEnvironment(size: size)
+                ).showsMetrics
+            )
+        }
+    }
+
+    func testPausedAndNoSessionPathsRemainDistinctWithZeroGitActivity() {
+        let paused = makePresentation(
+            focusHistoryPublication: focusHistoryPublication(
+                active: false,
+                paused: true,
+                dayState: .sessions,
+                focusDuration: 0,
+                completedSessionCount: 0
+            )
+        )
+        XCTAssertEqual(paused.state, .paused)
+        XCTAssertEqual(paused.title, "已暂停")
+
+        let noSession = makePresentation(
+            focusHistoryPublication: focusHistoryPublication(
+                active: false,
+                paused: false,
+                dayState: .noSessions,
+                focusDuration: 0,
+                completedSessionCount: 0
+            ),
+            snapshotStatus: .idle
+        )
+        XCTAssertEqual(noSession.state, .noActivity)
+        XCTAssertEqual(noSession.title, "今日无活动")
+    }
+
+    func testLiveFocusDoesNotOverrideDataQualityStates() {
+        let activePublication = focusHistoryPublication(
+            active: true,
+            paused: false,
+            dayState: .sessions,
+            focusDuration: 0,
+            completedSessionCount: 0
+        )
+        let cases: [(TinyBuddyDisplayPresentation, TinyBuddyDisplayState)] = [
+            (makePresentation(focusHistoryPublication: activePublication, dataAvailability: .stale), .stale),
+            (makePresentation(focusHistoryPublication: activePublication, dataAvailability: .failed(.sandboxReadDenied)), .readFailed),
+            (
+                makePresentation(
+                    focusHistoryPublication: activePublication,
+                    refreshStatus: status(outcome: .skipped, diagnosticReason: .authorizationRequired)
+                ),
+                .authorizationRequired
+            ),
+            (
+                makePresentation(
+                    focusHistoryPublication: activePublication,
+                    refreshStatus: status(outcome: .failed, diagnosticReason: .authorizationInvalid)
+                ),
+                .authorizationInvalid
+            ),
+            (
+                makePresentation(
+                    focusHistoryPublication: activePublication,
+                    refreshStatus: status(outcome: .failed, diagnosticReason: .scriptExecutionFailed)
+                ),
+                .readFailed
+            )
+        ]
+
+        for (presentation, expectedState) in cases {
+            XCTAssertEqual(presentation.state, expectedState)
+            XCTAssertFalse(presentation.state.isActivityState)
+        }
+    }
+
     func testPartialAuthorizationFailureKeepsMetricsAndOffersDirectReauthorization() {
         let presentation = GitActivityExperiencePresentation.make(
             refreshStatus: status(
@@ -118,6 +211,70 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
             XCTAssertEqual(presentation.action == nil, presentation.actionTitle == nil)
             XCTAssertFalse(presentation.state.showsActivityMetrics)
         }
+    }
+
+    private func makePresentation(
+        focusHistoryPublication: FocusHistoryPublication? = nil,
+        snapshotStatus: PetStatus = .focusing,
+        refreshStatus: GitActivityRefreshStatus? = nil,
+        dataAvailability: TinyBuddyDisplayDataAvailability = .available
+    ) -> TinyBuddyDisplayPresentation {
+        TinyBuddyDisplayPresentation(
+            snapshot: TinyBuddySnapshot(
+                status: snapshotStatus,
+                stats: DailyStats(dayIdentifier: "2026-07-24", focusCount: 0, completionCount: 0)
+            ),
+            activitySnapshot: emptyActivity,
+            focusHistoryPublication: focusHistoryPublication,
+            refreshStatus: refreshStatus ?? status(
+                outcome: .succeeded,
+                authorizedRootCount: 1,
+                repositoryCount: 1
+            ),
+            dataAvailability: dataAvailability
+        )
+    }
+
+    private func focusHistoryPublication(
+        active: Bool,
+        paused: Bool,
+        dayState: FocusHistoryDayState,
+        focusDuration: TimeInterval,
+        completedSessionCount: Int
+    ) -> FocusHistoryPublication {
+        let dayIdentifier = "2026-07-24"
+        let day = FocusHistoryDay(
+            dayIdentifier: dayIdentifier,
+            state: dayState,
+            focusDuration: focusDuration,
+            completedSessionCount: completedSessionCount,
+            goalMinutes: nil,
+            goalCompletionRate: nil,
+            isGoalMet: nil
+        )
+        let history = FocusHistorySnapshot(
+            state: .available,
+            sourceHealth: .available,
+            recentDays: [day],
+            currentWeek: FocusHistoryWeek(
+                startDayIdentifier: dayIdentifier,
+                endDayIdentifier: dayIdentifier,
+                state: .available,
+                focusDuration: focusDuration,
+                completedSessionCount: completedSessionCount,
+                goalCompletionRate: nil,
+                goalMetDayCount: nil,
+                configuredGoalDayCount: nil,
+                projectDistribution: nil
+            ),
+            currentGoalStreakDays: nil
+        )
+        return FocusHistoryPublication(
+            revision: 1,
+            snapshot: history,
+            isFocusSessionActive: active,
+            isFocusSessionPaused: paused
+        )
     }
 
     private func status(

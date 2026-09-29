@@ -405,8 +405,13 @@ struct TinyBuddyWidgetView: View {
         entry.presentation
     }
 
+    private var visibleFocusHistoryPublication: FocusHistoryPublication? {
+        guard presentation.state.isActivityState else { return nil }
+        return entry.focusHistoryPublication
+    }
+
     private var focusHistoryDay: FocusHistoryDay? {
-        entry.focusHistoryPublication?.snapshot.recentDays.last
+        visibleFocusHistoryPublication?.snapshot.recentDays.last
     }
 
     private var focusSessionSummary: String? {
@@ -422,7 +427,7 @@ struct TinyBuddyWidgetView: View {
     }
 
     private var focusWeekSummary: String? {
-        guard let publication = entry.focusHistoryPublication,
+        guard let publication = visibleFocusHistoryPublication,
               let duration = publication.currentWeekDuration(at: entry.date) else {
             return nil
         }
@@ -433,7 +438,7 @@ struct TinyBuddyWidgetView: View {
     /// Today's primary metric is elapsed time from the same authoritative
     /// publication as the App. Git focus-block counts never substitute for it.
     private var focusMetricDuration: TimeInterval? {
-        entry.focusHistoryPublication?.currentDayDuration(at: entry.date)
+        visibleFocusHistoryPublication?.currentDayDuration(at: entry.date)
     }
 
     private var focusMetricText: String {

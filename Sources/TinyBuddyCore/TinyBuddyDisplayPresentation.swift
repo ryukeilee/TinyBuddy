@@ -371,7 +371,9 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         if hasActivitySnapshot,
            focusCount == 0,
            completionCount == 0 {
-            return .noActivity
+            return focusHistoryPublication?.isFocusSessionActive == true
+                ? .focusing
+                : .noActivity
         }
 
         if hasActivitySnapshot {
@@ -413,6 +415,13 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             case .completedOnce:
                 return .completed
             }
+        }
+
+        if hasActivitySnapshot,
+           focusCount == 0,
+           completionCount == 0,
+           focusHistoryPublication?.isFocusSessionActive == true {
+            return .focusing
         }
 
         switch (focusCount > 0, completionCount > 0) {
