@@ -329,6 +329,10 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public func idleDetected(at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
         return apply { sessions in
+            // An idle boundary ends an unconfirmed activity run too. Without
+            // this reset, a later single input could combine with heartbeats
+            // from before the idle period and start automatic focus.
+            confirmationGate.reset()
             guard let idx = sessions.firstIndex(where: \.isOpen) else { return }
             guard sessions[idx].mode != .manual else { return }
             if let pauseStart = sessions[idx].currentPauseStartedAt {

@@ -94,6 +94,35 @@ extension FocusSessionEngineTests {
         XCTAssertTrue(engine.allSessions.isEmpty)
     }
 
+    func testConfirmationGate_idleBeforeConfirmationDiscardsAccumulatedActivity() {
+        let clock = FakeClock(gateT0)
+        let store = MemoryStore()
+        let engine = makeGateEngine(clock: clock, store: store)
+
+        // Model the bridge's 15-second active heartbeat starting one second
+        // after the only input event.
+        clock.advance(by: 1)
+        XCTAssertEqual(engine.userActivity(in: gateProjectA, at: clock.now), .noChange)
+        for _ in 0..<7 {
+            clock.advance(by: 15)
+            XCTAssertEqual(
+                engine.reportSustainedActivity(in: gateProjectA, at: clock.now),
+                .noChange
+            )
+        }
+        XCTAssertTrue(engine.allSessions.isEmpty)
+
+        // The input ages past the 120-second idle threshold before confirmation.
+        clock.advance(by: 15)
+        XCTAssertEqual(engine.idleDetected(at: clock.now), .noChange)
+
+        // A single new input after the idle period must not combine with the
+        // earlier heartbeat window to create a session.
+        clock.advance(by: 10)
+        XCTAssertEqual(engine.userActivity(in: gateProjectA, at: clock.now), .noChange)
+        XCTAssertTrue(engine.allSessions.isEmpty)
+    }
+
     func testConfirmationGate_foregroundChangeAloneDoesNotStartOrAccumulate() {
         let clock = FakeClock(gateT0)
         let store = MemoryStore()
