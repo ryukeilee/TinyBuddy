@@ -212,6 +212,39 @@ final class FocusSessionAppBridge {
 
     // MARK: - Idle detection
 
+    /// Input event types that keep an active focus session alive. Polling only
+    /// key-up and left-click events mistakes scrolling, pointer use, and right-
+    /// or middle-button input for inactivity.
+    static let trackedInputEventTypes: [CGEventType] = [
+        .keyDown,
+        .keyUp,
+        .flagsChanged,
+        .leftMouseDown,
+        .leftMouseUp,
+        .rightMouseDown,
+        .rightMouseUp,
+        .otherMouseDown,
+        .otherMouseUp,
+        .mouseMoved,
+        .leftMouseDragged,
+        .rightMouseDragged,
+        .otherMouseDragged,
+        .scrollWheel,
+    ]
+
+    /// Returns the age of the most recent keyboard, pointer, or scroll event.
+    /// The query closure keeps the aggregation deterministic in tests.
+    static func secondsSinceLastInputEvent(
+        querying query: (CGEventType) -> TimeInterval = { eventType in
+            CGEventSource.secondsSinceLastEventType(
+                .combinedSessionState,
+                eventType: eventType
+            )
+        }
+    ) -> TimeInterval {
+        trackedInputEventTypes.map(query).min() ?? .infinity
+    }
+
     private func startIdleDetection() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
         let leeway = max(1, Int(idlePollInterval / 5))
@@ -229,9 +262,7 @@ final class FocusSessionAppBridge {
 
     private func checkIdleState() {
         guard !isStopped else { return }
-        let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
-        let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
-        let idleSeconds = min(idleKey, idleMouse)
+        let idleSeconds = Self.secondsSinceLastInputEvent()
         let isNowIdle = idleSeconds > idleThreshold
 
         if isNowIdle, !wasIdle {
@@ -268,9 +299,7 @@ final class FocusSessionAppBridge {
     /// immediately start a session instead of waiting for the next idle poll.
     private func reportCurrentStateAfterIdle() {
         guard !isStopped else { return }
-        let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
-        let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
-        let idleSeconds = min(idleKey, idleMouse)
+        let idleSeconds = Self.secondsSinceLastInputEvent()
 
         checkDayChange()
 
@@ -289,9 +318,7 @@ final class FocusSessionAppBridge {
     /// start a session directly instead of waiting for the first idle poll.
     private func sampleInitialActivity() {
         guard !isStopped else { return }
-        let idleKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
-        let idleMouse = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
-        let idleSeconds = min(idleKey, idleMouse)
+        let idleSeconds = Self.secondsSinceLastInputEvent()
 
         if idleSeconds <= idleThreshold {
             wasIdle = false
