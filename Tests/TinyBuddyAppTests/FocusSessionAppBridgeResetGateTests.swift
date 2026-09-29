@@ -6,6 +6,28 @@ import XCTest
 final class FocusSessionAppBridgeResetGateTests: XCTestCase {
     private var temporaryURL: URL!
 
+    @MainActor
+    func testRecentScrollAndPointerEventsPreventFalseIdleDetection() {
+        let idleThreshold = FocusSessionConfiguration().idleThreshold
+        let recentInputTypes: [CGEventType] = [
+            .scrollWheel,
+            .rightMouseUp,
+            .mouseMoved,
+        ]
+
+        for recentInputType in recentInputTypes {
+            var queriedTypes: [CGEventType] = []
+            let idleSeconds = FocusSessionAppBridge.secondsSinceLastInputEvent { eventType in
+                queriedTypes.append(eventType)
+                return eventType == recentInputType ? 1 : idleThreshold + 60
+            }
+
+            XCTAssertEqual(idleSeconds, 1, "Recent input \(recentInputType) must reset idle time")
+            XCTAssertLessThan(idleSeconds, idleThreshold)
+            XCTAssertEqual(queriedTypes.count, FocusSessionAppBridge.trackedInputEventTypes.count)
+        }
+    }
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         temporaryURL = FileManager.default.temporaryDirectory
