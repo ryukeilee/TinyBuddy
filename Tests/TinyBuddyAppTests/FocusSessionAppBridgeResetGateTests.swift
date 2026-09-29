@@ -7,24 +7,59 @@ final class FocusSessionAppBridgeResetGateTests: XCTestCase {
     private var temporaryURL: URL!
 
     @MainActor
-    func testRecentScrollAndPointerEventsPreventFalseIdleDetection() {
+    func testInputAgeTransitionsMatchFullScanAndShortCircuitByInputType() {
         let idleThreshold = FocusSessionConfiguration().idleThreshold
-        let recentInputTypes: [CGEventType] = [
-            .scrollWheel,
-            .rightMouseUp,
-            .mouseMoved,
+        let pollInterval: TimeInterval = 15
+        let fixtures: [(name: String, eventType: CGEventType)] = [
+            ("keyboard", .keyDown),
+            ("pointer-motion-only", .mouseMoved),
+            ("scroll-only", .scrollWheel),
         ]
 
-        for recentInputType in recentInputTypes {
-            var queriedTypes: [CGEventType] = []
-            let idleSeconds = FocusSessionAppBridge.secondsSinceLastInputEvent { eventType in
-                queriedTypes.append(eventType)
-                return eventType == recentInputType ? 1 : idleThreshold + 60
+        for fixture in fixtures {
+            var baselineTransitions: [Bool] = []
+            var candidateTransitions: [Bool] = []
+            var baselineQueryCount = 0
+            var candidateQueryCount = 0
+
+            for eventAge in stride(
+                from: 0,
+                through: idleThreshold + pollInterval,
+                by: pollInterval
+            ) {
+                let ageForEvent: (CGEventType) -> TimeInterval = { eventType in
+                    eventType == fixture.eventType ? eventAge : idleThreshold + pollInterval
+                }
+                let baselineAges = FocusSessionAppBridge.trackedInputEventTypes.map { eventType in
+                    baselineQueryCount += 1
+                    return ageForEvent(eventType)
+                }
+                baselineTransitions.append((baselineAges.min() ?? .infinity) <= idleThreshold)
+
+                candidateTransitions.append(
+                    FocusSessionAppBridge.hasRecentInputEvent(within: idleThreshold) { eventType in
+                        candidateQueryCount += 1
+                        return ageForEvent(eventType)
+                    }
+                )
             }
 
-            XCTAssertEqual(idleSeconds, 1, "Recent input \(recentInputType) must reset idle time")
-            XCTAssertLessThan(idleSeconds, idleThreshold)
-            XCTAssertEqual(queriedTypes.count, FocusSessionAppBridge.trackedInputEventTypes.count)
+            let expectedTransitions = Array(
+                repeating: true,
+                count: Int(idleThreshold / pollInterval) + 1
+            ) + [false]
+            let expectedCandidateQueries = (Int(idleThreshold / pollInterval) + 1)
+                * ((FocusSessionAppBridge.trackedInputEventTypes.firstIndex(of: fixture.eventType) ?? 0) + 1)
+                + FocusSessionAppBridge.trackedInputEventTypes.count
+
+            XCTAssertEqual(baselineTransitions, expectedTransitions, fixture.name)
+            XCTAssertEqual(candidateTransitions, baselineTransitions, fixture.name)
+            XCTAssertEqual(
+                baselineQueryCount,
+                candidateTransitions.count * FocusSessionAppBridge.trackedInputEventTypes.count,
+                fixture.name
+            )
+            XCTAssertEqual(candidateQueryCount, expectedCandidateQueries, fixture.name)
         }
     }
 
