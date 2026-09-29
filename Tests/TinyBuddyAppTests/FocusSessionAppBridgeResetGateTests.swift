@@ -3,8 +3,92 @@ import XCTest
 @testable import TinyBuddy
 @testable import TinyBuddyCore
 
+private final class BridgeGateClock: FocusClock, @unchecked Sendable {
+    private var date: Date
+    var now: Date { date }
+    var monotonic: TimeInterval { date.timeIntervalSinceReferenceDate }
+
+    init(_ date: Date) {
+        self.date = date
+    }
+
+    func set(to date: Date) {
+        self.date = date
+    }
+}
+
+private final class BridgeGateStore: FocusSessionPersisting, @unchecked Sendable {
+    private var sessions: [FocusSession] = []
+
+    func load() -> [FocusSession]? { sessions }
+    func save(_ sessions: [FocusSession]) -> Bool {
+        self.sessions = sessions
+        return true
+    }
+}
+
 final class FocusSessionAppBridgeResetGateTests: XCTestCase {
     private var temporaryURL: URL!
+
+    @MainActor
+    func testStartupInputThatStopsMustNotConfirmAtIdleBoundary() {
+        let config = FocusSessionConfiguration()
+        let idleThreshold = config.idleThreshold
+        let idlePollInterval = min(15, max(5, idleThreshold / 8))
+        let start = Date(timeIntervalSinceReferenceDate: 3_000_000)
+        let clock = BridgeGateClock(start)
+        let engine = FocusSessionEngine(
+            clock: clock,
+            persisting: BridgeGateStore(),
+            config: config,
+            dayIdentifier: { _ in "2026-09-29" }
+        )
+        let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
+
+        coordinator.reportForegroundApp(
+            bundleID: "com.apple.dt.Xcode",
+            displayName: "Xcode",
+            isCodeEditor: true,
+            at: start
+        )
+        // Mirrors sampleInitialActivity(): the app launches immediately after
+        // one input event, with no further input during the idle poll sequence.
+        coordinator.reportActiveAfterIdle(at: start)
+
+        var wasIdle = false
+        var observedActivity: [Bool] = []
+        for elapsed in stride(
+            from: idlePollInterval,
+            through: idleThreshold + idlePollInterval,
+            by: idlePollInterval
+        ) {
+            clock.set(to: start.addingTimeInterval(elapsed))
+            let hasRecentInput = FocusSessionAppBridge.hasRecentInputEvent(
+                within: idleThreshold
+            ) { eventType in
+                eventType == .keyDown ? elapsed : .infinity
+            }
+            observedActivity.append(hasRecentInput)
+
+            if hasRecentInput, wasIdle {
+                wasIdle = false
+                coordinator.reportUserInput(at: clock.now)
+            } else if hasRecentInput {
+                coordinator.reportSustainedActivity(at: clock.now)
+            } else if !wasIdle {
+                wasIdle = true
+                coordinator.reportIdle(at: clock.now)
+            } else {
+                coordinator.reportProlongedIdle(at: clock.now)
+            }
+        }
+
+        XCTAssertEqual(observedActivity, Array(repeating: true, count: 7) + [false, false])
+        XCTAssertTrue(
+            engine.allSessions.isEmpty,
+            "One startup input must not accumulate the full idle threshold as active focus"
+        )
+    }
 
     @MainActor
     func testInputAgeTransitionsMatchFullScanAndShortCircuitByInputType() {
@@ -22,11 +106,12 @@ final class FocusSessionAppBridgeResetGateTests: XCTestCase {
             var baselineQueryCount = 0
             var candidateQueryCount = 0
 
-            for eventAge in stride(
+            let eventAges = Array(stride(
                 from: 0,
                 through: idleThreshold + pollInterval,
                 by: pollInterval
-            ) {
+            ))
+            for eventAge in eventAges {
                 let ageForEvent: (CGEventType) -> TimeInterval = { eventType in
                     eventType == fixture.eventType ? eventAge : idleThreshold + pollInterval
                 }
@@ -34,7 +119,7 @@ final class FocusSessionAppBridgeResetGateTests: XCTestCase {
                     baselineQueryCount += 1
                     return ageForEvent(eventType)
                 }
-                baselineTransitions.append((baselineAges.min() ?? .infinity) <= idleThreshold)
+                baselineTransitions.append((baselineAges.min() ?? .infinity) < idleThreshold)
 
                 candidateTransitions.append(
                     FocusSessionAppBridge.hasRecentInputEvent(within: idleThreshold) { eventType in
@@ -44,13 +129,14 @@ final class FocusSessionAppBridgeResetGateTests: XCTestCase {
                 )
             }
 
-            let expectedTransitions = Array(
-                repeating: true,
-                count: Int(idleThreshold / pollInterval) + 1
-            ) + [false]
-            let expectedCandidateQueries = (Int(idleThreshold / pollInterval) + 1)
-                * ((FocusSessionAppBridge.trackedInputEventTypes.firstIndex(of: fixture.eventType) ?? 0) + 1)
-                + FocusSessionAppBridge.trackedInputEventTypes.count
+            let expectedTransitions = eventAges.map { $0 < idleThreshold }
+            let recentEventQueryCount =
+                (FocusSessionAppBridge.trackedInputEventTypes.firstIndex(of: fixture.eventType) ?? 0) + 1
+            let expectedCandidateQueries = eventAges.reduce(into: 0) { count, eventAge in
+                count += eventAge < idleThreshold
+                    ? recentEventQueryCount
+                    : FocusSessionAppBridge.trackedInputEventTypes.count
+            }
 
             XCTAssertEqual(baselineTransitions, expectedTransitions, fixture.name)
             XCTAssertEqual(candidateTransitions, baselineTransitions, fixture.name)
