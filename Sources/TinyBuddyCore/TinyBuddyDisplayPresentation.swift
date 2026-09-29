@@ -180,6 +180,40 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         ].joined(separator: "|")
     }
 
+    /// Compact Widget-side history context. It follows the same resolved state
+    /// as the main title, so stale or unavailable snapshots cannot imply that
+    /// a retained focus publication is current.
+    public func focusSessionSummary(
+        publication: FocusHistoryPublication?,
+        at now: Date
+    ) -> String? {
+        guard state.isActivityState,
+              let publication,
+              let day = publication.snapshot.recentDays.last else {
+            return nil
+        }
+
+        let duration = FocusHistoryDurationFormatter.text(
+            for: publication.currentDayDuration(at: now)
+        )
+        if state == .focusing, publication.isFocusSessionActive {
+            return "正在专注 · 今日累计 \(duration)"
+        }
+        if state == .paused, publication.isFocusSessionPaused {
+            return "专注已暂停 · 今日累计 \(duration)"
+        }
+
+        switch day.state {
+        case .sessions:
+            let completedCount = day.completedSessionCount.map { " · 已完成 \($0) 段" } ?? ""
+            return "今日专注 \(duration)\(completedCount)"
+        case .noSessions:
+            return "今日暂无专注"
+        case .unknown:
+            return nil
+        }
+    }
+
     public init(
         snapshot: TinyBuddySnapshot,
         activitySnapshot: GitTodayActivitySnapshot,
