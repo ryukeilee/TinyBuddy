@@ -20,7 +20,7 @@ TinyBuddy is a Swift 6.0 (swiftLanguageMode .v6) macOS 14 project with both Swif
 - `script/process_resource_probe.swift` is a lightweight CLI that samples `proc_pid_rusage(RUSAGE_INFO_V4)` for a given PID and outputs CSV — used by the regression gate.
 - `project.yml` is the XcodeGen source of truth for `TinyBuddy.xcodeproj`; regenerate the project after target, bundle, entitlement, or signing changes, and whenever a new source file is added under a path-based `Sources`/`Widget` directory (an already-generated project does not auto-include new files). `script/tb-install.sh` does this automatically when the project is stale.
 - `.gitignore` and `.gitleaks.toml` provide repository-level security and secret scanning configuration.
-- `.agent/` contains the repeatable maintenance loop: `loop.md` is the seven-stage operating contract (Observe → Evidence → Decide → Execute → Verify → Record → Maintain) for optimizing existing features, `rules.md` bounds loop agents, `memory.md` holds stable long-term project knowledge, `history.md` keeps the most recent ~10 round records, and `.agent/archive/` preserves older records verbatim.
+- The `.agent/` maintenance-loop metadata was intentionally removed in `a73455f` (`Remove maintenance loop metadata`) and is not part of the current repository structure.
 - `docs/superpowers/` contains feature development design docs: `plans/` for design plans and `specs/` for specifications.
 
 ## Build, Test, and Development Commands
