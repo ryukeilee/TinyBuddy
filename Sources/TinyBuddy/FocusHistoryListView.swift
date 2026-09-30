@@ -20,6 +20,9 @@ struct FocusHistoryListView: View {
     @State private var selectedStatus: FocusSessionStatus? = nil
     @State private var dayStart: String? = nil
     @State private var dayEnd: String? = nil
+    @State private var dayStartInput = ""
+    @State private var dayEndInput = ""
+    @State private var dateFilterError: HistoryDateFilterValidationError?
     @State private var showDateFilter = false
     @State private var projectOptions: [(key: String, name: String)] = []
 
@@ -194,28 +197,60 @@ struct FocusHistoryListView: View {
             Text("日期范围")
                 .font(.headline)
             TextField("开始日期 (yyyy-MM-dd)", text: Binding(
-                get: { dayStart ?? "" },
-                set: { dayStart = $0.isEmpty ? nil : $0 }
+                get: { dayStartInput },
+                set: {
+                    dayStartInput = $0
+                    dateFilterError = nil
+                }
             ))
             .textFieldStyle(.roundedBorder)
             .font(.subheadline)
             TextField("结束日期 (yyyy-MM-dd)", text: Binding(
-                get: { dayEnd ?? "" },
-                set: { dayEnd = $0.isEmpty ? nil : $0 }
+                get: { dayEndInput },
+                set: {
+                    dayEndInput = $0
+                    dateFilterError = nil
+                }
             ))
             .textFieldStyle(.roundedBorder)
             .font(.subheadline)
 
+            if let dateFilterError {
+                Text(dateFilterError.message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 Button("清除") {
+                    dayStartInput = ""
+                    dayEndInput = ""
                     dayStart = nil
                     dayEnd = nil
-                    applyFilters()
+                    dateFilterError = nil
+                    Task {
+                        await controller.clearDateFilter(in: makeQuery())
+                    }
                     showDateFilter = false
                 }
                 Button("应用") {
-                    applyFilters()
-                    showDateFilter = false
+                    var proposedQuery = makeQuery()
+                    proposedQuery.dayStart = dayStartInput.isEmpty ? nil : dayStartInput
+                    proposedQuery.dayEnd = dayEndInput.isEmpty ? nil : dayEndInput
+                    Task {
+                        if let error = await controller.updateQuery(
+                            validatingDateFilter: proposedQuery,
+                            debounceSeconds: 0
+                        ) {
+                            dateFilterError = error
+                            return
+                        }
+                        dayStart = controller.query.dayStart
+                        dayEnd = controller.query.dayEnd
+                        dateFilterError = nil
+                        showDateFilter = false
+                    }
                 }
                 .buttonStyle(.borderedProminent)
             }
