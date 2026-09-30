@@ -37,12 +37,13 @@ final class HistoryQueryControllerTests: XCTestCase {
     private func makeSession(
         id: UUID,
         project: FocusProjectContext,
-        startedAt: Date
+        startedAt: Date,
+        dayIdentifier: String = "2026-07-20"
     ) -> FocusSession {
         FocusSession(
             id: id,
             project: project,
-            dayIdentifier: "2026-07-20",
+            dayIdentifier: dayIdentifier,
             startedAt: startedAt,
             endedAt: startedAt.addingTimeInterval(600),
             status: .ended,
@@ -334,6 +335,151 @@ final class HistoryQueryControllerTests: XCTestCase {
         assertCanonicallyOrdered(controller.allSessions)
     }
 
+    // MARK: - Date Filter Validation
+
+    func testHistoryDateFilterRejectsInvalidFormatsDatesAndRanges() {
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(FocusSessionQuery(dayStart: "2026-7-20")),
+            .failure(.invalidFormat(.start))
+        )
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(FocusSessionQuery(dayStart: "2026-13-01")),
+            .failure(.invalidDate(.start))
+        )
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(FocusSessionQuery(dayEnd: "2026-02-30")),
+            .failure(.invalidDate(.end))
+        )
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(FocusSessionQuery(dayEnd: "2026-07-20 ")),
+            .failure(.invalidFormat(.end))
+        )
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(
+                FocusSessionQuery(dayStart: "2026-07-21", dayEnd: "2026-07-20")
+            ),
+            .failure(.reversedRange)
+        )
+    }
+
+    func testHistoryDateFilterAcceptsLeapDaysOnlyInLeapYears() {
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(FocusSessionQuery(dayStart: "2024-02-29")),
+            .success(FocusSessionQuery(dayStart: "2024-02-29"))
+        )
+        XCTAssertEqual(
+            HistoryDateFilterValidator.validate(FocusSessionQuery(dayStart: "2025-02-29")),
+            .failure(.invalidDate(.start))
+        )
+    }
+
+    func testValidatedHistoryDateFilterUsesInclusiveAndSingleBoundaries() async {
+        let days = (18 ... 22).map { String(format: "2026-07-%02d", $0) }
+        let sessions = days.enumerated().map { index, day in
+            makeSession(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", index + 1))!,
+                project: alpha,
+                startedAt: Date(timeIntervalSinceReferenceDate: 2_000_000 + Double(index) * 60),
+                dayIdentifier: day
+            )
+        }
+        let controller = makeController(box: SessionProviderBox(sessions))
+        await controller.refresh()
+
+        let startResult = await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(dayStart: "2026-07-20")
+        )
+        XCTAssertNil(startResult)
+        XCTAssertEqual(
+            controller.allSessions.map(\.dayIdentifier).sorted(),
+            ["2026-07-20", "2026-07-21", "2026-07-22"]
+        )
+
+        let endResult = await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(dayEnd: "2026-07-20")
+        )
+        XCTAssertNil(endResult)
+        XCTAssertEqual(
+            controller.allSessions.map(\.dayIdentifier).sorted(),
+            ["2026-07-18", "2026-07-19", "2026-07-20"]
+        )
+
+        let closedRangeResult = await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(
+                dayStart: "2026-07-19",
+                dayEnd: "2026-07-21"
+            )
+        )
+        XCTAssertNil(closedRangeResult)
+        XCTAssertEqual(
+            controller.allSessions.map(\.dayIdentifier).sorted(),
+            ["2026-07-19", "2026-07-20", "2026-07-21"]
+        )
+    }
+
+    func testInvalidHistoryDateFilterPreservesTheActiveQueryAndResults() async {
+        let days = ["2026-07-19", "2026-07-20", "2026-07-21"]
+        let sessions = days.enumerated().map { index, day in
+            makeSession(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", index + 1))!,
+                project: alpha,
+                startedAt: Date(timeIntervalSinceReferenceDate: 3_000_000 + Double(index) * 60),
+                dayIdentifier: day
+            )
+        }
+        let box = SessionProviderBox(sessions)
+        let controller = makeController(box: box)
+        await controller.refresh()
+        let validResult = await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(dayStart: "2026-07-20")
+        )
+        XCTAssertNil(validResult)
+
+        let previousQuery = controller.query
+        let previousIDs = controller.allSessions.map(\.id)
+        let providerReads = box.providerCallCount
+        let monthError = await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(dayStart: "2026-13-01")
+        )
+        XCTAssertEqual(monthError, .invalidDate(.start))
+        XCTAssertEqual(controller.query, previousQuery)
+        XCTAssertEqual(controller.allSessions.map(\.id), previousIDs)
+
+        let reverseError = await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(
+                dayStart: "2026-07-21",
+                dayEnd: "2026-07-20"
+            )
+        )
+        XCTAssertEqual(reverseError, .reversedRange)
+        XCTAssertEqual(controller.query, previousQuery)
+        XCTAssertEqual(controller.allSessions.map(\.id), previousIDs)
+        XCTAssertEqual(box.providerCallCount, providerReads)
+    }
+
+    func testClearDateFilterRemovesBoundsAndReloadsAllMatchingSessions() async {
+        let days = ["2026-07-19", "2026-07-20", "2026-07-21"]
+        let sessions = days.enumerated().map { index, day in
+            makeSession(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", index + 1))!,
+                project: alpha,
+                startedAt: Date(timeIntervalSinceReferenceDate: 4_000_000 + Double(index) * 60),
+                dayIdentifier: day
+            )
+        }
+        let controller = makeController(box: SessionProviderBox(sessions))
+        await controller.updateQuery(
+            validatingDateFilter: FocusSessionQuery(dayStart: "2026-07-20", dayEnd: "2026-07-20")
+        )
+        XCTAssertEqual(controller.allSessions.map(\.dayIdentifier), ["2026-07-20"])
+
+        await controller.clearDateFilter(in: controller.query)
+
+        XCTAssertNil(controller.query.dayStart)
+        XCTAssertNil(controller.query.dayEnd)
+        XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), days)
+    }
+
     // MARK: - View Wiring
 
     /// Guards the view-level wiring (following the repository's source-level
@@ -357,6 +503,21 @@ final class HistoryQueryControllerTests: XCTestCase {
 
         // Project options refresh when pagination or reload changes the set.
         XCTAssertTrue(list.contains("onChange(of: controller.allSessions.count)"))
+
+        // Date submissions use the controller's validated path; failed input
+        // stays visible, while Clear resets the draft and committed bounds.
+        XCTAssertTrue(list.contains("validatingDateFilter: proposedQuery"))
+        XCTAssertTrue(list.contains("if let dateFilterError"))
+        XCTAssertTrue(list.contains("Text(dateFilterError.message)"))
+        XCTAssertTrue(list.contains("clearDateFilter(in: makeQuery())"))
+        let clearButton = try XCTUnwrap(list.range(of: "Button(\"清除\")"))
+        let applyButton = try XCTUnwrap(
+            list.range(of: "Button(\"应用\")", range: clearButton.upperBound ..< list.endIndex)
+        )
+        let clearAction = String(list[clearButton.lowerBound ..< applyButton.lowerBound])
+        XCTAssertTrue(clearAction.contains("dayStartInput = \"\""))
+        XCTAssertTrue(clearAction.contains("dayEndInput = \"\""))
+        XCTAssertTrue(clearAction.contains("dateFilterError = nil"))
     }
 
     private func source(_ relativePath: String) throws -> String {

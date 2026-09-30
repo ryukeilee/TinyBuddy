@@ -2,6 +2,109 @@ import Foundation
 import OSLog
 import TinyBuddyCore
 
+enum HistoryDateFilterField: Equatable {
+    case start
+    case end
+
+    var label: String {
+        switch self {
+        case .start: return "开始日期"
+        case .end: return "结束日期"
+        }
+    }
+}
+
+enum HistoryDateFilterValidationError: Error, Equatable {
+    case invalidFormat(HistoryDateFilterField)
+    case invalidDate(HistoryDateFilterField)
+    case reversedRange
+
+    var message: String {
+        switch self {
+        case .invalidFormat(let field):
+            return "\(field.label)格式无效，请使用 yyyy-MM-dd。"
+        case .invalidDate(let field):
+            return "\(field.label)不是有效的日历日期。"
+        case .reversedRange:
+            return "开始日期不能晚于结束日期。"
+        }
+    }
+}
+
+enum HistoryDateFilterValidator {
+    static func validate(
+        _ query: FocusSessionQuery
+    ) -> Result<FocusSessionQuery, HistoryDateFilterValidationError> {
+        var validatedQuery = query
+
+        if let dayStart = query.dayStart, !dayStart.isEmpty {
+            guard hasExpectedFormat(dayStart) else {
+                return .failure(.invalidFormat(.start))
+            }
+            guard isRealGregorianDate(dayStart) else {
+                return .failure(.invalidDate(.start))
+            }
+        } else {
+            validatedQuery.dayStart = nil
+        }
+
+        if let dayEnd = query.dayEnd, !dayEnd.isEmpty {
+            guard hasExpectedFormat(dayEnd) else {
+                return .failure(.invalidFormat(.end))
+            }
+            guard isRealGregorianDate(dayEnd) else {
+                return .failure(.invalidDate(.end))
+            }
+        } else {
+            validatedQuery.dayEnd = nil
+        }
+
+        if let dayStart = validatedQuery.dayStart,
+           let dayEnd = validatedQuery.dayEnd,
+           dayStart > dayEnd {
+            return .failure(.reversedRange)
+        }
+
+        return .success(validatedQuery)
+    }
+
+    private static func hasExpectedFormat(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 10, bytes[4] == 45, bytes[7] == 45 else {
+            return false
+        }
+        return bytes.enumerated().allSatisfy { index, byte in
+            index == 4 || index == 7 || (48 ... 57).contains(byte)
+        }
+    }
+
+    private static func isRealGregorianDate(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        let year = Int(bytes[0] - 48) * 1_000
+            + Int(bytes[1] - 48) * 100
+            + Int(bytes[2] - 48) * 10
+            + Int(bytes[3] - 48)
+        let month = Int(bytes[5] - 48) * 10 + Int(bytes[6] - 48)
+        let day = Int(bytes[8] - 48) * 10 + Int(bytes[9] - 48)
+        guard year > 0, (1 ... 12).contains(month), (1 ... 31).contains(day),
+              let timeZone = TimeZone(secondsFromGMT: 0) else {
+            return false
+        }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.timeZone = timeZone
+        guard let date = calendar.date(from: components) else { return false }
+
+        let roundTrip = calendar.dateComponents([.year, .month, .day], from: date)
+        return roundTrip.year == year && roundTrip.month == month && roundTrip.day == day
+    }
+}
+
 // MARK: - History Query Controller
 
 /// `@Observable` controller that provides a SwiftUI-friendly, cancellable,
@@ -177,6 +280,29 @@ final class HistoryQueryController {
         // Only the most recent update survives the debounce wait.
         guard isLatest(claimed) else { return }
         await refresh()
+    }
+
+    /// Validates the App history date filter before changing the active query.
+    /// Invalid dates leave both the current query and its loaded results intact.
+    func updateQuery(
+        validatingDateFilter proposedQuery: FocusSessionQuery,
+        debounceSeconds: TimeInterval = 0
+    ) async -> HistoryDateFilterValidationError? {
+        switch HistoryDateFilterValidator.validate(proposedQuery) {
+        case .success(let validatedQuery):
+            await updateQuery(validatedQuery, debounceSeconds: debounceSeconds)
+            return nil
+        case .failure(let error):
+            return error
+        }
+    }
+
+    /// Clears only the date bounds while retaining the other supplied filters.
+    func clearDateFilter(in proposedQuery: FocusSessionQuery) async {
+        var clearedQuery = proposedQuery
+        clearedQuery.dayStart = nil
+        clearedQuery.dayEnd = nil
+        await updateQuery(clearedQuery, debounceSeconds: 0)
     }
 
     /// Reloads the current query from scratch (used after edits).
