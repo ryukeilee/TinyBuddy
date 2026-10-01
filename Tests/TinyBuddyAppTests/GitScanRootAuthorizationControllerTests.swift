@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import TinyBuddy
 @testable import TinyBuddyCore
@@ -263,14 +264,139 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         XCTAssertTrue(viewModel.addExclusionRule(pattern: " ./Teams/Private/ "))
         XCTAssertFalse(viewModel.addExclusionRule(pattern: "Teams/Private"))
         XCTAssertFalse(viewModel.addExclusionRule(pattern: "../Outside"))
+        XCTAssertNil(viewModel.exclusionRuleSaveErrorMessage)
         XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Teams/Private"])
         XCTAssertEqual(configStore.load()?.exclusionRules.map(\.pattern), ["Teams/Private"])
 
         let identifier = try XCTUnwrap(viewModel.exclusionRules.first?.id)
         XCTAssertTrue(viewModel.removeExclusionRule(id: identifier))
         XCTAssertFalse(viewModel.removeExclusionRule(id: identifier))
+        XCTAssertNil(viewModel.exclusionRuleSaveErrorMessage)
         XCTAssertEqual(configStore.load()?.exclusionRules, [])
         XCTAssertEqual(changeCount, 2)
+    }
+
+    func testSettingsViewModelReportsAndClearsExclusionSaveFailure() throws {
+        let saveFailureMessage =
+            "无法确认排除规则已保存。配置写入可能部分完成，当前状态可能无法读取。请重启 TinyBuddy 并检查规则，再决定是否重新修改。"
+        let notificationCenter = NotificationCenter()
+        let storage = GitSettingsConfigStorage()
+        let configStore = makeConfigStore(storage: storage)
+        let initialConfig = TinyBuddyAppConfig(
+            configVersion: 1,
+            exclusionRules: [TinyBuddyExclusionRule(pattern: "Existing")],
+            dayIdentifier: "2026-07-20"
+        )
+        XCTAssertEqual(configStore.save(initialConfig), .saved)
+        let viewModel = GitScanRootSettingsViewModel(
+            store: makeStore(userDefaults: makeDefaults()),
+            configStore: configStore,
+            notificationCenter: notificationCenter
+        )
+        viewModel.loginItemErrorMessage = "登录项状态仍由登录项设置管理。"
+
+        var changeCount = 0
+        let observer = notificationCenter.addObserver(
+            forName: .tinyBuddySettingsDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            if notification.userInfo?[GitScanRootAuthorizationCommand.exclusionsDidChangeKey] as? Bool == true {
+                changeCount += 1
+            }
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        storage.rejectPayloadWrites = true
+        XCTAssertFalse(viewModel.addExclusionRule(pattern: "New/Rule"))
+        XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Existing"])
+        XCTAssertEqual(configStore.load(), initialConfig)
+        XCTAssertEqual(changeCount, 0)
+        XCTAssertEqual(
+            viewModel.exclusionRuleSaveErrorMessage,
+            saveFailureMessage
+        )
+        XCTAssertEqual(viewModel.loginItemErrorMessage, "登录项状态仍由登录项设置管理。")
+
+        let settingsView = GitScanRootSettingsView(viewModel: viewModel)
+        let renderedStrings = reflectedStrings(in: settingsView.body)
+        XCTAssertTrue(
+            renderedStrings.contains { $0.contains(saveFailureMessage) },
+            "Expected the settings view body to contain the bound save feedback; got: \(renderedStrings)"
+        )
+
+        XCTAssertFalse(viewModel.addExclusionRule(pattern: "Existing"))
+        XCTAssertFalse(viewModel.addExclusionRule(pattern: "../Outside"))
+        XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Existing"])
+        XCTAssertEqual(changeCount, 0)
+
+        storage.rejectPayloadWrites = false
+        XCTAssertTrue(viewModel.addExclusionRule(pattern: "New/Rule"))
+        XCTAssertNil(viewModel.exclusionRuleSaveErrorMessage)
+        XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Existing", "New/Rule"])
+        XCTAssertEqual(configStore.load()?.exclusionRules.map(\.pattern), ["Existing", "New/Rule"])
+        XCTAssertEqual(changeCount, 1)
+        let recoveredViewStrings = reflectedStrings(
+            in: GitScanRootSettingsView(viewModel: viewModel).body
+        )
+        XCTAssertFalse(
+            recoveredViewStrings.contains { $0.contains("无法确认排除规则已保存") },
+            "Expected the settings view to clear feedback after persistence recovers."
+        )
+
+        let existingID = try XCTUnwrap(viewModel.exclusionRules.first?.id)
+        storage.rejectPayloadWrites = true
+        XCTAssertFalse(viewModel.removeExclusionRule(id: existingID))
+        XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Existing", "New/Rule"])
+        XCTAssertEqual(configStore.load()?.exclusionRules.map(\.pattern), ["Existing", "New/Rule"])
+        XCTAssertEqual(changeCount, 1)
+        XCTAssertNotNil(viewModel.exclusionRuleSaveErrorMessage)
+        XCTAssertEqual(viewModel.loginItemErrorMessage, "登录项状态仍由登录项设置管理。")
+
+        storage.rejectPayloadWrites = false
+        XCTAssertTrue(viewModel.removeExclusionRule(id: existingID))
+        XCTAssertNil(viewModel.exclusionRuleSaveErrorMessage)
+        XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["New/Rule"])
+        XCTAssertEqual(configStore.load()?.exclusionRules.map(\.pattern), ["New/Rule"])
+        XCTAssertEqual(changeCount, 2)
+    }
+
+    func testSettingsViewModelReportsUnconfirmedSynchronizationAndReadback() {
+        for failure in ["synchronize", "readback"] {
+            let notificationCenter = NotificationCenter()
+            let storage = GitSettingsConfigStorage()
+            let configStore = makeConfigStore(storage: storage)
+            let initialConfig = TinyBuddyAppConfig(
+                configVersion: 1,
+                exclusionRules: [TinyBuddyExclusionRule(pattern: "Existing")],
+                dayIdentifier: "2026-07-20"
+            )
+            XCTAssertEqual(configStore.save(initialConfig), .saved)
+            let viewModel = GitScanRootSettingsViewModel(
+                store: makeStore(userDefaults: makeDefaults()),
+                configStore: configStore,
+                notificationCenter: notificationCenter
+            )
+            var changeCount = 0
+            let observer = notificationCenter.addObserver(
+                forName: .tinyBuddySettingsDidChange,
+                object: nil,
+                queue: nil
+            ) { _ in changeCount += 1 }
+
+            if failure == "synchronize" {
+                storage.failNextSynchronization = true
+            } else {
+                storage.hideNextPayloadReadback = true
+            }
+
+            XCTAssertFalse(viewModel.addExclusionRule(pattern: "New/Rule"), "\(failure)")
+            XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Existing"], "\(failure)")
+            XCTAssertNil(configStore.load(), "\(failure) failure leaves the committed marker and payload unconfirmed")
+            XCTAssertNotNil(viewModel.exclusionRuleSaveErrorMessage, "\(failure)")
+            XCTAssertEqual(changeCount, 0, "\(failure)")
+            notificationCenter.removeObserver(observer)
+        }
     }
 
     func testSettingsViewModelReloadsRecoveredAuthorizationState() async throws {
@@ -329,8 +455,61 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
     }
+
+    private func makeConfigStore(storage: GitSettingsConfigStorage) -> TinyBuddyConfigStore {
+        TinyBuddyConfigStore(
+            directPreferencesProvider: { storage.readValues() },
+            synchronizeReads: {},
+            writeValue: { value, key in storage.writeValue(value, forKey: key) },
+            synchronizeWrites: { storage.synchronizeWrites() },
+            readFailureProvider: { nil }
+        )
+    }
+
+    private func reflectedStrings(in value: Any, depth: Int = 0) -> [String] {
+        if let string = value as? String {
+            return [string]
+        }
+        guard depth < 32 else { return [] }
+        let mirror = Mirror(reflecting: value)
+        guard mirror.displayStyle != .class else { return [] }
+        return mirror.children.prefix(256).flatMap { child in
+            reflectedStrings(in: child.value, depth: depth + 1)
+        }
+    }
 }
 
 private final class GitSettingsConfigStorage: @unchecked Sendable {
     var values: [String: Any] = [:]
+    var rejectPayloadWrites = false
+    var failNextSynchronization = false
+    var hideNextPayloadReadback = false
+    private var hidePayloadInNextSnapshot = false
+
+    func readValues() -> [String: Any] {
+        var snapshot = values
+        if hidePayloadInNextSnapshot {
+            snapshot.removeValue(forKey: TinyBuddyConfigStore.Key.configPayload)
+            hidePayloadInNextSnapshot = false
+        }
+        return snapshot
+    }
+
+    func writeValue(_ value: Any, forKey key: String) -> Bool {
+        if key == TinyBuddyConfigStore.Key.configPayload && rejectPayloadWrites {
+            return false
+        }
+        values[key] = value
+        if key == TinyBuddyConfigStore.Key.configPayload && hideNextPayloadReadback {
+            hideNextPayloadReadback = false
+            hidePayloadInNextSnapshot = true
+        }
+        return true
+    }
+
+    func synchronizeWrites() -> Bool {
+        guard failNextSynchronization else { return true }
+        failNextSynchronization = false
+        return false
+    }
 }
