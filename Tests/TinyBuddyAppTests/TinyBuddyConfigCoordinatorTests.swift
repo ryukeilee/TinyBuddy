@@ -1,4 +1,5 @@
 import XCTest
+import CoreFoundation
 @testable import TinyBuddy
 @testable import TinyBuddyCore
 
@@ -51,6 +52,10 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
             synchronizeReads: {},
             writeValue: { value, key in
                 storage.values[key] = value
+                return true
+            },
+            removeValue: { key in
+                storage.values.removeValue(forKey: key)
                 return true
             },
             synchronizeWrites: { true },
@@ -148,6 +153,119 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
         coordinator.start()
         XCTAssertNotNil(coordinator.currentConfig())
         XCTAssertEqual(coordinator.currentConfig()?.configVersion, 1)
+    }
+
+    @MainActor
+    func testStartDoesNotReplaceAnUncommittedPayloadWithDefaults() throws {
+        let storage = InMemoryConfigStorage()
+        let configStore = makeStore(storage: storage)
+        let existingPayload = TinyBuddyAppConfig(
+            configVersion: 9,
+            hudEnabled: false,
+            exclusionRules: [TinyBuddyExclusionRule(id: "keep", pattern: "Private")],
+            dayIdentifier: dayID
+        ).dictionaryValue
+        storage.values[TinyBuddyConfigStore.Key.configPayload] = existingPayload
+
+        let coordinator = TinyBuddyConfigCoordinator(
+            configStore: configStore,
+            scanRootsProvider: { TinyBuddyTestConfigRootsProvider.result() },
+            loginItemManager: makeLoginItemManager(state: FakeLoginItemState())
+        )
+        coordinator.start()
+
+        XCTAssertNil(coordinator.currentConfig())
+        XCTAssertTrue(
+            NSDictionary(dictionary: try XCTUnwrap(
+                storage.values[TinyBuddyConfigStore.Key.configPayload] as? [String: Any]
+            )).isEqual(to: existingPayload)
+        )
+        XCTAssertNil(storage.values[TinyBuddyConfigStore.Key.configCommittedVersion])
+    }
+
+    @MainActor
+    func testCFPreferencesRecoveryAndRetryAreVisibleInDefaultsProcess() throws {
+        let domain = "com.ryukeili.TinyBuddy.ConfigTests.\(UUID().uuidString.lowercased())"
+        defer { removeCFPreferencesDomain(domain) }
+
+        var failNextSynchronization = false
+        let store = makeCFPreferencesStore(domain: domain) {
+            if failNextSynchronization {
+                failNextSynchronization = false
+                return false
+            }
+            return CFPreferencesSynchronize(
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+        }
+        let initial = TinyBuddyAppConfig(
+            configVersion: 4,
+            scanRootPaths: ["/isolated/project"],
+            hudEnabled: true,
+            exclusionRules: [TinyBuddyExclusionRule(id: "keep", pattern: "Private")],
+            dayIdentifier: dayID
+        )
+        XCTAssertEqual(store.save(initial), .saved)
+
+        let center = NotificationCenter()
+        let publishedCount = LockedTestCounter()
+        let observer = center.addObserver(
+            forName: .tinyBuddyAppConfigDidChange,
+            object: nil,
+            queue: .main
+        ) { _ in
+            publishedCount.increment()
+        }
+        defer { center.removeObserver(observer) }
+
+        let coordinator = TinyBuddyConfigCoordinator(
+            configStore: store,
+            scanRootsProvider: { TinyBuddyTestConfigRootsProvider.result() },
+            loginItemManager: makeLoginItemManager(state: FakeLoginItemState()),
+            notificationCenter: center
+        )
+        coordinator.start()
+        let startingGeneration = coordinator.currentConfigGeneration
+        XCTAssertEqual(coordinator.currentConfig(), initial)
+
+        failNextSynchronization = true
+        coordinator.proposeHUDEnabledChange(false)
+        waitForConfigCoalescing()
+
+        XCTAssertEqual(coordinator.currentConfig(), initial)
+        XCTAssertEqual(coordinator.currentConfigGeneration, startingGeneration)
+        XCTAssertEqual(publishedCount.value, 0)
+        let recoveredValues = try defaultsExport(domain: domain)
+        XCTAssertEqual(
+            recoveredValues[TinyBuddyConfigStore.Key.configCommittedVersion] as? Int64,
+            4
+        )
+        let recoveredPayload = try XCTUnwrap(
+            recoveredValues[TinyBuddyConfigStore.Key.configPayload] as? [String: Any]
+        )
+        XCTAssertEqual(recoveredPayload["configVersion"] as? Int64, 4)
+        XCTAssertEqual(recoveredPayload["hudEnabled"] as? Bool, true)
+
+        let retry = initial.withIncrementedVersion(hudEnabled: false)
+        coordinator.proposeHUDEnabledChange(false)
+        waitForConfigCoalescing()
+
+        XCTAssertEqual(coordinator.currentConfig(), retry)
+        XCTAssertEqual(coordinator.currentConfigGeneration, startingGeneration + 1)
+        XCTAssertEqual(publishedCount.value, 1)
+        let committedValues = try defaultsExport(domain: domain)
+        XCTAssertEqual(
+            committedValues[TinyBuddyConfigStore.Key.configCommittedVersion] as? Int64,
+            5
+        )
+        let committedPayload = try XCTUnwrap(
+            committedValues[TinyBuddyConfigStore.Key.configPayload] as? [String: Any]
+        )
+        XCTAssertEqual(committedPayload["configVersion"] as? Int64, 5)
+        XCTAssertEqual(committedPayload["hudEnabled"] as? Bool, false)
+        XCTAssertEqual(store.loadConfigVersion(), 5)
     }
 
     @MainActor
@@ -634,6 +752,115 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
 
     // MARK: - Helpers
 
+    private func makeCFPreferencesStore(
+        domain: String,
+        synchronizeWrites: @escaping () -> Bool
+    ) -> TinyBuddyConfigStore {
+        TinyBuddyConfigStore(
+            directPreferencesProvider: {
+                let values = CFPreferencesCopyMultiple(
+                    nil,
+                    domain as CFString,
+                    kCFPreferencesCurrentUser,
+                    kCFPreferencesAnyHost
+                )
+                return values as NSDictionary as? [String: Any] ?? [:]
+            },
+            synchronizeReads: {
+                _ = CFPreferencesSynchronize(
+                    domain as CFString,
+                    kCFPreferencesCurrentUser,
+                    kCFPreferencesAnyHost
+                )
+            },
+            writeValue: { value, key in
+                guard PropertyListSerialization.propertyList(
+                    [key: value],
+                    isValidFor: .binary
+                ) else {
+                    return false
+                }
+                CFPreferencesSetValue(
+                    key as CFString,
+                    value as CFPropertyList,
+                    domain as CFString,
+                    kCFPreferencesCurrentUser,
+                    kCFPreferencesAnyHost
+                )
+                return true
+            },
+            removeValue: { key in
+                CFPreferencesSetValue(
+                    key as CFString,
+                    nil,
+                    domain as CFString,
+                    kCFPreferencesCurrentUser,
+                    kCFPreferencesAnyHost
+                )
+                return true
+            },
+            synchronizeWrites: synchronizeWrites,
+            readFailureProvider: { nil }
+        )
+    }
+
+    private func defaultsExport(domain: String) throws -> [String: Any] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        process.arguments = ["export", domain, "-"]
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let errorText = String(
+                data: error.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            throw NSError(
+                domain: "TinyBuddyConfigCoordinatorTests",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "defaults export failed: \(errorText)"]
+            )
+        }
+        let propertyList = try PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        )
+        return try XCTUnwrap(propertyList as? [String: Any])
+    }
+
+    private func removeCFPreferencesDomain(_ domain: String) {
+        CFPreferencesSetMultiple(
+            nil,
+            [
+                TinyBuddyConfigStore.Key.configPayload,
+                TinyBuddyConfigStore.Key.configCommittedVersion
+            ] as CFArray,
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+        _ = CFPreferencesSynchronize(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+    }
+
+    @MainActor
+    private func waitForConfigCoalescing() {
+        let expectation = expectation(description: "config coalescing")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
     @MainActor
     private func makeCoordinator(
         rebuildClosure: @escaping () -> Void = {},
@@ -665,6 +892,23 @@ final class TinyBuddyConfigCoordinatorTests: XCTestCase {
 private final class InMemoryConfigStorage: @unchecked Sendable {
     private let lock = NSLock()
     var values: [String: Any] = [:]
+}
+
+private final class LockedTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+    }
 }
 
 enum TinyBuddyTestConfigRootsProvider {
