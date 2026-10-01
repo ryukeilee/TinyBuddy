@@ -6,6 +6,14 @@ import TinyBuddyCore
 /// active registered project; ambiguity deliberately keeps an isolated manual
 /// key instead of guessing the wrong project.
 enum ManualFocusProjectIdentityResolver {
+    static func customProject(named displayName: String) -> FocusProjectContext {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FocusProjectContext(
+            key: "manual.custom-v2.\(trimmed)",
+            displayName: trimmed
+        )
+    }
+
     static func recentProject(
         named displayName: String,
         registeredProjects: [TinyBuddyProject]
@@ -242,8 +250,7 @@ struct ManualFocusProjectPicker: View {
                     context = FocusProjectContext(key: "manual.\(trimmed)", displayName: trimmed)
                 }
             case .custom:
-                let key = "manual.custom.\(trimmed)".replacingOccurrences(of: " ", with: "-")
-                context = FocusProjectContext(key: key, displayName: trimmed)
+                context = ManualFocusProjectIdentityResolver.customProject(named: trimmed)
             }
         } else {
             context = FocusProjectContext(key: "manual.\(trimmed)", displayName: trimmed)
