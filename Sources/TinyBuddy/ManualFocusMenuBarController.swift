@@ -15,6 +15,7 @@ final class ManualFocusMenuBarController: NSObject {
     private var popoverHostingController: NSHostingController<MenuBarFocusView>?
     private var refreshTimer: Timer?
     private var engine: FocusSessionEngine?
+    private var projectRegistryObserver: NSObjectProtocol?
     private var registeredProjectsProvider: () -> [TinyBuddyProject]
     private var recentProjectNameProvider: () -> String?
 
@@ -37,6 +38,9 @@ final class ManualFocusMenuBarController: NSObject {
     deinit {
         MainActor.assumeIsolated {
             refreshTimer?.invalidate()
+            if let projectRegistryObserver {
+                NotificationCenter.default.removeObserver(projectRegistryObserver)
+            }
         }
     }
 
@@ -44,6 +48,17 @@ final class ManualFocusMenuBarController: NSObject {
 
     func start(with engine: FocusSessionEngine) {
         self.engine = engine
+        if projectRegistryObserver == nil {
+            projectRegistryObserver = NotificationCenter.default.addObserver(
+                forName: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.refresh()
+                }
+            }
+        }
         guard statusItem == nil else { return }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -65,6 +80,10 @@ final class ManualFocusMenuBarController: NSObject {
     func stop() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+        if let projectRegistryObserver {
+            NotificationCenter.default.removeObserver(projectRegistryObserver)
+            self.projectRegistryObserver = nil
+        }
         dismissPopover()
         if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)

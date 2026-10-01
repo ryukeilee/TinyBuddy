@@ -8,6 +8,21 @@ import XCTest
 private let projectA = FocusProjectContext(key: "proj.a", displayName: "Project A")
 private let projectB = FocusProjectContext(key: "proj.b", displayName: "Project B")
 
+private final class ManualControlProjectRegistryMemoryStore: TinyBuddyProjectRegistryPersisting, @unchecked Sendable {
+    private var snapshot: TinyBuddyProjectRegistrySnapshot
+
+    init(projects: [TinyBuddyProject]) {
+        snapshot = TinyBuddyProjectRegistrySnapshot(projects: projects)
+    }
+
+    func load() -> TinyBuddyProjectRegistrySnapshot? { snapshot }
+
+    func save(_ snapshot: TinyBuddyProjectRegistrySnapshot) -> Bool {
+        self.snapshot = snapshot
+        return true
+    }
+}
+
 final class FocusSessionEngineManualControlTests: XCTestCase {
 
     func makeEngine(_ clock: FakeClock, _ store: MemoryStore) -> FocusSessionEngine {
@@ -16,6 +31,156 @@ final class FocusSessionEngineManualControlTests: XCTestCase {
             config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
             dayIdentifier: { _ in "2001-01-24" }
         )
+    }
+
+    private func makeIdentityAwareEngine(
+        _ clock: FakeClock,
+        _ store: MemoryStore,
+        registry: TinyBuddyProjectRegistry?
+    ) -> FocusSessionEngine {
+        FocusSessionEngine(
+            clock: clock,
+            persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
+            dayIdentifier: { _ in "2001-01-24" },
+            projectContextResolver: { context in
+                guard let project = registry?.resolve(projectKey: context.key) else {
+                    return context
+                }
+                return FocusProjectContext(key: project.id.rawValue, displayName: project.displayName)
+            }
+        )
+    }
+
+    func testManualControlProjectionTracksRenameWithoutChangingSessionIdentity() throws {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let sourceID = TinyBuddyProjectID(rawValue: projectA.key)
+        let project = TinyBuddyProject(
+            id: sourceID,
+            kind: .gitRepository,
+            displayName: projectA.displayName,
+            repositoryFingerprint: "manual-control-a",
+            aliases: ["/manual-control-a/.git"]
+        )
+        let registry = TinyBuddyProjectRegistry(
+            store: ManualControlProjectRegistryMemoryStore(projects: [project])
+        )
+        let engine = makeIdentityAwareEngine(clock, MemoryStore(), registry: registry)
+
+        XCTAssertEqual(engine.startManualFocus(project: projectA, at: clock.now), .saved)
+        let originalSession = try XCTUnwrap(engine.allSessions.first)
+        guard case .focusing(let activeProject, _, _) = engine.manualControlState else {
+            return XCTFail("Expected active manual projection")
+        }
+        XCTAssertEqual(activeProject, projectA)
+
+        guard case .saved = registry.rename(id: sourceID, displayName: "Active rename") else {
+            return XCTFail("Rename should save")
+        }
+        guard case .focusing(let renamedActiveProject, _, _) = engine.manualControlState else {
+            return XCTFail("Expected active manual projection after rename")
+        }
+        XCTAssertEqual(renamedActiveProject, FocusProjectContext(key: projectA.key, displayName: "Active rename"))
+        XCTAssertEqual(engine.allSessions.first?.project, originalSession.project)
+        XCTAssertEqual(engine.currentProject, originalSession.project)
+
+        XCTAssertEqual(engine.pauseManualFocus(at: clock.now), .saved)
+        guard case .paused(let pausedProject, _, _, _) = engine.manualControlState else {
+            return XCTFail("Expected paused manual projection")
+        }
+        XCTAssertEqual(pausedProject.displayName, "Active rename")
+
+        guard case .saved = registry.rename(id: sourceID, displayName: "Paused rename") else {
+            return XCTFail("Paused rename should save")
+        }
+        guard case .paused(let renamedPausedProject, _, _, _) = engine.manualControlState else {
+            return XCTFail("Expected paused manual projection after rename")
+        }
+        XCTAssertEqual(renamedPausedProject, FocusProjectContext(key: projectA.key, displayName: "Paused rename"))
+        XCTAssertEqual(engine.allSessions.first?.project, originalSession.project)
+        XCTAssertEqual(engine.currentProject, originalSession.project)
+    }
+
+    func testManualControlProjectionTracksMergeAndUndoUsingOriginalSessionKey() throws {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let target = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "proj.target"),
+            kind: .gitRepository,
+            displayName: "Canonical",
+            repositoryFingerprint: "manual-control-target",
+            aliases: ["/manual-control-target/.git"]
+        )
+        let source = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: projectA.key),
+            kind: .gitRepository,
+            displayName: "Legacy",
+            repositoryFingerprint: "manual-control-source",
+            aliases: ["/manual-control-source/.git"]
+        )
+        let registry = TinyBuddyProjectRegistry(
+            store: ManualControlProjectRegistryMemoryStore(projects: [target, source])
+        )
+        let engine = makeIdentityAwareEngine(clock, MemoryStore(), registry: registry)
+        let originalProject = FocusProjectContext(key: source.id.rawValue, displayName: source.displayName)
+        XCTAssertEqual(engine.startManualFocus(project: originalProject, at: clock.now), .saved)
+        let originalSession = try XCTUnwrap(engine.allSessions.first)
+        let preview = try XCTUnwrap(registry.previewMerge(
+            targetID: target.id,
+            sourceIDs: [source.id],
+            sessions: engine.allSessions,
+            now: clock.now
+        ))
+
+        let undo: TinyBuddyProjectMergeUndo
+        if case .saved(_, let token) = registry.merge(preview) {
+            undo = token
+        } else {
+            return XCTFail("Merge should save")
+        }
+        guard case .focusing(let mergedProject, _, _) = engine.manualControlState else {
+            return XCTFail("Expected active manual projection after merge")
+        }
+        XCTAssertEqual(mergedProject, FocusProjectContext(key: originalProject.key, displayName: target.displayName))
+        XCTAssertEqual(engine.allSessions.first?.project, originalSession.project)
+        XCTAssertEqual(engine.currentProject, originalSession.project)
+
+        guard case .saved = registry.undoMerge(undo) else {
+            return XCTFail("Merge undo should save")
+        }
+        guard case .focusing(let restoredProject, _, _) = engine.manualControlState else {
+            return XCTFail("Expected active manual projection after merge undo")
+        }
+        XCTAssertEqual(restoredProject, originalProject)
+        XCTAssertEqual(engine.allSessions.first?.project, originalSession.project)
+        XCTAssertEqual(engine.currentProject, originalSession.project)
+    }
+
+    func testManualControlProjectionFallsBackForUnavailableRegistryAndCustomProject() {
+        let clock = FakeClock(Date(timeIntervalSinceReferenceDate: 1_000))
+        let unavailableRegistryEngine = makeIdentityAwareEngine(clock, MemoryStore(), registry: nil)
+        XCTAssertEqual(unavailableRegistryEngine.startManualFocus(project: projectA, at: clock.now), .saved)
+        guard case .focusing(let unavailableProject, _, _) = unavailableRegistryEngine.manualControlState else {
+            return XCTFail("Expected fallback projection when registry is unavailable")
+        }
+        XCTAssertEqual(unavailableProject, projectA)
+
+        let knownProject = TinyBuddyProject(
+            id: TinyBuddyProjectID(rawValue: "registered"),
+            kind: .gitRepository,
+            displayName: "Registered",
+            repositoryFingerprint: "manual-control-registered",
+            aliases: ["/manual-control-registered/.git"]
+        )
+        let registry = TinyBuddyProjectRegistry(
+            store: ManualControlProjectRegistryMemoryStore(projects: [knownProject])
+        )
+        let customProject = FocusProjectContext(key: "custom:typed-project", displayName: "Typed project")
+        let customEngine = makeIdentityAwareEngine(clock, MemoryStore(), registry: registry)
+        XCTAssertEqual(customEngine.startManualFocus(project: customProject, at: clock.now), .saved)
+        guard case .focusing(let resolvedCustomProject, _, _) = customEngine.manualControlState else {
+            return XCTFail("Expected custom project fallback projection")
+        }
+        XCTAssertEqual(resolvedCustomProject, customProject)
     }
 
     // MARK: - Basic start/stop

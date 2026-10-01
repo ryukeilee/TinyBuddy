@@ -51,6 +51,23 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertTrue(menu.contains("let state = engine.manualControlState"))
     }
 
+    func testProjectIdentityChangesRefreshLiveManualDisplaysWithoutRewritingSessions() throws {
+        let engine = try source("Sources/TinyBuddyCore/FocusSessionEngine.swift")
+        let viewModel = try source("Sources/TinyBuddy/PetViewModel.swift")
+        let menu = try source("Sources/TinyBuddy/ManualFocusMenuBarController.swift")
+        let projectManagement = try source("Sources/TinyBuddy/ProjectManagementView.swift")
+
+        XCTAssertTrue(engine.contains("projectContextResolver(session.project)"))
+        XCTAssertTrue(engine.contains("key: session.project.key"))
+        XCTAssertTrue(engine.contains("public var currentProject: FocusProjectContext?"))
+        XCTAssertTrue(viewModel.contains("forName: Notification.Name(\"TinyBuddy.projectRegistryDidChange\")"))
+        XCTAssertTrue(viewModel.contains("self?.refreshManualControlState()"))
+        XCTAssertTrue(menu.contains("forName: Notification.Name(\"TinyBuddy.projectRegistryDidChange\")"))
+        XCTAssertTrue(menu.contains("self?.refresh()"))
+        XCTAssertTrue(projectManagement.contains("private func publishProjectRegistryDidChange()"))
+        XCTAssertTrue(projectManagement.contains("publishProjectRegistryDidChange()"))
+    }
+
     func testLiveDurationProjectsFromCommittedAnchorWithoutMinuteSnapshotRepublish() throws {
         let bridge = try source("Sources/TinyBuddy/FocusSessionAppBridge.swift")
         let hud = try source("Sources/TinyBuddy/PetView.swift")

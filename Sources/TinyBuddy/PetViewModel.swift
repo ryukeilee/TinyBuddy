@@ -444,6 +444,7 @@ final class PetViewModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.refreshManualControlState()
                 self?.reloadDevelopmentInterruptionResumeState()
             }
         })
