@@ -231,6 +231,44 @@ final class FocusHistoryAggregationTests: XCTestCase {
         XCTAssertEqual(snapshot.currentWeek.projectDistribution?.first(where: { $0.displayName == "Old Project" })?.isHistoricalArchive, true)
     }
 
+    func testVersionedCustomProjectsStaySeparateFromAmbiguousLegacyBucket() throws {
+        let legacy = FocusProjectContext(
+            key: "manual.custom.Work-Alpha",
+            displayName: "Work-Alpha"
+        )
+        let spaced = FocusProjectContext(
+            key: "manual.custom-v2.Work Alpha",
+            displayName: "Work Alpha"
+        )
+        let hyphenated = FocusProjectContext(
+            key: "manual.custom-v2.Work-Alpha",
+            displayName: "Work-Alpha"
+        )
+        let day = "2026-07-21"
+        let start = try date("2026-07-21T01:00:00Z")
+        let sessions = [
+            session(project: legacy, day: day, start: start, end: start.addingTimeInterval(600)),
+            session(project: spaced, day: day, start: start, end: start.addingTimeInterval(1_200)),
+            session(project: hyphenated, day: day, start: start, end: start.addingTimeInterval(1_800))
+        ]
+        let snapshot = try FocusHistoryAggregationCache(sessions: sessions)
+            .snapshot(for: query(reference: day))
+        let distribution = try XCTUnwrap(snapshot.currentWeek.projectDistribution)
+
+        XCTAssertEqual(distribution.count, 3)
+        XCTAssertEqual(
+            distribution.first(where: { $0.displayName == "Work Alpha" })?.focusDuration,
+            1_200
+        )
+        XCTAssertEqual(
+            distribution.filter { $0.displayName == "Work-Alpha" }
+                .map(\.focusDuration)
+                .sorted(),
+            [600, 1_800]
+        )
+        XCTAssertEqual(distribution.reduce(0) { $0 + $1.focusDuration }, 3_600, accuracy: 0.001)
+    }
+
     func testProjectStatusIsUnknownWithoutAnAuthoritativeRegistry() throws {
         let project = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
         let ended = session(
