@@ -598,7 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Evaluate reminders from every durable session mutation, including
         // automatic/manual lifecycle transitions. The bridge heartbeat below
         // covers elapsed time in an unchanged open session.
-        focusBridge?.sessionEngine.committedReminderEvaluationHandler = { [weak self] reminderSnapshot in
+        focusBridge?.sessionEngine.committedReminderEvaluationHandler = { [weak self, weak focusBridge] reminderSnapshot in
             DispatchQueue.main.async {
                 guard let self else { return }
                 // The engine is the single lifecycle authority. Refresh both
@@ -607,18 +607,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // cannot leave the other surface showing a stale session.
                 self.petViewModel.refreshManualControlState()
                 self.manualFocusMenuBarController.refresh()
+                guard let currentDay = focusBridge?.sessionEngine.currentDayIdentifier,
+                      reminderSnapshot.dayIdentifier == currentDay else { return }
                 self.evaluateFocusReminders(
-                    sessions: reminderSnapshot.sessions,
-                    dayIdentifier: reminderSnapshot.dayIdentifier
+                    FocusReminderEvaluationInput(
+                        sessions: reminderSnapshot.sessions,
+                        dayIdentifier: reminderSnapshot.dayIdentifier,
+                        now: reminderSnapshot.committedAt
+                    )
                 )
             }
         }
-        focusBridge?.reminderEvaluationHandler = { [weak self, weak focusBridge] in
-            guard let self, let engine = focusBridge?.sessionEngine else { return }
-            self.evaluateFocusReminders(
-                sessions: engine.allSessions,
-                dayIdentifier: engine.currentDayIdentifier
-            )
+        focusBridge?.reminderEvaluationHandler = { [weak self] input in
+            self?.evaluateFocusReminders(input)
         }
         focusBridge?.sessionEngine.committedHistorySnapshotHandler = { [weak self] publication in
             DispatchQueue.main.async {
@@ -998,25 +999,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = focusSessionPublicationJournal.clear(expected: derived)
     }
 
-    private func evaluateFocusReminders(
-        sessions: [FocusSession],
-        dayIdentifier: String
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.focusGoalCoordinator.evaluateReminders(
-                sessions: sessions,
-                now: Date(),
-                dayIdentifier: dayIdentifier
-            )
-        }
+    private func evaluateFocusReminders(_ input: FocusReminderEvaluationInput) {
+        focusGoalCoordinator.enqueueReminderEvaluation(input)
     }
 
     func evaluateFocusRemindersNow() {
-        guard let engine = focusSessionBridge?.sessionEngine else { return }
+        guard let engine = focusSessionBridge?.sessionEngine,
+              let context = timeEnvironment.capture() else { return }
         evaluateFocusReminders(
-            sessions: engine.allSessions,
-            dayIdentifier: engine.currentDayIdentifier
+            FocusReminderEvaluationInput(
+                sessions: engine.allSessions,
+                dayIdentifier: engine.currentDayIdentifier,
+                now: context.now
+            )
         )
     }
 

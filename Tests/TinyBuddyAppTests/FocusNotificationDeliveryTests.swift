@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import UserNotifications
+import AppKit
 @testable import TinyBuddy
 @testable import TinyBuddyCore
 
@@ -278,7 +279,263 @@ final class FocusNotificationDeliveryTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(deliverer.deliveredGoalRemovedCount, 1)
     }
 
+    func testMidnightRolloverSealsBeforeReminderEvaluationAndSerializesPermissionWait() async {
+        let oldDate = makeDate(year: 2026, month: 8, day: 6, hour: 20)
+        let rolloverDate = makeDate(year: 2026, month: 8, day: 7, hour: 1)
+        let time = MutableRolloverTime(now: oldDate, timeZone: utc)
+        let clock = MutableRolloverClock(oldDate)
+        let sessionStore = RolloverSessionStore()
+        let engine = makeRolloverEngine(clock: clock, store: sessionStore, time: time)
+
+        let preferences = makeStore()
+        defer { preferences.1.removePersistentDomain(forName: preferences.2) }
+        preferences.0.saveConfiguration(
+            FocusGoalConfiguration(quietModeStartHour: nil, quietModeEndHour: nil)
+        )
+        let deliverer = SuspendedNotificationDeliverer()
+        let goalCoordinator = FocusGoalCoordinator(
+            preferencesStore: preferences.0,
+            notificationManager: deliverer
+        )
+        let oldPermissionCheck = expectation(description: "outgoing-day permission check")
+        let newPermissionCheck = expectation(description: "new-day permission check")
+        let repeatedNewDayCheck = expectation(description: "follow-up new-day permission check")
+        deliverer.onCanDeliver = { call in
+            if call == 1 { oldPermissionCheck.fulfill() }
+            if call == 2 { newPermissionCheck.fulfill() }
+            if call == 3 { repeatedNewDayCheck.fulfill() }
+        }
+
+        let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
+        let workspaceCenter = NotificationCenter()
+        let notificationCenter = NotificationCenter()
+        let bridge = FocusSessionAppBridge(
+            coordinator: coordinator,
+            engine: engine,
+            idleThreshold: 0,
+            workspaceNotificationCenter: workspaceCenter,
+            notificationCenter: notificationCenter,
+            timeContextProvider: { time.capture() }
+        )
+        var inputs: [FocusReminderEvaluationInput] = []
+        bridge.start()
+        XCTAssertEqual(
+            engine.userActivity(
+                in: FocusProjectContext(key: "repo/rollover", displayName: "Rollover"),
+                at: oldDate
+            ),
+            .saved
+        )
+        bridge.reminderEvaluationHandler = { input in
+            inputs.append(input)
+            goalCoordinator.enqueueReminderEvaluation(input)
+        }
+        defer { bridge.stop() }
+
+        clock.set(rolloverDate)
+        time.set(now: rolloverDate, timeZone: utc)
+        workspaceCenter.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+
+        await fulfillment(of: [oldPermissionCheck], timeout: 2)
+        XCTAssertEqual(engine.currentDayIdentifier, "2026-08-07")
+        XCTAssertEqual(engine.allSessions.first?.status, .ended)
+        XCTAssertEqual(engine.allSessions.first?.endedAt, oldDate)
+        XCTAssertGreaterThanOrEqual(inputs.count, 2)
+        XCTAssertEqual(inputs[0].dayIdentifier, "2026-08-06")
+        XCTAssertEqual(inputs[0].now, rolloverDate)
+        XCTAssertEqual(inputs[0].sessions.first?.status, .ended)
+        XCTAssertEqual(inputs[0].sessions.first?.activeDuration(now: inputs[0].now) ?? -1, 0)
+        XCTAssertEqual(inputs[1].dayIdentifier, "2026-08-07")
+        XCTAssertEqual(
+            deliverer.canDeliverCallCount,
+            1,
+            "The new-day request must wait behind the outgoing-day request"
+        )
+        XCTAssertNil(preferences.0.loadReminderState(for: "2026-08-07"))
+
+        deliverer.resolveFirstPermissionCheck(true)
+        await fulfillment(of: [newPermissionCheck], timeout: 2)
+        XCTAssertTrue(deliverer.deliveredBreakReminders.isEmpty)
+        XCTAssertTrue(deliverer.deliveredGoalCompletions.isEmpty)
+        XCTAssertEqual(preferences.0.loadReminderState(for: "2026-08-07")?.dayIdentifier, "2026-08-07")
+        deliverer.resolveFirstPermissionCheck(true)
+        await fulfillment(of: [repeatedNewDayCheck], timeout: 2)
+        deliverer.resolveFirstPermissionCheck(true)
+    }
+
+    func testRolloverPreservesGoalReachedAtLastRecordedEvent() async throws {
+        let start = makeDate(year: 2026, month: 8, day: 6, hour: 19)
+        let lastEvent = makeDate(year: 2026, month: 8, day: 6, hour: 23, minute: 30)
+        let rolloverDate = makeDate(year: 2026, month: 8, day: 7, hour: 0, minute: 10)
+        let time = MutableRolloverTime(now: start, timeZone: utc)
+        let clock = MutableRolloverClock(start)
+        let engine = makeRolloverEngine(clock: clock, store: RolloverSessionStore(), time: time)
+
+        let preferences = makeStore()
+        defer { preferences.1.removePersistentDomain(forName: preferences.2) }
+        preferences.0.saveConfiguration(
+            FocusGoalConfiguration(quietModeStartHour: nil, quietModeEndHour: nil)
+        )
+        let deliverer = FakeNotificationDeliverer()
+        let goalCoordinator = FocusGoalCoordinator(
+            preferencesStore: preferences.0,
+            notificationManager: deliverer
+        )
+        let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
+        let notificationCenter = NotificationCenter()
+        let bridge = FocusSessionAppBridge(
+            coordinator: coordinator,
+            engine: engine,
+            idleThreshold: 0,
+            workspaceNotificationCenter: NotificationCenter(),
+            notificationCenter: notificationCenter,
+            timeContextProvider: { time.capture() }
+        )
+        var evaluationTasks: [Task<FocusReminderAction, Never>] = []
+        bridge.start()
+        XCTAssertEqual(
+            engine.userActivity(
+                in: FocusProjectContext(key: "repo/goal", displayName: "Goal"),
+                at: start
+            ),
+            .saved
+        )
+        clock.set(lastEvent)
+        time.set(now: lastEvent, timeZone: utc)
+        XCTAssertEqual(
+            engine.userActivity(
+                in: FocusProjectContext(key: "repo/goal", displayName: "Goal"),
+                at: lastEvent
+            ),
+            .saved
+        )
+        bridge.reminderEvaluationHandler = { input in
+            evaluationTasks.append(goalCoordinator.enqueueReminderEvaluation(input))
+        }
+        defer { bridge.stop() }
+
+        clock.set(rolloverDate)
+        time.set(now: rolloverDate, timeZone: utc)
+        notificationCenter.post(name: .NSSystemClockDidChange, object: nil)
+
+        let outgoingTask = try XCTUnwrap(evaluationTasks.first)
+        let outgoingAction = await outgoingTask.value
+        guard case .goalCompleted(let duration, let minutes) = outgoingAction else {
+            XCTFail("Expected the final outgoing-day session to keep its valid goal reminder, got \(outgoingAction)")
+            return
+        }
+        XCTAssertEqual(duration, 4.5 * 60 * 60)
+        XCTAssertEqual(minutes, FocusGoalConfiguration.default.dailyFocusGoalMinutes)
+        for task in evaluationTasks.dropFirst() {
+            _ = await task.value
+        }
+        XCTAssertEqual(deliverer.deliveredGoalCompletions.count, 1)
+        XCTAssertEqual(deliverer.deliveredGoalCompletions.first?.focusDuration, 4.5 * 60 * 60)
+    }
+
+    func testTimeZoneJumpUsesSealedOutgoingDayAndCapturedEvaluationTime() {
+        let jumpDate = makeDate(year: 2026, month: 8, day: 7, hour: 0, minute: 30)
+        let oldZone = TimeZone(secondsFromGMT: 3_600)!
+        let newZone = TimeZone(secondsFromGMT: -3_600)!
+        let time = MutableRolloverTime(now: jumpDate, timeZone: oldZone)
+        let clock = MutableRolloverClock(jumpDate)
+        let engine = makeRolloverEngine(clock: clock, store: RolloverSessionStore(), time: time)
+
+        let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
+        let notificationCenter = NotificationCenter()
+        let bridge = FocusSessionAppBridge(
+            coordinator: coordinator,
+            engine: engine,
+            idleThreshold: 0,
+            workspaceNotificationCenter: NotificationCenter(),
+            notificationCenter: notificationCenter,
+            timeContextProvider: { time.capture() }
+        )
+        var inputs: [FocusReminderEvaluationInput] = []
+        bridge.start()
+        XCTAssertEqual(
+            engine.userActivity(
+                in: FocusProjectContext(key: "repo/time-zone", displayName: "Time Zone"),
+                at: jumpDate
+            ),
+            .saved
+        )
+        bridge.reminderEvaluationHandler = { inputs.append($0) }
+        defer { bridge.stop() }
+
+        time.set(now: jumpDate, timeZone: newZone)
+        notificationCenter.post(name: .NSSystemClockDidChange, object: nil)
+
+        XCTAssertEqual(engine.currentDayIdentifier, "2026-08-06")
+        XCTAssertEqual(engine.allSessions.first?.status, .ended)
+        XCTAssertEqual(inputs.first?.dayIdentifier, "2026-08-07")
+        XCTAssertEqual(inputs.first?.now, jumpDate)
+        XCTAssertEqual(inputs.first?.sessions.first?.endedAt, jumpDate)
+        XCTAssertEqual(inputs.dropFirst().first?.dayIdentifier, "2026-08-06")
+    }
+
+    func testFailedRolloverPersistenceDoesNotPublishOutgoingDayReminderInput() {
+        let oldDate = makeDate(year: 2026, month: 8, day: 6, hour: 23)
+        let newDate = makeDate(year: 2026, month: 8, day: 7, hour: 1)
+        let time = MutableRolloverTime(now: oldDate, timeZone: utc)
+        let clock = MutableRolloverClock(oldDate)
+        let store = RolloverSessionStore()
+        let engine = makeRolloverEngine(clock: clock, store: store, time: time)
+
+        let coordinator = FocusSessionCoordinator(engine: engine, clock: clock)
+        let notificationCenter = NotificationCenter()
+        let bridge = FocusSessionAppBridge(
+            coordinator: coordinator,
+            engine: engine,
+            idleThreshold: 0,
+            workspaceNotificationCenter: NotificationCenter(),
+            notificationCenter: notificationCenter,
+            timeContextProvider: { time.capture() }
+        )
+        var inputs: [FocusReminderEvaluationInput] = []
+        bridge.start()
+        XCTAssertEqual(
+            engine.userActivity(
+                in: FocusProjectContext(key: "repo/failure", displayName: "Failure"),
+                at: oldDate
+            ),
+            .saved
+        )
+        bridge.reminderEvaluationHandler = { inputs.append($0) }
+        defer { bridge.stop() }
+
+        store.shouldFailWrites = true
+        clock.set(newDate)
+        time.set(now: newDate, timeZone: utc)
+        notificationCenter.post(name: .NSSystemClockDidChange, object: nil)
+
+        XCTAssertFalse(inputs.contains { $0.dayIdentifier == "2026-08-06" })
+        XCTAssertTrue(inputs.contains { $0.dayIdentifier == "2026-08-07" })
+        XCTAssertEqual(engine.allSessions.first?.status, .active)
+    }
+
     // MARK: - Helpers
+
+    private var utc: TimeZone { TimeZone(secondsFromGMT: 0)! }
+
+    private func makeDate(year: Int, month: Int, day: Int, hour: Int, minute: Int = 0) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        return calendar.date(from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute))!
+    }
+
+    private func makeRolloverEngine(
+        clock: MutableRolloverClock,
+        store: RolloverSessionStore,
+        time: MutableRolloverTime
+    ) -> FocusSessionEngine {
+        FocusSessionEngine(
+            clock: clock,
+            persisting: store,
+            config: FocusSessionConfiguration(confirmationMinimumActiveDuration: 0),
+            dayIdentifier: { date in time.capture()?.dayIdentifier(for: date) ?? "" }
+        )
+    }
 
     private func makeManager(
         status: UNAuthorizationStatus,
@@ -384,4 +641,112 @@ private final class FakeNotificationDeliverer: FocusNotificationDelivering {
     func removePendingFocusNotifications() { pendingRemovedCount += 1 }
     func removeDeliveredBreakReminder() { deliveredBreakRemovedCount += 1 }
     func removeDeliveredGoalCompletion() { deliveredGoalRemovedCount += 1 }
+}
+
+@MainActor
+private final class SuspendedNotificationDeliverer: FocusNotificationDelivering {
+    private var permissionContinuations: [CheckedContinuation<Bool, Never>] = []
+    var canDeliverCallCount = 0
+    var onCanDeliver: ((Int) -> Void)?
+    var deliveredBreakReminders: [TimeInterval] = []
+    var deliveredGoalCompletions: [(focusDuration: TimeInterval, goalMinutes: Int)] = []
+
+    func canDeliver() async -> Bool {
+        await withCheckedContinuation { continuation in
+            canDeliverCallCount += 1
+            permissionContinuations.append(continuation)
+            onCanDeliver?(canDeliverCallCount)
+        }
+    }
+
+    func deliverBreakReminder(continuousDuration: TimeInterval) async -> Bool {
+        deliveredBreakReminders.append(continuousDuration)
+        return true
+    }
+
+    func deliverGoalCompleted(focusDuration: TimeInterval, goalMinutes: Int) async -> Bool {
+        deliveredGoalCompletions.append((focusDuration, goalMinutes))
+        return true
+    }
+
+    func removePendingFocusNotifications() {}
+    func removeDeliveredBreakReminder() {}
+    func removeDeliveredGoalCompletion() {}
+
+    func resolveFirstPermissionCheck(_ result: Bool) {
+        guard !permissionContinuations.isEmpty else { return }
+        permissionContinuations.removeFirst().resume(returning: result)
+    }
+}
+
+private final class MutableRolloverClock: FocusClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+
+    init(_ date: Date) { self.date = date }
+
+    var now: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return date
+    }
+
+    var monotonic: TimeInterval { now.timeIntervalSinceReferenceDate }
+
+    func set(_ date: Date) {
+        lock.lock()
+        self.date = date
+        lock.unlock()
+    }
+}
+
+private final class MutableRolloverTime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+    private var timeZone: TimeZone
+
+    init(now: Date, timeZone: TimeZone) {
+        self.date = now
+        self.timeZone = timeZone
+    }
+
+    func set(now: Date, timeZone: TimeZone) {
+        lock.lock()
+        self.date = now
+        self.timeZone = timeZone
+        lock.unlock()
+    }
+
+    func capture() -> TinyBuddyTimeContext? {
+        lock.lock()
+        let date = self.date
+        let timeZone = self.timeZone
+        lock.unlock()
+        return TinyBuddyTimeContext(
+            now: date,
+            timeZone: timeZone,
+            locale: Locale(identifier: "en_US_POSIX"),
+            sourceCalendar: Calendar(identifier: .gregorian)
+        )
+    }
+}
+
+private final class RolloverSessionStore: FocusSessionPersisting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessions: [FocusSession] = []
+    var shouldFailWrites = false
+
+    func load() -> [FocusSession]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions
+    }
+
+    func save(_ sessions: [FocusSession]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !shouldFailWrites else { return false }
+        self.sessions = sessions
+        return true
+    }
 }

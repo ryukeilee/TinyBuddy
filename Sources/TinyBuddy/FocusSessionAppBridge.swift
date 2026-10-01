@@ -41,12 +41,13 @@ final class FocusSessionAppBridge {
     private let idlePollInterval: TimeInterval
     private let workspaceNC: NotificationCenter
     private let notificationCenter: NotificationCenter
+    private let timeContextProvider: () -> TinyBuddyTimeContext?
 
     private var idleTimer: DispatchSourceTimer?
     /// Evaluates persisted goal-reminder state from the same primary engine.
     /// The bridge invokes this on lifecycle wakeups and its bounded heartbeat,
     /// including when no session mutation occurred.
-    var reminderEvaluationHandler: (() -> Void)?
+    var reminderEvaluationHandler: ((FocusReminderEvaluationInput) -> Void)?
 
     // Once stopped (reset quiesce or termination), reports that were already
     // enqueued on the main queue before observer removal must become no-ops:
@@ -74,7 +75,10 @@ final class FocusSessionAppBridge {
         engine: FocusSessionEngine,
         idleThreshold: TimeInterval = FocusSessionConfiguration().idleThreshold,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        timeContextProvider: @escaping () -> TinyBuddyTimeContext? = {
+            TinyBuddyTimeEnvironment().capture()
+        }
     ) {
         self.coordinator = coordinator
         self.engine = engine
@@ -85,6 +89,7 @@ final class FocusSessionAppBridge {
         self.idlePollInterval = min(15, max(5, idleThreshold / 8))
         self.workspaceNC = workspaceNotificationCenter
         self.notificationCenter = notificationCenter
+        self.timeContextProvider = timeContextProvider
     }
 
     // MARK: - Lifecycle
@@ -92,13 +97,15 @@ final class FocusSessionAppBridge {
     func start() {
         guard idleTimer == nil else { return }
         isStopped = false
+        lastCheckedDay = engine.currentDayIdentifier
         registerWorkspaceObservers()
         startIdleDetection()
+        checkDayChange()
         seedForegroundApp()
         // Immediately sample user activity so active users don't wait for
         // the first idle poll (up to 15s) before the session starts.
         sampleInitialActivity()
-        reminderEvaluationHandler?()
+        evaluateCurrentDayReminders()
         logger.notice("FocusSessionAppBridge started")
     }
 
@@ -299,7 +306,7 @@ final class FocusSessionAppBridge {
         // A live open session accrues time without producing journal writes.
         // Evaluate on every bounded idle poll so threshold notifications are
         // delivered even during uninterrupted work.
-        reminderEvaluationHandler?()
+        evaluateCurrentDayReminders()
     }
 
     /// After wake or unlock, check whether the user is currently active and
@@ -318,7 +325,7 @@ final class FocusSessionAppBridge {
         } else {
             wasIdle = true
         }
-        reminderEvaluationHandler?()
+        evaluateCurrentDayReminders()
     }
 
     /// Immediately after launch, check whether the user is already active and
@@ -329,7 +336,7 @@ final class FocusSessionAppBridge {
             wasIdle = false
             coordinator.reportActiveAfterIdle()
         }
-        reminderEvaluationHandler?()
+        evaluateCurrentDayReminders()
     }
 
     private func seedForegroundApp() {
@@ -350,36 +357,69 @@ final class FocusSessionAppBridge {
 
     private func checkDayChange() {
         guard !isStopped else { return }
-        guard let context = TinyBuddyTimeEnvironment().capture() else { return }
+        guard let context = timeContextProvider() else { return }
         let now = context.now
-        let day = context.dayIdentifier(for: now) ?? context.dayIdentifier
+        let day = context.dayIdentifier
         guard let last = lastCheckedDay else {
             lastCheckedDay = day
             return
         }
         guard day != last else { return }
         lastCheckedDay = day
-        // Evaluate the outgoing local day before the engine closes its open
-        // session and advances the day. This catches a goal crossed between
-        // the last heartbeat and midnight instead of dropping it at rollover.
-        reminderEvaluationHandler?()
-        coordinator.reportTimeChange(dayIdentifier: day, at: now)
-        // Then reset and evaluate the new day's persisted reminder state.
-        reminderEvaluationHandler?()
+        let outgoingDay = engine.currentDayIdentifier
+        let outcome = coordinator.reportTimeChange(dayIdentifier: day, at: now)
+        enqueueOutgoingDayReminderIfSealed(
+            outcome: outcome,
+            dayIdentifier: outgoingDay,
+            now: now
+        )
+        evaluateCurrentDayReminders(at: now)
     }
 
     private func handleTimeChange() {
         guard !isStopped else { return }
-        guard let context = TinyBuddyTimeEnvironment().capture() else { return }
+        guard let context = timeContextProvider() else { return }
         let now = context.now
-        let day = context.dayIdentifier(for: now) ?? context.dayIdentifier
+        let day = context.dayIdentifier
         let outgoingDay = engine.currentDayIdentifier
         lastCheckedDay = day
-        if outgoingDay != day {
-            reminderEvaluationHandler?()
-        }
-        coordinator.reportTimeChange(dayIdentifier: day, at: now)
-        reminderEvaluationHandler?()
+        let outcome = coordinator.reportTimeChange(dayIdentifier: day, at: now)
+        enqueueOutgoingDayReminderIfSealed(
+            outcome: outcome,
+            dayIdentifier: outgoingDay,
+            now: now
+        )
+        evaluateCurrentDayReminders(at: now)
+    }
+
+    private func enqueueOutgoingDayReminderIfSealed(
+        outcome: FocusSessionUpdateOutcome,
+        dayIdentifier: String,
+        now: Date
+    ) {
+        guard outcome == .saved || outcome == .noChange else { return }
+        reminderEvaluationHandler?(
+            FocusReminderEvaluationInput(
+                sessions: engine.allSessions,
+                dayIdentifier: dayIdentifier,
+                now: now
+            )
+        )
+    }
+
+    private func evaluateCurrentDayReminders() {
+        guard let context = timeContextProvider() else { return }
+        evaluateCurrentDayReminders(at: context.now)
+    }
+
+    private func evaluateCurrentDayReminders(at now: Date) {
+        reminderEvaluationHandler?(
+            FocusReminderEvaluationInput(
+                sessions: engine.allSessions,
+                dayIdentifier: engine.currentDayIdentifier,
+                now: now
+            )
+        )
     }
 
     // MARK: - Editor detection
@@ -495,7 +535,8 @@ extension FocusSessionAppBridge {
         )
         return FocusSessionAppBridge(
             coordinator: coordinator,
-            engine: engine
+            engine: engine,
+            timeContextProvider: { timeEnv.capture() }
         )
     }
 }
