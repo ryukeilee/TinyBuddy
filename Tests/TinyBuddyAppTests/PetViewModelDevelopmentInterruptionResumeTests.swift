@@ -32,6 +32,25 @@ private final class ResumeMemoryStore: FocusSessionPersisting, @unchecked Sendab
     }
 }
 
+private final class ResumeProjectContextResolver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var contexts: [String: FocusProjectContext]
+
+    init(contexts: [FocusProjectContext]) {
+        self.contexts = Dictionary(uniqueKeysWithValues: contexts.map { ($0.key, $0) })
+    }
+
+    func set(_ context: FocusProjectContext) {
+        lock.lock(); defer { lock.unlock() }
+        contexts[context.key] = context
+    }
+
+    func resolve(_ context: FocusProjectContext) -> FocusProjectContext {
+        lock.lock(); defer { lock.unlock() }
+        return contexts[context.key] ?? context
+    }
+}
+
 private func resumeDayIdentifier(for date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -122,6 +141,66 @@ final class PetViewModelDevelopmentInterruptionResumeTests: XCTestCase {
             .inProgress(project: matchedProject, status: .paused)
         )
         XCTAssertTrue(harness.viewModel.manualControlState.isManualSessionPaused)
+    }
+
+    func testRegistryChangeRefreshesActiveHUDProjectionWithoutMutatingSession() throws {
+        let originalProject = FocusProjectContext(
+            key: matchedProject.id.rawValue,
+            displayName: matchedProject.displayName
+        )
+        let resolver = ResumeProjectContextResolver(contexts: [originalProject])
+        let harness = makeHarness(
+            projects: [matchedProject],
+            projectContextResolver: { resolver.resolve($0) }
+        )
+        harness.viewModel.setFocusSessionEngine(harness.engine)
+        harness.viewModel.startManualFocus(project: originalProject)
+        let originalSession = try XCTUnwrap(harness.engine.allSessions.first)
+
+        resolver.set(FocusProjectContext(key: originalProject.key, displayName: "Renamed active"))
+        harness.notificationCenter.post(
+            name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+            object: nil
+        )
+
+        guard case .focusing(let displayedProject, _, _) = harness.viewModel.manualControlState else {
+            return XCTFail("Expected the HUD to keep showing active manual focus")
+        }
+        XCTAssertEqual(displayedProject.displayName, "Renamed active")
+        XCTAssertTrue(harness.viewModel.isManualControlRefreshTimerRunning)
+        XCTAssertEqual(harness.engine.allSessions.first?.project, originalSession.project)
+        XCTAssertEqual(harness.engine.currentProject, originalSession.project)
+    }
+
+    func testRegistryChangeRefreshesPausedHUDProjectionWithoutTimerOrSessionMutation() throws {
+        let originalProject = FocusProjectContext(
+            key: matchedProject.id.rawValue,
+            displayName: matchedProject.displayName
+        )
+        let resolver = ResumeProjectContextResolver(contexts: [originalProject])
+        let harness = makeHarness(
+            projects: [matchedProject],
+            projectContextResolver: { resolver.resolve($0) }
+        )
+        harness.viewModel.setFocusSessionEngine(harness.engine)
+        harness.viewModel.startManualFocus(project: originalProject)
+        harness.viewModel.pauseManualFocus()
+        let originalSession = try XCTUnwrap(harness.engine.allSessions.first)
+        XCTAssertFalse(harness.viewModel.isManualControlRefreshTimerRunning)
+
+        resolver.set(FocusProjectContext(key: originalProject.key, displayName: "Renamed paused"))
+        harness.notificationCenter.post(
+            name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+            object: nil
+        )
+
+        guard case .paused(let displayedProject, _, _, _) = harness.viewModel.manualControlState else {
+            return XCTFail("Expected the HUD to keep showing paused manual focus")
+        }
+        XCTAssertEqual(displayedProject.displayName, "Renamed paused")
+        XCTAssertFalse(harness.viewModel.isManualControlRefreshTimerRunning)
+        XCTAssertEqual(harness.engine.allSessions.first?.project, originalSession.project)
+        XCTAssertEqual(harness.engine.currentProject, originalSession.project)
     }
 
     func testAutomaticSessionOnMatchedProjectShowsStateDespiteIdleManualControl() {
@@ -247,14 +326,20 @@ final class PetViewModelDevelopmentInterruptionResumeTests: XCTestCase {
 
     private func makeHarness(
         projects: [TinyBuddyProject],
-        seedSnapshot: Bool = true
+        seedSnapshot: Bool = true,
+        projectContextResolver: (@Sendable (FocusProjectContext) -> FocusProjectContext)? = nil
     ) -> Harness {
-        makeHarness(projectsProvider: { projects }, seedSnapshot: seedSnapshot)
+        makeHarness(
+            projectsProvider: { projects },
+            seedSnapshot: seedSnapshot,
+            projectContextResolver: projectContextResolver
+        )
     }
 
     private func makeHarness(
         projectsProvider: @escaping () -> [TinyBuddyProject],
-        seedSnapshot: Bool = true
+        seedSnapshot: Bool = true,
+        projectContextResolver: (@Sendable (FocusProjectContext) -> FocusProjectContext)? = nil
     ) -> Harness {
         let defaults = makeDefaults()
         let calendar = makeCalendar()
@@ -274,7 +359,8 @@ final class PetViewModelDevelopmentInterruptionResumeTests: XCTestCase {
             dayIdentifier: { resumeDayIdentifier(for: $0) },
             nextDayBoundary: { date in
                 calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
-            }
+            },
+            projectContextResolver: projectContextResolver ?? { $0 }
         )
         let notificationCenter = NotificationCenter()
         let viewModel = PetViewModel(

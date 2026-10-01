@@ -458,28 +458,59 @@ public final class FocusSessionEngine: @unchecked Sendable {
 
     /// The current manual-control state, derived from sessions protected by the lock.
     public var manualControlState: ManualFocusControlState {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         guard let idx = sessions.firstIndex(where: { $0.isOpen && $0.mode == .manual }) else {
+            lock.unlock()
             return .idle
         }
         let session = sessions[idx]
         let now = clock.now
+        let state: ManualFocusControlState
         switch session.status {
         case .active:
-            return .focusing(
+            state = .focusing(
                 project: session.project,
                 startedAt: session.startedAt,
                 activeDuration: session.activeDuration(now: now)
             )
         case .paused:
-            return .paused(
+            state = .paused(
                 project: session.project,
                 startedAt: session.startedAt,
                 pausedAt: session.currentPauseStartedAt ?? session.lastStateChangeAt,
                 activeDuration: session.activeDuration(now: now)
             )
         case .ended:
+            lock.unlock()
             return .idle
+        }
+        lock.unlock()
+
+        // The session's stored context remains the identity authority for
+        // commands and currentProject. Only this live manual-control view
+        // follows the registry's current display name; keeping the original
+        // key also lets a merge undo resolve back to the source identity.
+        let resolvedProject = projectContextResolver(session.project)
+        let displayProject = FocusProjectContext(
+            key: session.project.key,
+            displayName: resolvedProject.displayName
+        )
+        switch state {
+        case .idle:
+            return .idle
+        case .focusing(_, let startedAt, let activeDuration):
+            return .focusing(
+                project: displayProject,
+                startedAt: startedAt,
+                activeDuration: activeDuration
+            )
+        case .paused(_, let startedAt, let pausedAt, let activeDuration):
+            return .paused(
+                project: displayProject,
+                startedAt: startedAt,
+                pausedAt: pausedAt,
+                activeDuration: activeDuration
+            )
         }
     }
 

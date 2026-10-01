@@ -163,6 +163,7 @@ struct ProjectManagementView: View {
             clearAutoMergeUndo()
             sessionEngineProvider()?.refreshProjectIdentityPresentation()
             refreshRecentProjectDisplay(registry)
+            publishProjectRegistryDidChange()
             message = "项目已合并；撤销入口会保留到下一次身份修改。"
         case .rejectedStale:
             message = "项目已发生变化，请重新预览。"
@@ -182,6 +183,7 @@ struct ProjectManagementView: View {
             clearAutoMergeUndo()
             sessionEngineProvider()?.refreshProjectIdentityPresentation()
             refreshRecentProjectDisplay(registry)
+            publishProjectRegistryDidChange()
             message = "项目合并已撤销。"
         case .rejectedStale:
             message = "合并后已有其他身份修改，无法安全撤销。"
@@ -211,6 +213,7 @@ struct ProjectManagementView: View {
             clearAutoMergeUndo()
             sessionEngineProvider()?.refreshProjectIdentityPresentation()
             refreshRecentProjectDisplay(registry)
+            publishProjectRegistryDidChange()
             message = success
         case .rejectedStale:
             message = "项目已发生变化，请重试。"
@@ -228,6 +231,13 @@ struct ProjectManagementView: View {
         // Preserve the source ID across merge so undo can restore its original
         // recent-activity attribution; only the presentation label changes.
         recentProjectStore.saveTodayProject(id: storedID, displayName: resolved.displayName)
+    }
+
+    private func publishProjectRegistryDidChange() {
+        NotificationCenter.default.post(
+            name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
+            object: nil
+        )
     }
 
     private func stateLabel(_ state: TinyBuddyProjectState) -> String {
