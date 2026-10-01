@@ -392,7 +392,11 @@ final class GitScanRootAuthorizationControllerTests: XCTestCase {
 
             XCTAssertFalse(viewModel.addExclusionRule(pattern: "New/Rule"), "\(failure)")
             XCTAssertEqual(viewModel.exclusionRules.map(\.pattern), ["Existing"], "\(failure)")
-            XCTAssertNil(configStore.load(), "\(failure) failure leaves the committed marker and payload unconfirmed")
+            XCTAssertEqual(
+                configStore.load(),
+                initialConfig,
+                "\(failure) failure keeps the prior committed pair readable after recovery"
+            )
             XCTAssertNotNil(viewModel.exclusionRuleSaveErrorMessage, "\(failure)")
             XCTAssertEqual(changeCount, 0, "\(failure)")
             notificationCenter.removeObserver(observer)

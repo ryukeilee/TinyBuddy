@@ -53,14 +53,23 @@ final class TinyBuddyConfigCoordinator {
     }
 
     func start() {
-        let loaded = configStore.load()
-        lastPublishedConfig = loaded
-        if let loaded {
+        switch configStore.loadOutcome() {
+        case .loaded(let loaded):
+            lastPublishedConfig = loaded
             Self.logger.info(
                 "config loaded version=\(loaded.configVersion, privacy: .public)"
             )
-        } else {
+        case .empty:
+            lastPublishedConfig = nil
             publishInitialConfig()
+        case .uncommitted:
+            lastPublishedConfig = nil
+            Self.logger.error(
+                "config payload and committed version are not a trusted pair; initial defaults were not written"
+            )
+        case .unavailable:
+            lastPublishedConfig = nil
+            Self.logger.error("config store is unavailable; initial defaults were not written")
         }
     }
 
@@ -334,18 +343,36 @@ final class TinyBuddyConfigCoordinator {
     }
 
     private func publishInitialConfig() {
+        guard case .empty = configStore.loadOutcome() else {
+            return
+        }
         let config = buildCurrentConfig() ?? TinyBuddyAppConfig(
             configVersion: 1,
             dayIdentifier: dayIdentifier()
         )
         let outcome = configStore.save(config)
-        if outcome == .saved {
-            lastPublishedConfig = config
+        switch outcome {
+        case .saved, .unchanged:
+            guard case .loaded(let committed) = configStore.loadOutcome(), committed == config else {
+                Self.logger.error("initial config save could not be confirmed")
+                return
+            }
+            lastPublishedConfig = committed
+        case .persistenceFailed:
+            Self.logger.error("initial config could not be persisted")
         }
     }
 
     private func buildCurrentConfig() -> TinyBuddyAppConfig? {
-        let loaded = configStore.load()
+        let loaded: TinyBuddyAppConfig?
+        switch configStore.loadOutcome() {
+        case .loaded(let config):
+            loaded = config
+        case .empty:
+            loaded = nil
+        case .unavailable, .uncommitted:
+            return nil
+        }
         let accessResult = scanRootsProvider()
         let scanRootPaths: [String]
         if accessResult.issue == nil {
