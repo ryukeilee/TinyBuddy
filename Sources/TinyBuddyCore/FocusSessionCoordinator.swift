@@ -150,7 +150,8 @@ public final class FocusSessionCoordinator {
     }
 
     /// Wall‑clock time changed (manual change, NTP correction, DST, or day boundary).
-    public func reportTimeChange(dayIdentifier: String, at date: Date? = nil) {
+    @discardableResult
+    public func reportTimeChange(dayIdentifier: String, at date: Date? = nil) -> FocusSessionUpdateOutcome {
         engine.timeChanged(at: date ?? clock.now, dayIdentifier: dayIdentifier)
     }
 

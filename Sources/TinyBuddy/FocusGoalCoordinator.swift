@@ -2,6 +2,14 @@ import Foundation
 import OSLog
 import TinyBuddyCore
 
+/// Reminder inputs are captured before scheduling so a delayed permission
+/// lookup cannot change which day or instant is being evaluated.
+struct FocusReminderEvaluationInput: Sendable {
+    let sessions: [FocusSession]
+    let dayIdentifier: String
+    let now: Date
+}
+
 /// Coordinates the focus goal configuration, reminder evaluation, and
 /// notification delivery. Owned by `AppDelegate` and wired into the
 /// focus session lifecycle.
@@ -10,6 +18,8 @@ final class FocusGoalCoordinator {
     private let preferencesStore: FocusGoalPreferencesStore
     private let notificationManager: FocusNotificationDelivering
     private let logger: Logger
+    private var pendingReminderEvaluation: Task<FocusReminderAction, Never>?
+    private var pendingReminderEvaluationID: UUID?
 
     init(
         preferencesStore: FocusGoalPreferencesStore = FocusGoalPreferencesStore(),
@@ -66,9 +76,48 @@ final class FocusGoalCoordinator {
         now: Date,
         dayIdentifier: String
     ) async -> FocusReminderAction {
+        let task = enqueueReminderEvaluation(
+            FocusReminderEvaluationInput(
+                sessions: sessions,
+                dayIdentifier: dayIdentifier,
+                now: now
+            )
+        )
+        return await task.value
+    }
+
+    /// Enqueues one immutable request behind earlier evaluations. In
+    /// particular, a sealed outgoing-day request must finish before a new-day
+    /// request can persist the shared reminder state.
+    @discardableResult
+    func enqueueReminderEvaluation(
+        _ input: FocusReminderEvaluationInput
+    ) -> Task<FocusReminderAction, Never> {
+        let previous = pendingReminderEvaluation
+        let evaluationID = UUID()
+        let task = Task { @MainActor [weak self] in
+            if let previous {
+                _ = await previous.value
+            }
+            guard let self else { return FocusReminderAction.none }
+            let action = await self.evaluateRemindersNow(input)
+            if self.pendingReminderEvaluationID == evaluationID {
+                self.pendingReminderEvaluation = nil
+                self.pendingReminderEvaluationID = nil
+            }
+            return action
+        }
+        pendingReminderEvaluation = task
+        pendingReminderEvaluationID = evaluationID
+        return task
+    }
+
+    private func evaluateRemindersNow(
+        _ input: FocusReminderEvaluationInput
+    ) async -> FocusReminderAction {
         let config = configuration
-        let state = preferencesStore.validateReminderState(for: dayIdentifier)
-        let isInQuietHours = checkQuietHours(config: config, now: now)
+        let state = preferencesStore.validateReminderState(for: input.dayIdentifier)
+        let isInQuietHours = checkQuietHours(config: config, now: input.now)
         let canDeliver = await notificationManager.canDeliver()
 
         // Reconcile the system notification queue with deliverability and the
@@ -92,11 +141,11 @@ final class FocusGoalCoordinator {
         // app must not infer DND from its own foreground state: TinyBuddy is
         // normally inactive while the user is doing the focused work.
         let evaluation = FocusReminderEngine.evaluate(
-            allSessions: sessions,
+            allSessions: input.sessions,
             config: config,
             state: state,
-            now: now,
-            dayIdentifier: dayIdentifier,
+            now: input.now,
+            dayIdentifier: input.dayIdentifier,
             isInQuietHours: isInQuietHours,
             isSystemDND: false,
             canDeliverNotifications: canDeliver
@@ -144,5 +193,3 @@ final class FocusGoalCoordinator {
         }
     }
 }
-
-
