@@ -44,6 +44,7 @@ enum GitScanRootAuthorizationCommand {
 final class GitScanRootSettingsViewModel: ObservableObject {
     @Published private(set) var authorizations: [GitScanRootAuthorization] = []
     @Published private(set) var exclusionRules: [TinyBuddyExclusionRule] = []
+    @Published private(set) var exclusionRuleSaveErrorMessage: String?
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published var loginItemErrorMessage: String?
 
@@ -192,13 +193,16 @@ final class GitScanRootSettingsViewModel: ObservableObject {
 
     private func persistExclusionRules(_ rules: [TinyBuddyExclusionRule]) -> Bool {
         guard let current = configStore.load() else {
+            exclusionRuleSaveErrorMessage = Self.exclusionRuleSaveFailureMessage
             return false
         }
         let updated = current.withIncrementedVersion(exclusionRules: rules)
         guard configStore.save(updated) != .persistenceFailed else {
+            exclusionRuleSaveErrorMessage = Self.exclusionRuleSaveFailureMessage
             return false
         }
         exclusionRules = rules
+        exclusionRuleSaveErrorMessage = nil
         notificationCenter.post(
             name: .tinyBuddySettingsDidChange,
             object: nil,
@@ -206,6 +210,9 @@ final class GitScanRootSettingsViewModel: ObservableObject {
         )
         return true
     }
+
+    private static let exclusionRuleSaveFailureMessage =
+        "无法确认排除规则已保存。配置写入可能部分完成，当前状态可能无法读取。请重启 TinyBuddy 并检查规则，再决定是否重新修改。"
 
     private func postAuthorizationCommand(named name: Notification.Name, identifier: String) {
         notificationCenter.post(
@@ -303,6 +310,14 @@ struct GitScanRootSettingsView: View {
                         }
                     }
                     .disabled(TinyBuddyExclusionRule.normalizedPattern(exclusionPattern) == nil)
+                }
+
+                if let message = viewModel.exclusionRuleSaveErrorMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("排除目录保存提示：\(message)")
+                        .accessibilityIdentifier("gitScanRootExclusionRuleSaveError")
                 }
 
                 ForEach(viewModel.exclusionRules) { rule in
