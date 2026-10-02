@@ -63,6 +63,28 @@ final class LifecycleStateHandoffTests: XCTestCase {
         XCTAssertTrue(source.contains("NSApp.terminate(nil)"))
     }
 
+    func testLaunchArchivesPriorDayBeforeAnyStartupSnapshotWriter() throws {
+        let source = try appSource()
+        let launchBlock = try launchBlock(in: source)
+        let calibration = try XCTUnwrap(launchBlock.range(of: "_ = timeCalibrator.calibrate()"))
+        let prelaunchArchive = try XCTUnwrap(
+            launchBlock.range(of: "historyArchivalCoordinator.archivePriorDaySnapshotBeforeLaunchWrites()")
+        )
+        let configStart = try XCTUnwrap(launchBlock.range(of: "configCoordinator.start()"))
+        let refreshStart = try XCTUnwrap(launchBlock.range(of: "gitActivityRefreshCoordinator.start("))
+        let initialize = try XCTUnwrap(launchBlock.range(of: "initializeCombinedSnapshotForCurrentDay()"))
+        let currentDayArchive = try XCTUnwrap(launchBlock.range(of: "historyArchivalCoordinator.runAtLaunch()"))
+
+        // The synchronous recovery call in the real AppDelegate launch path
+        // must run after calibration queues its callback and before anything
+        // that can refresh or initialize the combined snapshot.
+        XCTAssertLessThan(calibration.lowerBound, prelaunchArchive.lowerBound)
+        XCTAssertLessThan(prelaunchArchive.lowerBound, configStart.lowerBound)
+        XCTAssertLessThan(configStart.lowerBound, refreshStart.lowerBound)
+        XCTAssertLessThan(refreshStart.lowerBound, initialize.lowerBound)
+        XCTAssertLessThan(initialize.lowerBound, currentDayArchive.lowerBound)
+    }
+
     // MARK: - Source extraction
 
     private func terminationBlock(in source: String) throws -> Substring {

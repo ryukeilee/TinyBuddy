@@ -29,11 +29,12 @@ final class TinyBuddyHistoryArchivalCoordinatorTests: XCTestCase {
         )
     }
 
-    private func makeHistoryStore() -> TinyBuddyHistoryStore {
+    private func makeHistoryStore(currentDay: String? = nil) -> TinyBuddyHistoryStore {
         let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tinybuddy-archival-\\(UUID().uuidString)")
+            .appendingPathComponent("tinybuddy-archival-\(UUID().uuidString)")
         try! FileManager.default.createDirectory(at: tmpURL, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: tmpURL) }
+        let currentDayIdentifier = currentDay ?? todayIdentifier
 
         let quarantine = TinyBuddyCorruptedRecordQuarantine(
             storageURL: tmpURL
@@ -50,9 +51,17 @@ final class TinyBuddyHistoryArchivalCoordinatorTests: XCTestCase {
                 maxTotalBytes: 2_097_152
             ),
             customContainerURL: tmpURL,
-            currentDayIdentifierProvider: { [todayIdentifier] in todayIdentifier },
+            currentDayIdentifierProvider: { currentDayIdentifier },
             quarantine: quarantine
         )
+    }
+
+    private func makeIsolatedDefaults() -> UserDefaults {
+        let name = "TinyBuddyHistoryArchivalCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
     }
 
     private func makeCleanupService(
@@ -106,6 +115,109 @@ final class TinyBuddyHistoryArchivalCoordinatorTests: XCTestCase {
 
     // MARK: - Launch
 
+    func testDelayedLaunchCalibrationCanMissPreviousDaySnapshot() async throws {
+        let previousDay = "2026-09-16"
+        let currentDay = "2026-09-17"
+        let defaults = makeIsolatedDefaults()
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let timeEnvironment = TinyBuddyTimeEnvironment.fixed(
+            now: Self.fixedDateForDay(currentDay),
+            timeZone: timeZone
+        )
+        let combinedStore = TinyBuddyCombinedSnapshotStore(
+            userDefaults: defaults,
+            sharedPreferencesProvider: { nil }
+        )
+        let yesterdayActivity = GitTodayActivitySnapshot(
+            focusBlockCount: 3,
+            commitCount: 2,
+            recentProjectName: "Fixture"
+        )
+        let yesterdayPetSnapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: previousDay, focusCount: 3, completionCount: 2)
+        )
+        let seeded = combinedStore.updatePetSlice(
+            yesterdayPetSnapshot,
+            fallbackActivitySnapshot: yesterdayActivity,
+            fallbackActivityRevision: 1
+        )
+        XCTAssertTrue(seeded.didPersist)
+
+        let historyStore = makeHistoryStore(currentDay: currentDay)
+        let archivalCoordinator = TinyBuddyHistoryArchivalCoordinator(
+            snapshotReader: { expectedDay in
+                combinedStore.readValidated(expectedDayIdentifier: expectedDay)
+            },
+            historyStore: historyStore,
+            cleanupService: makeCleanupService(onCleanup: {}),
+            timeContextProvider: { timeEnvironment.capture() }
+        )
+        let calibrationHandled = expectation(description: "deferred launch calibration handled")
+        let continuity = TinyBuddyTimeContinuityRecord(
+            lastObservedDayIdentifier: previousDay,
+            lastObservedTimeZoneIdentifier: timeZone.identifier,
+            lastCalibrationDate: Self.fixedDateForDay(previousDay)
+        )
+        XCTAssertTrue(continuity.save(userDefaults: defaults))
+        let calibrator = TinyBuddyTimeCalibrator(
+            timeEnvironment: timeEnvironment,
+            userDefaults: defaults,
+            monotonicProvider: { 1_000 },
+            onChange: { outcome in
+                Task { @MainActor in
+                    if case .dayChanged(_, let to, _) = outcome {
+                        archivalCoordinator.handleDayTransition(to: to)
+                    }
+                    calibrationHandled.fulfill()
+                }
+            }
+        )
+
+        let calibrationOutcome = calibrator.calibrate()
+        guard case .dayChanged(let from, let to, _) = calibrationOutcome else {
+            XCTFail("fixture must emit the same deferred day-change callback as launch")
+            return
+        }
+        XCTAssertEqual(from, previousDay)
+        XCTAssertEqual(to, currentDay)
+        XCTAssertEqual(
+            archivalCoordinator.archivePriorDaySnapshotBeforeLaunchWrites(),
+            .archived
+        )
+
+        // After the same synchronous preflight used by AppDelegate, startup
+        // can roll the combined store before the MainActor callback runs.
+        let todayPetSnapshot = TinyBuddySnapshot(
+            status: .idle,
+            stats: DailyStats(dayIdentifier: currentDay, focusCount: 0, completionCount: 0)
+        )
+        let todayActivity = GitTodayActivitySnapshot(focusBlockCount: 0, commitCount: 0)
+        let rolled = combinedStore.updatePetSlice(
+            todayPetSnapshot,
+            fallbackActivitySnapshot: todayActivity,
+            fallbackActivityRevision: 1
+        )
+        XCTAssertTrue(rolled.didPersist)
+        archivalCoordinator.runAtLaunch()
+        await fulfillment(of: [calibrationHandled], timeout: 5)
+
+        guard case .available(let archivedYesterday) = historyStore.readSnapshot(for: previousDay) else {
+            XCTFail("the previous day's committed snapshot must be recovered before startup writes")
+            return
+        }
+        XCTAssertEqual(archivedYesterday.snapshot.stats.focusCount, 3)
+        XCTAssertEqual(archivedYesterday.snapshot.stats.completionCount, 2)
+        XCTAssertEqual(archivedYesterday.activitySnapshot.focusBlockCount, 3)
+        XCTAssertEqual(archivedYesterday.activitySnapshot.commitCount, 2)
+        XCTAssertEqual(historyStore.readSnapshot(for: "2026-09-15"), .notFound)
+        guard case .available(let archivedToday) = historyStore.readSnapshot(for: currentDay) else {
+            XCTFail("existing launch behavior still archives today's snapshot")
+            return
+        }
+        XCTAssertEqual(archivedToday.snapshot.stats.focusCount, 0)
+    }
+
     func testRunAtLaunchArchivesCurrentDayAndRunsCleanup() throws {
         let historyStore = makeHistoryStore()
         let cleanupExpectation = expectation(description: "cleanup ran at launch")
@@ -143,6 +255,98 @@ final class TinyBuddyHistoryArchivalCoordinatorTests: XCTestCase {
         coordinator.runAtLaunch()
         XCTAssertTrue(historyStore.archivedDayIdentifiers().isEmpty)
         wait(for: [cleanupExpectation], timeout: 5)
+    }
+
+    func testPrelaunchRecoveryArchivesOnlyTheExactOlderDay() {
+        let currentDay = "2026-09-17"
+        let priorDay = "2026-09-15"
+        let historyStore = makeHistoryStore(currentDay: currentDay)
+        let coordinator = makeCoordinator(
+            snapshotProvider: { self.makeSnapshot(dayIdentifier: priorDay, revision: 7) },
+            historyStore: historyStore,
+            cleanupService: makeCleanupService(onCleanup: {}),
+            currentDay: currentDay
+        )
+
+        XCTAssertEqual(coordinator.archivePriorDaySnapshotBeforeLaunchWrites(), .archived)
+        guard case .available(let archived) = historyStore.readSnapshot(for: priorDay) else {
+            XCTFail("the exact older snapshot day must be archived")
+            return
+        }
+        XCTAssertEqual(archived.revision, 7)
+        XCTAssertEqual(historyStore.readSnapshot(for: "2026-09-16"), .notFound)
+        XCTAssertEqual(historyStore.readSnapshot(for: currentDay), .notFound)
+    }
+
+    func testPrelaunchRecoverySkipsSameFutureAndInvalidSnapshotDays() {
+        let currentDay = "2026-09-17"
+        for snapshotDay in [currentDay, "2026-09-18", "not-a-day"] {
+            let historyStore = makeHistoryStore(currentDay: currentDay)
+            let coordinator = makeCoordinator(
+                snapshotProvider: { self.makeSnapshot(dayIdentifier: snapshotDay, revision: 3) },
+                historyStore: historyStore,
+                cleanupService: makeCleanupService(onCleanup: {}),
+                currentDay: currentDay
+            )
+
+            XCTAssertEqual(
+                coordinator.archivePriorDaySnapshotBeforeLaunchWrites(),
+                .noCandidate,
+                "snapshot day \(snapshotDay) must not be archived as a prior day"
+            )
+            XCTAssertTrue(historyStore.archivedDayIdentifiers().isEmpty)
+        }
+    }
+
+    func testPrelaunchRecoveryAndDelayedTransitionPreserveNewerExistingHistory() {
+        let currentDay = "2026-09-17"
+        let priorDay = "2026-09-16"
+        let historyStore = makeHistoryStore(currentDay: currentDay)
+        _ = historyStore.archiveSnapshot(makeSnapshot(dayIdentifier: priorDay, revision: 8))
+        let coordinator = makeCoordinator(
+            snapshotProvider: { self.makeSnapshot(dayIdentifier: priorDay, revision: 5) },
+            historyStore: historyStore,
+            cleanupService: makeCleanupService(onCleanup: {}),
+            currentDay: currentDay
+        )
+
+        XCTAssertEqual(
+            coordinator.archivePriorDaySnapshotBeforeLaunchWrites(),
+            .existingArchivePreserved
+        )
+        coordinator.handleDayTransition(to: currentDay)
+
+        guard case .available(let archived) = historyStore.readSnapshot(for: priorDay) else {
+            XCTFail("existing valid history must remain readable")
+            return
+        }
+        XCTAssertEqual(archived.revision, 8)
+    }
+
+    func testPrelaunchArchiveFailureLeavesCombinedSourceAvailable() throws {
+        let currentDay = "2026-09-17"
+        let blockerURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tinybuddy-history-blocker-\(UUID().uuidString)")
+        try Data("file blocks directory creation".utf8).write(to: blockerURL)
+        addTeardownBlock { try? FileManager.default.removeItem(at: blockerURL) }
+        let historyStore = TinyBuddyHistoryStore(
+            fileManager: .default,
+            snapshotEncoder: TinyBuddyCombinedSnapshotStore.encodeV3,
+            snapshotDecoder: TinyBuddyCombinedSnapshotStore.decodeV3,
+            customContainerURL: blockerURL,
+            currentDayIdentifierProvider: { currentDay }
+        )
+        let candidate = makeSnapshot(dayIdentifier: "2026-09-16", revision: 3)
+        let coordinator = makeCoordinator(
+            snapshotProvider: { candidate },
+            historyStore: historyStore,
+            cleanupService: makeCleanupService(onCleanup: {}),
+            currentDay: currentDay
+        )
+
+        XCTAssertEqual(coordinator.archivePriorDaySnapshotBeforeLaunchWrites(), .failed)
+        XCTAssertEqual(coordinator.archivePriorDaySnapshotBeforeLaunchWrites(), .failed)
+        XCTAssertEqual(historyStore.readSnapshot(for: "2026-09-16"), .notFound)
     }
 
     // MARK: - Day transition
