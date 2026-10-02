@@ -520,6 +520,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerLoginItemChangeObserver()
         timeEnvironmentChangeMonitor.start()
         _ = timeCalibrator.calibrate()
+        // Calibration delivers meaningful changes through a MainActor Task,
+        // so it may not archive the previous day until after startup work has
+        // advanced the combined snapshot. Recover the exact older snapshot
+        // synchronously before config/refresh startup can write a new day.
+        // Archival is best-effort; failure is logged and does not block launch.
+        _ = historyArchivalCoordinator.archivePriorDaySnapshotBeforeLaunchWrites()
         configCoordinator.start()
         // Keep the path projection aligned with bookmarks that followed a
         // moved directory, without triggering a second refresh at launch.

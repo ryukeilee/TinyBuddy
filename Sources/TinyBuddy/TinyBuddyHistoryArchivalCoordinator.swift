@@ -24,6 +24,13 @@ import TinyBuddyCore
 final class TinyBuddyHistoryArchivalCoordinator {
     typealias SnapshotReader = (String?) -> TinyBuddyValidatedCombinedSnapshotRead
 
+    enum PriorDayLaunchArchiveResult: Equatable {
+        case noCandidate
+        case archived
+        case existingArchivePreserved
+        case failed
+    }
+
     private let snapshotReader: SnapshotReader
     private let historyStore: TinyBuddyHistoryStore
     private let cleanupService: TinyBuddyStorageCleanupService
@@ -58,6 +65,56 @@ final class TinyBuddyHistoryArchivalCoordinator {
     }
 
     // MARK: - Lifecycle entry points
+
+    /// Recovers an older committed snapshot before launch starts any writer
+    /// that can advance the combined store to the current day. This covers the
+    /// startup calibration callback, which is delivered on a deferred MainActor
+    /// Task and can otherwise run after the refresh coordinator has rolled the
+    /// store forward.
+    ///
+    /// Only the exact valid snapshot day is archived. Same-day, future, and
+    /// invalid snapshots are ignored; no missing intermediate days are made.
+    /// A readable history entry with an equal or newer combined revision is
+    /// retained. Failure is logged and startup remains best-effort: this does
+    /// not recover every crash window or a snapshot another writer advanced
+    /// before this method ran.
+    @discardableResult
+    func archivePriorDaySnapshotBeforeLaunchWrites() -> PriorDayLaunchArchiveResult {
+        guard let currentDay = timeContextProvider()?.dayIdentifier,
+              TinyBuddyTimeContext.isValidDayIdentifier(currentDay) else {
+            return .noCandidate
+        }
+
+        let read = snapshotReader(nil)
+        guard let snapshot = read.snapshot else {
+            if let observation = read.observation {
+                logger.debug(
+                    "prelaunch history recovery skipped: \(observation.identifier, privacy: .public)"
+                )
+            }
+            return .noCandidate
+        }
+        guard TinyBuddyTimeContext.isValidDayIdentifier(snapshot.dayIdentifier),
+              snapshot.dayIdentifier < currentDay else {
+            return .noCandidate
+        }
+
+        if case .available(let existing) = historyStore.readSnapshot(for: snapshot.dayIdentifier),
+           existing.revision >= snapshot.revision {
+            logger.debug(
+                "prelaunch history recovery preserved existing day=\(snapshot.dayIdentifier, privacy: .public) revision=\(existing.revision, privacy: .public)"
+            )
+            return .existingArchivePreserved
+        }
+
+        guard archive(snapshot) else {
+            return .failed
+        }
+        logger.notice(
+            "archived prior-day snapshot for day=\(snapshot.dayIdentifier, privacy: .public) before startup writes for day=\(currentDay, privacy: .public)"
+        )
+        return .archived
+    }
 
     /// Launch-time archival and cleanup. Archives the committed snapshot for
     /// the current day (if one exists) and schedules a best-effort cleanup on
@@ -158,10 +215,18 @@ final class TinyBuddyHistoryArchivalCoordinator {
 
     @discardableResult
     private func archive(_ snapshot: TinyBuddyCombinedSnapshot) -> Bool {
+        if case .available(let existing) = historyStore.readSnapshot(for: snapshot.dayIdentifier),
+           existing.revision >= snapshot.revision {
+            logger.debug(
+                "history archive preserved existing day=\(snapshot.dayIdentifier, privacy: .public) revision=\(existing.revision, privacy: .public) over candidate revision=\(snapshot.revision, privacy: .public)"
+            )
+            return true
+        }
+
         let archived = historyStore.archiveSnapshot(snapshot)
         if archived == nil {
             logger.error(
-                "history archive failed for day=\(snapshot.dayIdentifier, privacy: .public); combined snapshot remains authoritative"
+                "history archive failed for day=\(snapshot.dayIdentifier, privacy: .public); combined snapshot was left untouched, but a later writer may replace this recovery opportunity"
             )
         }
         return archived != nil
