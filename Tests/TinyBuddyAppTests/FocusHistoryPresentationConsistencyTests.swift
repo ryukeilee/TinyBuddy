@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import TinyBuddyCore
+@testable import TinyBuddy
 
 /// Guards the architectural boundary rather than reproducing SwiftUI layout
 /// tests: Core proves the shared payload's values, while these assertions keep
@@ -24,6 +26,36 @@ final class FocusHistoryPresentationConsistencyTests: XCTestCase {
         XCTAssertTrue(hud.contains("committedSnapshot?.focusHistoryPublication"))
         XCTAssertTrue(widget.contains("combinedSnapshot.focusHistoryPublication"))
         XCTAssertFalse(widget.contains("FocusHistoryAggregationCache"))
+    }
+
+    func testEmptyHistoryOffersSafeStartActionThroughTheSharedManualFocusFlow() throws {
+        XCTAssertTrue(FocusHistoryEmptyStateActionPolicy.shouldOfferStartFocus(
+            state: .noHistory,
+            isSessionActive: false,
+            isSessionPaused: false
+        ))
+        XCTAssertFalse(FocusHistoryEmptyStateActionPolicy.shouldOfferStartFocus(
+            state: .noHistory,
+            isSessionActive: true,
+            isSessionPaused: false
+        ))
+        XCTAssertFalse(FocusHistoryEmptyStateActionPolicy.shouldOfferStartFocus(
+            state: .noHistory,
+            isSessionActive: false,
+            isSessionPaused: true
+        ))
+        XCTAssertFalse(FocusHistoryEmptyStateActionPolicy.shouldOfferStartFocus(
+            state: .available,
+            isSessionActive: false,
+            isSessionPaused: false
+        ))
+
+        let app = try source("Sources/TinyBuddy/TinyBuddyApp.swift")
+        let history = try source("Sources/TinyBuddy/FocusHistoryView.swift")
+        XCTAssertTrue(history.contains("ManualFocusProjectPicker("))
+        XCTAssertTrue(history.contains("recentProjectName: recentProjectNameProvider()"))
+        XCTAssertTrue(history.contains("registeredProjects: registeredProjectsProvider()"))
+        XCTAssertTrue(app.contains("appDelegate.petViewModel.startManualFocus(project: project)"))
     }
 
     func testUnknownHistoryNeverFallsBackToLegacyWidgetCounts() throws {

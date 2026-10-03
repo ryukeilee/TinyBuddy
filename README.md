@@ -5,6 +5,7 @@ TinyBuddy is a macOS 14 companion HUD built with SwiftUI, Swift Package Manager,
 ## What It Includes
 
 - A floating macOS HUD app in `Sources/TinyBuddy/`
+- Focus history with a project picker to start the first session from its empty state
 - Shared domain and persistence logic in `Sources/TinyBuddyCore/`
 - A WidgetKit extension in `Widget/TinyBuddyWidget/`
 - Local scripts for build, launch, install, and verification in `script/`
