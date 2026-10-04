@@ -522,6 +522,79 @@ final class HistoryQueryControllerTests: XCTestCase {
         XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), ["2026-07-19", "2026-07-20"])
     }
 
+    func testPresetBoundsRespectLocalDaysWeeksAndCalendarArithmetic() throws {
+        let cases: [(String, String, Int, String, String, String, String)] = [
+            ("2026-01-01T01:00:00Z", "America/Los_Angeles", 2, "2025-12-31", "2025-12-29", "2026-01-04", "2025-12-25"),
+            ("2026-01-31T16:30:00Z", "Asia/Shanghai", 1, "2026-02-01", "2026-02-01", "2026-02-07", "2026-01-26"),
+            ("2026-03-10T07:30:00Z", "America/Los_Angeles", 2, "2026-03-10", "2026-03-09", "2026-03-15", "2026-03-04"),
+            ("2024-03-01T12:00:00Z", "Asia/Shanghai", 2, "2024-03-01", "2024-02-26", "2024-03-03", "2024-02-24")
+        ]
+        for (instant, zone, firstWeekday, today, weekStart, weekEnd, sevenStart) in cases {
+            let now = try XCTUnwrap(ISO8601DateFormatter().date(from: instant))
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = try XCTUnwrap(TimeZone(identifier: zone))
+            calendar.firstWeekday = firstWeekday
+            for (preset, expectedStart, expectedEnd) in [
+                (HistoryDateFilterPreset.today, today, today),
+                (.thisWeek, weekStart, weekEnd),
+                (.lastSevenDays, sevenStart, today)
+            ] {
+                let bounds = try XCTUnwrap(preset.bounds(now: now, calendar: calendar))
+                XCTAssertEqual(bounds.start, expectedStart)
+                XCTAssertEqual(bounds.end, expectedEnd)
+                let query = FocusSessionQuery(dayStart: bounds.start, dayEnd: bounds.end)
+                XCTAssertEqual(HistoryDateFilterValidator.validate(query), .success(query))
+            }
+        }
+    }
+
+    func testPresetsCustomDrillDownAndClearShareQueryAndRetainOtherFilters() async throws {
+        let days = ["2025-12-25", "2025-12-29", "2025-12-31", "2026-01-01", "2026-01-04", "2026-01-05"]
+        let sessions = days.flatMap { day in
+            [alpha, beta].map { project in
+                makeSession(id: UUID(), project: project, startedAt: Date(), dayIdentifier: day)
+            }
+        }
+        let controller = makeController(box: SessionProviderBox(sessions))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        calendar.firstWeekday = 2
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T01:00:00Z"))
+        var query = FocusSessionQuery(projectKey: alpha.key, status: .ended, keyword: "Alpha")
+        let pending = Task { await controller.updateQuery(FocusSessionQuery(keyword: "Beta"), debounceSeconds: 0.15) }
+        await Task.yield()
+        for (preset, expected) in [
+            (HistoryDateFilterPreset.today, ["2025-12-31"]),
+            (.thisWeek, ["2025-12-29", "2025-12-31", "2026-01-01", "2026-01-04"]),
+            (.lastSevenDays, ["2025-12-25", "2025-12-29", "2025-12-31"])
+        ] {
+            let bounds = try XCTUnwrap(preset.bounds(now: now, calendar: calendar))
+            query.dayStart = bounds.start
+            query.dayEnd = bounds.end
+            let error = await controller.updateQuery(validatingDateFilter: query)
+            XCTAssertNil(error)
+            XCTAssertEqual(controller.query, query)
+            XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), expected)
+        }
+        await pending.value
+        XCTAssertEqual(controller.query, query)
+        for (start, end, expected) in [
+            ("2026-01-01", "2026-01-04", ["2026-01-01", "2026-01-04"]),
+            ("2025-12-29", "2025-12-29", ["2025-12-29"])
+        ] {
+            query.dayStart = start
+            query.dayEnd = end
+            let error = await controller.updateQuery(validatingDateFilter: query)
+            XCTAssertNil(error)
+            XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), expected)
+        }
+        await controller.clearDateFilter(in: query)
+        query.dayStart = nil
+        query.dayEnd = nil
+        XCTAssertEqual(controller.query, query)
+        XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), days)
+    }
+
     // MARK: - View Wiring
 
     /// Guards the view-level wiring (following the repository's source-level
@@ -557,6 +630,10 @@ final class HistoryQueryControllerTests: XCTestCase {
         // Date submissions use the controller's validated path; failed input
         // stays visible, while Clear resets the draft and committed bounds.
         XCTAssertTrue(list.contains("validatingDateFilter: proposedQuery"))
+        XCTAssertTrue(list.contains("ForEach(HistoryDateFilterPreset.allCases, id: \\.self)"))
+        XCTAssertTrue(list.contains("dayStartInput = bounds.start"))
+        XCTAssertTrue(list.contains("dayEndInput = bounds.end"))
+        XCTAssertTrue(list.contains("applyDateFilter()"))
         XCTAssertTrue(list.contains("if let dateFilterError"))
         XCTAssertTrue(list.contains("Text(dateFilterError.message)"))
         XCTAssertTrue(list.contains("clearDateFilter(in: makeQuery())"))

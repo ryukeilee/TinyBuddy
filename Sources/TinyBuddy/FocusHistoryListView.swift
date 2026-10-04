@@ -208,6 +208,16 @@ struct FocusHistoryListView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("日期范围")
                 .font(.headline)
+            HStack(spacing: 6) {
+                ForEach(HistoryDateFilterPreset.allCases, id: \.self) { preset in
+                    Button(preset.label) {
+                        guard let bounds = preset.bounds() else { return }
+                        dayStartInput = bounds.start
+                        dayEndInput = bounds.end
+                        applyDateFilter()
+                    }
+                }
+            }
             TextField("开始日期 (yyyy-MM-dd)", text: Binding(
                 get: { dayStartInput },
                 set: {
@@ -247,28 +257,33 @@ struct FocusHistoryListView: View {
                     showDateFilter = false
                 }
                 Button("应用") {
-                    var proposedQuery = makeQuery()
-                    proposedQuery.dayStart = dayStartInput.isEmpty ? nil : dayStartInput
-                    proposedQuery.dayEnd = dayEndInput.isEmpty ? nil : dayEndInput
-                    Task {
-                        if let error = await controller.updateQuery(
-                            validatingDateFilter: proposedQuery,
-                            debounceSeconds: 0
-                        ) {
-                            dateFilterError = error
-                            return
-                        }
-                        dayStart = controller.query.dayStart
-                        dayEnd = controller.query.dayEnd
-                        dateFilterError = nil
-                        showDateFilter = false
-                    }
+                    applyDateFilter()
                 }
                 .buttonStyle(.borderedProminent)
             }
         }
         .padding()
-        .frame(width: 240)
+        .frame(width: 300)
+    }
+
+    private func applyDateFilter() {
+        var proposedQuery = makeQuery()
+        proposedQuery.dayStart = dayStartInput.isEmpty ? nil : dayStartInput
+        proposedQuery.dayEnd = dayEndInput.isEmpty ? nil : dayEndInput
+        // Commit toolbar state before awaiting the query so a newer selection or
+        // drill-down cannot be overwritten by an older query's completion.
+        switch HistoryDateFilterValidator.validate(proposedQuery) {
+        case .failure(let error):
+            dateFilterError = error
+        case .success(let validatedQuery):
+            dayStart = validatedQuery.dayStart
+            dayEnd = validatedQuery.dayEnd
+            dateFilterError = nil
+            showDateFilter = false
+            Task {
+                await controller.updateQuery(validatingDateFilter: proposedQuery, debounceSeconds: 0)
+            }
+        }
     }
 
     private var dateFilterActive: Bool {

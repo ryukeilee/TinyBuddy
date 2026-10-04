@@ -31,6 +31,52 @@ enum HistoryDateFilterValidationError: Error, Equatable {
     }
 }
 
+/// Presets produce only the existing inclusive day bounds, with no persistent selection state.
+enum HistoryDateFilterPreset: CaseIterable {
+    case today
+    case thisWeek
+    case lastSevenDays
+
+    var label: String {
+        switch self {
+        case .today: return "今天"
+        case .thisWeek: return "本周"
+        case .lastSevenDays: return "最近 7 天"
+        }
+    }
+
+    func bounds(now: Date = Date(), calendar: Calendar = .autoupdatingCurrent) -> (start: String, end: String)? {
+        guard let context = TinyBuddyTimeEnvironment(calendar: calendar, dateProvider: { now }).capture() else {
+            return nil
+        }
+        // Business day keys are Gregorian; retain the user's local week convention.
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = context.timeZone
+        localCalendar.firstWeekday = calendar.firstWeekday
+        localCalendar.minimumDaysInFirstWeek = calendar.minimumDaysInFirstWeek
+        let today = localCalendar.startOfDay(for: now)
+        let start: Date
+        let end: Date
+        switch self {
+        case .today:
+            start = today
+            end = today
+        case .thisWeek:
+            guard let week = localCalendar.dateInterval(of: .weekOfYear, for: today),
+                  let lastDay = localCalendar.date(byAdding: .day, value: -1, to: week.end) else { return nil }
+            start = week.start
+            end = lastDay
+        case .lastSevenDays:
+            guard let firstDay = localCalendar.date(byAdding: .day, value: -6, to: today) else { return nil }
+            start = firstDay
+            end = today
+        }
+        guard let dayStart = context.dayIdentifier(for: start),
+              let dayEnd = context.dayIdentifier(for: end) else { return nil }
+        return (dayStart, dayEnd)
+    }
+}
+
 enum HistoryDateFilterValidator {
     static func validate(
         _ query: FocusSessionQuery
