@@ -12,6 +12,22 @@ enum FocusHistoryEmptyStateActionPolicy {
     }
 }
 
+/// Only session-backed, valid dates can seed the existing list filter.
+enum FocusHistoryDayDrillDownPolicy {
+    static func dayIdentifier(for day: FocusHistoryDay) -> String? {
+        guard day.state != .unknown, let ids = day.contributingSessionIDs,
+              day.state != .sessions || !ids.isEmpty else { return nil }
+        let query = FocusSessionQuery(dayStart: day.dayIdentifier, dayEnd: day.dayIdentifier)
+        guard case .success = HistoryDateFilterValidator.validate(query) else { return nil }
+        return day.dayIdentifier
+    }
+}
+
+struct FocusHistoryDaySelection: Equatable {
+    let dayIdentifier: String
+    let requestID = UUID()
+}
+
 /// Read-only Settings surface for the revision-bound, session-derived history
 /// publication. This view deliberately has no access to `FocusSession` data.
 struct FocusHistoryView: View {
@@ -21,6 +37,7 @@ struct FocusHistoryView: View {
 
     @State private var publication: FocusHistoryPublication?
     @State private var showSessionList = false
+    @State private var selectedDay: FocusHistoryDaySelection?
     @State private var showStartFocusPicker = false
     private let recentProjectNameProvider: () -> String?
     private let registeredProjectsProvider: () -> [TinyBuddyProject]
@@ -130,7 +147,24 @@ struct FocusHistoryView: View {
 
                 Section("最近七天") {
                     ForEach(snapshot.recentDays, id: \.dayIdentifier) { day in
-                        recentDayRow(day, publication: publication, at: now)
+                        if historyController != nil,
+                           let identifier = FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day) {
+                            Button {
+                                selectedDay = FocusHistoryDaySelection(dayIdentifier: identifier)
+                                showSessionList = true
+                            } label: {
+                                HStack {
+                                    recentDayRow(day, publication: publication, at: now)
+                                    Image(systemName: "chevron.right")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("查看 \(identifier) 的专注会话")
+                        } else {
+                            recentDayRow(day, publication: publication, at: now)
+                        }
                     }
                 }
 
@@ -176,7 +210,7 @@ struct FocusHistoryView: View {
     @ViewBuilder
     private var sessionListView: some View {
         if let controller = historyController {
-            FocusHistoryListView(controller: controller)
+            FocusHistoryListView(controller: controller, daySelection: selectedDay)
                 .frame(minHeight: 300)
         }
     }

@@ -24,11 +24,13 @@ struct FocusHistoryListView: View {
     @State private var dayEndInput = ""
     @State private var dateFilterError: HistoryDateFilterValidationError?
     @State private var showDateFilter = false
+    @State private var appliedDayRequestID: UUID?
     @State private var projectOptions: [(key: String, name: String)] = []
 
-    private let pageSize = 50
+    private let daySelection: FocusHistoryDaySelection?
 
-    init(controller: HistoryQueryController) {
+    init(controller: HistoryQueryController, daySelection: FocusHistoryDaySelection? = nil) {
+        self.daySelection = daySelection
         self._controller = State(initialValue: controller)
     }
 
@@ -42,10 +44,19 @@ struct FocusHistoryListView: View {
 
             content
         }
-        .task {
+        .task(id: daySelection?.requestID) {
             // Replay this view's own toolbar filters on every appearance so
             // the shared controller's query (e.g. the review view's default
             // `.ended` filter) cannot leak into this list.
+            if let daySelection, appliedDayRequestID != daySelection.requestID {
+                appliedDayRequestID = daySelection.requestID
+                dayStart = daySelection.dayIdentifier
+                dayEnd = daySelection.dayIdentifier
+                dayStartInput = daySelection.dayIdentifier
+                dayEndInput = daySelection.dayIdentifier
+                dateFilterError = nil
+                showDateFilter = false
+            }
             await controller.updateQuery(makeQuery(), debounceSeconds: 0)
             await loadProjectOptions()
         }
@@ -105,7 +116,8 @@ struct FocusHistoryListView: View {
             Button {
                 showDateFilter.toggle()
             } label: {
-                Image(systemName: "calendar")
+                Label(dateFilterActive ? "\(dayStart ?? "不限") – \(dayEnd ?? "不限")" : "日期", systemImage: "calendar")
+                    .font(.caption)
                     .foregroundColor(dateFilterActive ? .accentColor : .secondary)
             }
             .buttonStyle(.plain)

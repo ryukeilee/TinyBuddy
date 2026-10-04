@@ -480,6 +480,48 @@ final class HistoryQueryControllerTests: XCTestCase {
         XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), days)
     }
 
+    func testDayDrillDownRequiresReliableReferencesAndValidDate() {
+        func day(_ state: FocusHistoryDayState, _ ids: [UUID]?, date: String = "2026-07-20") -> FocusHistoryDay {
+            FocusHistoryDay(
+                dayIdentifier: date, state: state, focusDuration: nil,
+                completedSessionCount: nil, goalMinutes: nil,
+                goalCompletionRate: nil, isGoalMet: nil, contributingSessionIDs: ids
+            )
+        }
+        XCTAssertEqual(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.sessions, [UUID()])), "2026-07-20")
+        XCTAssertEqual(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.noSessions, [])), "2026-07-20")
+        XCTAssertNil(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.unknown, [UUID()])))
+        XCTAssertNil(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.sessions, nil)))
+        XCTAssertNil(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.sessions, [])))
+        XCTAssertNil(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.noSessions, nil)))
+        XCTAssertNil(FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day(.sessions, [UUID()], date: "2026-02-30")))
+    }
+
+    func testSingleDaySwitchSupersedesPendingQueryAndRetainsOtherFilters() async {
+        let sessions = ["2026-07-19", "2026-07-20"].flatMap { day in
+            [alpha, beta].map { project in
+                makeSession(id: UUID(), project: project, startedAt: Date(timeIntervalSinceReferenceDate: 100), dayIdentifier: day)
+            }
+        }
+        let controller = makeController(box: SessionProviderBox(sessions))
+        var query = FocusSessionQuery(dayStart: "2026-07-19", dayEnd: "2026-07-19", projectKey: alpha.key, status: .ended, keyword: "Alpha")
+        let oldQuery = query
+        let pending = Task { await controller.updateQuery(oldQuery, debounceSeconds: 0.15) }
+        await Task.yield()
+        query.dayStart = "2026-07-20"
+        query.dayEnd = "2026-07-20"
+        let error = await controller.updateQuery(validatingDateFilter: query)
+        await pending.value
+        XCTAssertNil(error)
+        XCTAssertEqual(controller.query, query)
+        XCTAssertEqual(controller.allSessions.map(\.dayIdentifier), ["2026-07-20"])
+        await controller.clearDateFilter(in: controller.query)
+        XCTAssertEqual(controller.query.projectKey, alpha.key)
+        XCTAssertEqual(controller.query.status, .ended)
+        XCTAssertEqual(controller.query.keyword, "Alpha")
+        XCTAssertEqual(controller.allSessions.map(\.dayIdentifier).sorted(), ["2026-07-19", "2026-07-20"])
+    }
+
     // MARK: - View Wiring
 
     /// Guards the view-level wiring (following the repository's source-level
@@ -490,6 +532,14 @@ final class HistoryQueryControllerTests: XCTestCase {
     func testHistoryListViewWiringReloadsOnSnapshotSynchronization() throws {
         let list = try source("Sources/TinyBuddy/FocusHistoryListView.swift")
         let review = try source("Sources/TinyBuddy/FocusSessionReviewView.swift")
+        let summary = try source("Sources/TinyBuddy/FocusHistoryView.swift")
+        XCTAssertTrue(summary.contains("FocusHistoryDayDrillDownPolicy.dayIdentifier(for: day)"))
+        XCTAssertTrue(summary.contains("showSessionList = true"))
+        XCTAssertTrue(summary.contains("FocusHistoryListView(controller: controller, daySelection: selectedDay)"))
+        XCTAssertTrue(list.contains(".task(id: daySelection?.requestID)"))
+        XCTAssertTrue(list.contains("appliedDayRequestID != daySelection.requestID"))
+        XCTAssertTrue(list.contains("dayStartInput = daySelection.dayIdentifier"))
+        XCTAssertTrue(list.contains("dayEndInput = daySelection.dayIdentifier"))
 
         XCTAssertTrue(list.contains(".focusSessionSnapshotSynchronizationDidFinish"))
         XCTAssertTrue(list.contains("await controller.reload()"))
