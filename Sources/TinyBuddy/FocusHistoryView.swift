@@ -1,6 +1,17 @@
 import SwiftUI
 import TinyBuddyCore
 
+/// Restricts the empty-history start action to a genuinely idle publication.
+enum FocusHistoryEmptyStateActionPolicy {
+    static func shouldOfferStartFocus(
+        state: FocusHistoryState,
+        isSessionActive: Bool,
+        isSessionPaused: Bool
+    ) -> Bool {
+        state == .noHistory && !isSessionActive && !isSessionPaused
+    }
+}
+
 /// Read-only Settings surface for the revision-bound, session-derived history
 /// publication. This view deliberately has no access to `FocusSession` data.
 struct FocusHistoryView: View {
@@ -10,15 +21,25 @@ struct FocusHistoryView: View {
 
     @State private var publication: FocusHistoryPublication?
     @State private var showSessionList = false
+    @State private var showStartFocusPicker = false
+    private let recentProjectNameProvider: () -> String?
+    private let registeredProjectsProvider: () -> [TinyBuddyProject]
+    private let onStartFocus: (FocusProjectContext) -> Void
 
     init(
         publicationProvider: @escaping () -> FocusHistoryPublication?,
         refresh: @escaping () -> Void,
-        historyController: HistoryQueryController? = nil
+        historyController: HistoryQueryController? = nil,
+        recentProjectNameProvider: @escaping () -> String? = { nil },
+        registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] },
+        onStartFocus: @escaping (FocusProjectContext) -> Void = { _ in }
     ) {
         self.publicationProvider = publicationProvider
         self.refresh = refresh
         self.historyController = historyController
+        self.recentProjectNameProvider = recentProjectNameProvider
+        self.registeredProjectsProvider = registeredProjectsProvider
+        self.onStartFocus = onStartFocus
         _publication = State(initialValue: publicationProvider())
     }
 
@@ -61,12 +82,35 @@ struct FocusHistoryView: View {
         let snapshot = publication.snapshot
         switch snapshot.state {
         case .noHistory:
-            VStack {
+            VStack(spacing: 12) {
                 ContentUnavailableView(
                     "暂无专注历史",
                     systemImage: "clock",
                     description: Text("已确认的专注会话会在这里汇总为最近七天和本周趋势。")
                 )
+
+                if FocusHistoryEmptyStateActionPolicy.shouldOfferStartFocus(
+                    state: snapshot.state,
+                    isSessionActive: publication.isFocusSessionActive,
+                    isSessionPaused: publication.isFocusSessionPaused
+                ) {
+                    Button("选择项目开始专注") {
+                        showStartFocusPicker = true
+                    }
+                    .popover(isPresented: $showStartFocusPicker) {
+                        ManualFocusProjectPicker(
+                            recentProjectName: recentProjectNameProvider(),
+                            registeredProjects: registeredProjectsProvider(),
+                            onSubmit: { project in
+                                onStartFocus(project)
+                                showStartFocusPicker = false
+                            }
+                        )
+                        .frame(width: 260)
+                        .padding()
+                    }
+                }
+
                 sessionListView
             }
         case .unknown:

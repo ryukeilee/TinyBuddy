@@ -109,7 +109,14 @@ struct TinyBuddyApp: App {
                     FocusHistoryView(
                         publicationProvider: { appDelegate.focusHistoryPublication },
                         refresh: { appDelegate.refreshFocusHistoryForPresentation() },
-                        historyController: appDelegate.historyQueryController
+                        historyController: appDelegate.historyQueryController,
+                        recentProjectNameProvider: {
+                            appDelegate.petViewModel.displayPresentation.recentProjectName
+                        },
+                        registeredProjectsProvider: { appDelegate.activeManualFocusProjects },
+                        onStartFocus: { project in
+                            appDelegate.petViewModel.startManualFocus(project: project)
+                        }
                     )
                         .tabItem { Label("历史与周报", systemImage: "chart.bar.xaxis") }
                     FocusGoalSettingsView(
