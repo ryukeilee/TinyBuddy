@@ -164,6 +164,60 @@ final class PetViewModelTests: XCTestCase {
         XCTAssertEqual(widgetReloadCount, 1)
     }
 
+    func testInitReloadsWidgetWhenItCreatesTheFirstCombinedSnapshotForToday() {
+        let defaults = makeDefaults()
+        let calendar = makeCalendar()
+        let today = makeDate(year: 2026, month: 7, day: 4, hour: 8, minute: 0, second: 0)
+        let dayIdentifier = "2026-07-04"
+        let store = DailyStatsStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        let combinedStore = store.makeCombinedSnapshotStore()
+        XCTAssertNil(combinedStore.readValidated(expectedDayIdentifier: dayIdentifier).snapshot)
+
+        GitTodayFocusBlockCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(0)
+        GitTodayCommitCountStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today },
+            sharedFallbacksEnabled: false
+        ).saveTodayCount(0)
+        let refreshStatusStore = GitActivityRefreshStatusStore(
+            userDefaults: defaults,
+            calendar: calendar,
+            dateProvider: { today }
+        )
+        refreshStatusStore.save(
+            GitActivityRefreshStatus(
+                refreshedAt: today,
+                trigger: .launch,
+                outcome: .succeeded
+            )
+        )
+
+        var widgetReloadCount = 0
+        _ = PetViewModel(
+            store: store,
+            activityStore: makeActivityStore(defaults: defaults, calendar: calendar, today: today),
+            combinedSnapshotStore: combinedStore,
+            refreshStatusStore: refreshStatusStore,
+            reloadWidgetForNewCurrentDaySnapshot: true,
+            notificationCenter: NotificationCenter(),
+            timeEnvironment: makeTimeEnvironment(calendar: calendar, now: today),
+            widgetReloader: { widgetReloadCount += 1 }
+        )
+
+        XCTAssertNotNil(combinedStore.readValidated(expectedDayIdentifier: dayIdentifier).snapshot)
+        XCTAssertEqual(widgetReloadCount, 1)
+    }
+
     func testLoadsRefreshDiagnosticsFromStoreOnInit() {
         let defaults = makeDefaults()
         let calendar = makeCalendar()

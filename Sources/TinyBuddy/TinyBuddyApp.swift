@@ -26,7 +26,56 @@ enum FocusHistoryPublicationStatus {
 }
 private let tinyBuddyStartupLogger = Logger(subsystem: "local.tinybuddy", category: "Startup")
 
-private let appColdStartTime = CFAbsoluteTimeGetCurrent()
+@MainActor
+private enum TinyBuddyStartupClock {
+    private(set) static var processStartedAt = CFAbsoluteTimeGetCurrent()
+
+    static func markProcessStart() {
+        processStartedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    static func elapsedMilliseconds() -> Int {
+        Int((CFAbsoluteTimeGetCurrent() - processStartedAt) * 1000)
+    }
+}
+
+@MainActor
+private final class TinyBuddyHUDPresentationGate {
+    static let shared = TinyBuddyHUDPresentationGate()
+
+    private weak var window: NSWindow?
+    private(set) var hasRestoredCriticalState = false
+    private var hasPublishedVisibleReady = false
+    private var visibleReadyHandler: (@MainActor () -> Void)?
+
+    func attach(_ window: NSWindow) {
+        guard self.window !== window else { return }
+        self.window = window
+        window.alphaValue = hasRestoredCriticalState ? 1 : 0
+    }
+
+    func installVisibleReadyHandler(_ handler: @escaping @MainActor () -> Void) {
+        visibleReadyHandler = handler
+        if hasPublishedVisibleReady {
+            handler()
+        }
+    }
+
+    func restoreCriticalState() {
+        guard !hasRestoredCriticalState else { return }
+        hasRestoredCriticalState = true
+        guard let window else { return }
+        window.alphaValue = 1
+        publishTinyBuddyHUDReadyWhenVisible(window)
+    }
+
+    func markVisibleReady() -> Bool {
+        guard hasRestoredCriticalState, !hasPublishedVisibleReady else { return false }
+        hasPublishedVisibleReady = true
+        visibleReadyHandler?()
+        return true
+    }
+}
 
 @MainActor
 private func publishTinyBuddyHUDReadyWhenVisible(
@@ -44,19 +93,23 @@ private func publishTinyBuddyHUDReadyWhenVisible(
     if window.identifier == tinyBuddyHUDWindowIdentifier,
        isTargetSize,
        isSemanticallyVisible {
+        guard TinyBuddyHUDPresentationGate.shared.markVisibleReady() else { return }
         tinyBuddyHUDLogger.notice(
             "HUD ready identifier=TinyBuddy.HUDWindow width=284 height=520"
         )
-        let startupDuration = Int((CFAbsoluteTimeGetCurrent() - appColdStartTime) * 1000)
+        let startupDuration = TinyBuddyStartupClock.elapsedMilliseconds()
         tinyBuddyStartupLogger.notice(
             "Cold start completed duration=\(startupDuration, privacy: .public)ms"
         )
         return
     }
 
-    guard remainingAttempts > 0 else {
-        return
-    }
+    scheduleNextHUDReadyCheck(window, remainingAttempts: remainingAttempts)
+}
+
+@MainActor
+private func scheduleNextHUDReadyCheck(_ window: NSWindow, remainingAttempts: Int) {
+    guard remainingAttempts > 0 else { return }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
         publishTinyBuddyHUDReadyWhenVisible(
             window,
@@ -68,6 +121,10 @@ private func publishTinyBuddyHUDReadyWhenVisible(
 @main
 struct TinyBuddyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        TinyBuddyStartupClock.markProcessStart()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -166,9 +223,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private let resetService: TinyBuddyResetService
     private let resetRecoveryError: TinyBuddyResetError?
+    private let startupProjectIdentityAutoMergeCompletion = DispatchGroup()
     private var authorizationCommandObservers: [NSObjectProtocol] = []
     private var terminationSignalSource: DispatchSourceSignal?
     private var isPerformingReset = false
+    private var hasFinishedCriticalStartup = false
+    private var hasCompletedStartupProjectIdentityMerge = false
+    private var hasObservedVisibleHUD = false
+    private var hasScheduledPostHUDStartup = false
+    private var hasScheduledStartupFallback = false
+    private var hasStartedDeferredStartupServices = false
+    private var hasStartedGitActivityRefresh = false
+    private var hasPendingStartupWidgetReload = false
+    private var isTerminating = false
     private lazy var resetExecutionCoordinator = TinyBuddyResetExecutionCoordinator(
         quiesceRuntime: { [weak self] in
             self?.quiesceRuntimeForReset()
@@ -218,10 +285,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activityStore: activityStore,
         combinedSnapshotStore: combinedSnapshotStore,
         refreshStatusStore: refreshStatusStore,
+        reloadWidgetForNewCurrentDaySnapshot: true,
         notificationCenter: notificationCenter,
         timeEnvironment: timeEnvironment,
         registeredProjectsProvider: { [weak self] in
             self?.activeManualFocusProjects ?? []
+        },
+        widgetReloader: { [weak self] in
+            self?.requestWidgetTimelineReload()
         }
     )
     private lazy var gitActivityRefreshCoordinator = GitActivityRefreshCoordinator(
@@ -307,13 +378,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // snapshot store for the new day. The current day's file is never
             // touched by archival or cleanup.
             self.historyArchivalCoordinator.handleDayTransition(to: context.dayIdentifier)
-            self.gitActivityRefreshCoordinator.handleTimeEnvironmentChanged(context)
+            if self.hasStartedGitActivityRefresh {
+                self.gitActivityRefreshCoordinator.handleTimeEnvironmentChanged(context)
+            }
             // Run calibration after the coordinator processes the change.
             // The calibrator's monotonic-clock comparison may detect a
             // discontinuity that the notification alone does not reveal.
             self.timeCalibrator.calibrate()
         case .willSleep:
-            self.gitActivityRefreshCoordinator.handleWillSleep()
+            if self.hasStartedGitActivityRefresh {
+                self.gitActivityRefreshCoordinator.handleWillSleep()
+            }
         }
     }
 
@@ -378,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // changes detected purely through the calibrator (e.g., a manual
             // clock adjustment without a system notification), request a
             // widget reload so the Widget picks up the new continuity record.
-            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+            requestWidgetTimelineReload()
         }
     }
 
@@ -393,10 +468,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 gitScanRootAuthorizationStore!.accessAuthorizedRootResult()
             },
             rebuildRepositoryChangeMonitor: { [weak self] in
-                self?.gitActivityRefreshCoordinator.handleConfigChanged()
+                guard let self, self.hasStartedGitActivityRefresh else { return }
+                self.gitActivityRefreshCoordinator.handleConfigChanged()
             },
             rescheduleTimer: { [weak self] in
-                self?.gitActivityRefreshCoordinator.handleConfigStrategyChanged()
+                guard let self, self.hasStartedGitActivityRefresh else { return }
+                self.gitActivityRefreshCoordinator.handleConfigStrategyChanged()
             }
         )
     }()
@@ -508,7 +585,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let coordinator = TinyBuddyInstanceCoordinator.shared
         let role = coordinator.claimInstance { [weak self] in
             // A secondary requested wake — trigger a reopen refresh.
-            self?.gitActivityRefreshCoordinator.handleReopen()
+            guard let self, self.hasStartedGitActivityRefresh else { return }
+            self.gitActivityRefreshCoordinator.handleReopen()
         }
 
         guard role == .primary else {
@@ -520,6 +598,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         installTerminationSignalHandlers()
+        TinyBuddyHUDPresentationGate.shared.installVisibleReadyHandler { [weak self] in
+            self?.hudDidBecomeReady()
+        }
+        beginStartupProjectIdentityAutoMerge()
         NSApp.setActivationPolicy(.accessory)
         HUDWindowPositionController.shared.start()
         registerAuthorizationCommandObservers()
@@ -533,74 +615,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // synchronously before config/refresh startup can write a new day.
         // Archival is best-effort; failure is logged and does not block launch.
         _ = historyArchivalCoordinator.archivePriorDaySnapshotBeforeLaunchWrites()
-        configCoordinator.start()
-        // Keep the path projection aligned with bookmarks that followed a
-        // moved directory, without triggering a second refresh at launch.
-        configCoordinator.reconcilePersistedScanRoots()
-        // === Login-item state sync & bounded recovery ===
-        //
-        // SMAppService has no change notifications. Refresh the cached status
-        // at launch, repair a stale registration only when the persisted
-        // intent is enabled and the system reports a missing/error service
-        // (upgrade, reinstall, or app path replacement), then rewrite the
-        // persisted intent from the unambiguous actual state. Every step is
-        // best-effort: a failure is logged and must never interrupt HUD,
-        // Widget, focus engine, or background refresh initialization below.
-        let loginItemManager = TinyBuddyLoginItemManager.shared
-        loginItemManager.refreshStatus()
-        do {
-            try loginItemManager.recoverIfNeeded(
-                intentEnabled: configCoordinator.currentConfig()?.launchAtLoginEnabled ?? false
-            )
-        } catch {
-            tinyBuddyStartupLogger.error(
-                "login item recovery failed reason=\(error.localizedDescription, privacy: .public)"
-            )
-        }
-        configCoordinator.reconcileLaunchAtLoginIntent()
-        gitActivityRefreshCoordinator.start(
-            isApplicationActive: NSApp.isActive,
-            isInterfaceVisible: isHUDVisible,
-            powerState: TinyBuddyPowerState.current()
-        )
-
-        // Ensure the combined snapshot exists for the current local day so
-        // the Widget never sees a stale-day-only shared snapshot on a fresh
-        // launch when no refresh commit has completed yet.  If a snapshot
-        // already exists for today, the read-validated check below returns
-        // it without writing; otherwise the available pet and activity data
-        // is published atomically and the Widget timeline is reloaded.
-        initializeCombinedSnapshotForCurrentDay()
-
-        // Archive today's snapshot and run the storage cleanup flow. Both are
-        // best-effort and off the HUD critical path: archival writes are
-        // atomic and idempotent, and cleanup never deletes the current day,
-        // active focus sessions, recovery backups, or referenced data.
-        historyArchivalCoordinator.runAtLaunch()
-
-        // === Version upgrade detection: state reconstruction & widget self-healing ===
-        //
-        // Detect app version changes (cover install / upgrade) and set the
-        // post-upgrade rebuild flag.  The Git refresh coordinator already runs
-        // a forced refresh on launch; if this is an upgrade we ensure the
-        // widget timelines are reloaded once that refresh commits fresh state.
-        let upgradeState = TinyBuddyVersionUpgradeTracker.checkForUpgrade()
-        if upgradeState.isUpgrade {
-            tinyBuddyStartupLogger.notice(
-                "Version upgrade detected: \(upgradeState.previousShortVersion ?? "nil", privacy: .public) -> \(upgradeState.currentShortVersion ?? "nil", privacy: .public) build \(upgradeState.previousBuildVersion ?? "nil", privacy: .public) -> \(upgradeState.currentBuildVersion ?? "nil", privacy: .public)"
-            )
-            // The launch-time refresh will already rebuild state.  Enqueue an
-            // additional manual refresh only if the launch refresh has not yet
-            // started or has already finished.
-            gitActivityRefreshCoordinator.handleManualRefresh()
-            // Register a one-time observer that reloads widget timelines after
-            // the first post-upgrade refresh completes, guaranteeing the Widget
-            // sees freshly committed state rather than stale data.
-            registerPostUpgradeWidgetReloadObserver()
-        }
-        // Always record the current version after upgrade work is dispatched.
-        TinyBuddyVersionUpgradeTracker.recordCurrentVersion()
-
         let focusBridge = FocusSessionAppBridge.createStandard(
             projectRegistry: projectRegistry,
             exclusionRulesProvider: { [configStore] in
@@ -685,11 +699,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         manualFocusMenuBarController.setEngine(focusBridge?.sessionEngine)
         replayPendingFocusSessionPublicationIfNeeded()
         refreshFocusHistoryForPresentation()
+        hasFinishedCriticalStartup = true
+        revealHUDWhenStartupStateIsRestored()
+        scheduleDeferredStartupFallback()
+        schedulePostHUDStartupIfReady()
+    }
+
+    /// Called only after the configured HUD window is actually visible.
+    /// Durable state recovery and presentation wiring remain in
+    /// `applicationDidFinishLaunching`; this gate starts launch-time services
+    /// once the first frame can be seen and accepted.
+    func hudDidBecomeReady() {
+        guard resetRecoveryError == nil else { return }
+        hasObservedVisibleHUD = true
+        schedulePostHUDStartupIfReady()
+    }
+
+    private func revealHUDWhenStartupStateIsRestored() {
+        guard hasFinishedCriticalStartup,
+              hasCompletedStartupProjectIdentityMerge,
+              !isPerformingReset,
+              resetRecoveryError == nil else {
+            return
+        }
+        TinyBuddyHUDPresentationGate.shared.restoreCriticalState()
+    }
+
+    private func schedulePostHUDStartupIfReady() {
+        guard hasFinishedCriticalStartup,
+              hasObservedVisibleHUD,
+              hasCompletedStartupProjectIdentityMerge,
+              !hasScheduledPostHUDStartup,
+              !hasStartedDeferredStartupServices,
+              !isPerformingReset,
+              !isTerminating,
+              resetRecoveryError == nil else {
+            return
+        }
+        hasScheduledPostHUDStartup = true
+        // Let AppKit return to its event loop after the visible frame before
+        // running synchronous launch reconciliation on the main actor.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.hasScheduledPostHUDStartup = false
+            self.startDeferredStartupServices(trigger: "hud-visible")
+        }
+    }
+
+    private func scheduleDeferredStartupFallback() {
+        guard !hasScheduledStartupFallback else { return }
+        hasScheduledStartupFallback = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.hasScheduledStartupFallback = false
+            guard !self.isTerminating,
+                  !self.isPerformingReset,
+                  self.resetRecoveryError == nil,
+                  !self.hasObservedVisibleHUD else { return }
+            guard self.hasFinishedCriticalStartup,
+                  self.hasCompletedStartupProjectIdentityMerge else {
+                self.scheduleDeferredStartupFallback()
+                return
+            }
+            self.startDeferredStartupServices(trigger: "hud-visibility-timeout")
+        }
+    }
+
+    private func startDeferredStartupServices(trigger: String) {
+        guard !hasStartedDeferredStartupServices,
+              hasFinishedCriticalStartup,
+              hasCompletedStartupProjectIdentityMerge,
+              !isPerformingReset,
+              !isTerminating,
+              resetRecoveryError == nil else {
+            return
+        }
+        hasStartedDeferredStartupServices = true
+        tinyBuddyStartupLogger.notice(
+            "Deferred startup services starting trigger=\(trigger, privacy: .public)"
+        )
+
+        configCoordinator.start()
+        // Keep bookmark path reconciliation before the first Git scan, but
+        // after the initial HUD frame is available.
+        configCoordinator.reconcilePersistedScanRoots()
+
+        // SMAppService status and repair are best-effort and independent of
+        // the first HUD state. Keep them in the same startup order and fold
+        // the actual result back into the persisted intent.
+        let loginItemManager = TinyBuddyLoginItemManager.shared
+        loginItemManager.refreshStatus()
+        do {
+            try loginItemManager.recoverIfNeeded(
+                intentEnabled: configCoordinator.currentConfig()?.launchAtLoginEnabled ?? false
+            )
+        } catch {
+            tinyBuddyStartupLogger.error(
+                "login item recovery failed reason=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+        configCoordinator.reconcileLaunchAtLoginIntent()
+
+        gitActivityRefreshCoordinator.start(
+            isApplicationActive: NSApp.isActive,
+            isInterfaceVisible: isHUDVisible,
+            powerState: TinyBuddyPowerState.current()
+        )
+        hasStartedGitActivityRefresh = true
+
+        // PetViewModel has already loaded the committed snapshot and repaired
+        // today's combined presentation before the HUD became visible. Archive
+        // it and schedule cleanup here, after the prior-day recovery above.
+        historyArchivalCoordinator.runAtLaunch()
+        flushPendingStartupWidgetReload()
+
+        // The launch refresh is active before upgrade recovery is requested;
+        // preserve the existing single-refresh and Widget self-healing order.
+        let upgradeState = TinyBuddyVersionUpgradeTracker.checkForUpgrade()
+        if upgradeState.isUpgrade {
+            tinyBuddyStartupLogger.notice(
+                "Version upgrade detected: \(upgradeState.previousShortVersion ?? "nil", privacy: .public) -> \(upgradeState.currentShortVersion ?? "nil", privacy: .public) build \(upgradeState.previousBuildVersion ?? "nil", privacy: .public) -> \(upgradeState.currentBuildVersion ?? "nil", privacy: .public)"
+            )
+            gitActivityRefreshCoordinator.handleManualRefresh()
+            registerPostUpgradeWidgetReloadObserver()
+        }
+        TinyBuddyVersionUpgradeTracker.recordCurrentVersion()
+
         powerStateMonitor.start()
         hudVisibilityMonitor.start()
-        // Consolidate leftover duplicate identities from earlier runs so the
-        // project surface is already unified before the first scan commits.
-        runProjectIdentityAutoMergeIfNeeded()
+        tinyBuddyStartupLogger.notice(
+            "Deferred startup services completed trigger=\(trigger, privacy: .public)"
+        )
     }
 
     private func reconcileProjectDiscovery(completeScan: Bool) {
@@ -735,6 +875,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func beginStartupProjectIdentityAutoMerge() {
+        guard let projectRegistry else {
+            hasCompletedStartupProjectIdentityMerge = true
+            return
+        }
+
+        let completion = startupProjectIdentityAutoMergeCompletion
+        completion.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, projectRegistry, completion] in
+            let outcome = projectRegistry.autoMergeDuplicates()
+            completion.leave()
+            Task { @MainActor [weak self] in
+                guard let self,
+                      !self.isPerformingReset,
+                      !self.isTerminating,
+                      self.resetRecoveryError == nil else {
+                    return
+                }
+                self.applyProjectIdentityAutoMergeOutcome(outcome)
+                self.hasCompletedStartupProjectIdentityMerge = true
+                self.revealHUDWhenStartupStateIsRestored()
+                self.schedulePostHUDStartupIfReady()
+            }
+        }
+    }
+
     /// Merges duplicate project identities that share one repository
     /// fingerprint. Runs after launch and after every committed discovery so
     /// moved/renamed/re-authorized repositories converge on one identity even
@@ -743,13 +909,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// in the project settings covers them. The last undo token stays
     /// available to the project settings until the next identity change.
     private func runProjectIdentityAutoMergeIfNeeded() {
-        guard let projectRegistry,
-              let engine = focusSessionBridge?.sessionEngine else { return }
-        switch projectRegistry.autoMergeDuplicates() {
+        guard let projectRegistry else { return }
+        applyProjectIdentityAutoMergeOutcome(projectRegistry.autoMergeDuplicates())
+    }
+
+    private func applyProjectIdentityAutoMergeOutcome(
+        _ outcome: TinyBuddyProjectAutoMergeOutcome
+    ) {
+        switch outcome {
         case .completed(let mergeCount, let undo):
             if mergeCount > 0 {
                 lastProjectAutoMergeUndo = undo
-                engine.refreshProjectIdentityPresentation()
+                focusSessionBridge?.sessionEngine.refreshProjectIdentityPresentation()
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(
                         name: Notification.Name("TinyBuddy.projectRegistryDidChange"),
@@ -771,9 +942,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Archive the committed snapshot for today (throttled, atomic, and
         // idempotent) so history tracks the latest committed state.
         if let currentDay = timeEnvironment.capture()?.dayIdentifier {
-            historyArchivalCoordinator.handleCommittedSnapshot(
-                dayIdentifier: currentDay
-            )
+            archiveCommittedSnapshotAfterStartup(dayIdentifier: currentDay)
         }
         guard pendingFocusGitChange else { return }
         pendingCommittedGitActivity = (previous, current)
@@ -954,7 +1123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "focus history already current, reloading widget without notification"
             )
             if reloadWidget {
-                TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+                requestWidgetTimelineReload()
             }
         }
 
@@ -963,10 +1132,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // latest committed state; a failure here never affects HUD, history
         // views, or Widget reads (the combined snapshot stays authoritative).
         if let currentDay = timeEnvironment.capture()?.dayIdentifier {
-            historyArchivalCoordinator.handleCommittedSnapshot(
-                dayIdentifier: currentDay
-            )
+            archiveCommittedSnapshotAfterStartup(dayIdentifier: currentDay)
         }
+    }
+
+    private func requestWidgetTimelineReload() {
+        guard hasStartedDeferredStartupServices else {
+            hasPendingStartupWidgetReload = true
+            return
+        }
+        TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+    }
+
+    private func flushPendingStartupWidgetReload() {
+        guard hasPendingStartupWidgetReload else { return }
+        hasPendingStartupWidgetReload = false
+        TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+    }
+
+    private func archiveCommittedSnapshotAfterStartup(dayIdentifier: String) {
+        // The launch archive reads the latest committed combined snapshot, so
+        // focus publications that race first-frame restoration are included
+        // without writing an archive synchronously on the HUD path.
+        guard hasStartedDeferredStartupServices else { return }
+        historyArchivalCoordinator.handleCommittedSnapshot(dayIdentifier: dayIdentifier)
     }
 
     private func replayPendingFocusSessionPublicationIfNeeded() {
@@ -1036,7 +1225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // PetViewModel callback path is not triggered (e.g. early
                 // return in the caller). Live-minute re-emissions skip this:
                 // the Widget self-schedules its refresh while a session is live.
-                TinyBuddyWidgetReloadCoordinator.shared.requestReload()
+                requestWidgetTimelineReload()
             }
         } else {
             // A failed focus-history write may indicate disk pressure. Run
@@ -1106,6 +1295,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+        startupProjectIdentityAutoMergeCompletion.wait()
         // Relinquish primary instance ownership so the next launch can claim it.
         TinyBuddyInstanceCoordinator.shared.relinquishOwnership(
             removingStateFile: isPerformingReset
@@ -1113,12 +1304,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard resetRecoveryError == nil else {
             return
         }
+        if !isPerformingReset {
+            flushPendingStartupWidgetReload()
+        }
         authorizationCommandObservers.forEach(notificationCenter.removeObserver)
         authorizationCommandObservers.removeAll()
-        hudVisibilityMonitor.stop()
-        powerStateMonitor.stop()
+        if hasStartedDeferredStartupServices {
+            hudVisibilityMonitor.stop()
+            powerStateMonitor.stop()
+        }
         timeEnvironmentChangeMonitor.stop()
-        gitActivityRefreshCoordinator.stop()
+        if hasStartedGitActivityRefresh {
+            gitActivityRefreshCoordinator.stop()
+        }
         // Normal termination finalizes the open session synchronously: the
         // session journal write is atomic and immediate. During a reset the
         // session journal has already been removed and the engine must not
@@ -1146,18 +1344,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        gitActivityRefreshCoordinator.handleDidBecomeActive()
-        // A foreground return is a user-driven chance to roll the week/day
-        // view forward. This only reuses the in-memory session cache.
-        refreshFocusHistoryForPresentation()
-        // The user may have changed the login item in System Settings while
-        // the app was in the background; refresh the cached status so the
-        // settings toggle and the persisted intent stay in sync.
-        TinyBuddyLoginItemManager.shared.refreshStatus()
+        if hasStartedGitActivityRefresh {
+            gitActivityRefreshCoordinator.handleDidBecomeActive()
+            // The user may have changed the login item in System Settings while
+            // the app was in the background; refresh only after startup sync began.
+            TinyBuddyLoginItemManager.shared.refreshStatus()
+            // Initial history publication already ran on the critical path;
+            // activation refreshes only apply to later foreground returns.
+            refreshFocusHistoryForPresentation()
+        }
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        gitActivityRefreshCoordinator.handleDidResignActive()
+        if hasStartedGitActivityRefresh {
+            gitActivityRefreshCoordinator.handleDidResignActive()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -1166,7 +1367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows _: Bool) -> Bool {
         if gitScanRootAuthorizationStore.hasAuthorizedRoots {
-            gitActivityRefreshCoordinator.handleReopen()
+            if hasStartedGitActivityRefresh {
+                gitActivityRefreshCoordinator.handleReopen()
+            }
         } else {
             handleAuthorizationRequest(
                 result: gitScanRootAuthorizationController.requestAuthorizationResult()
@@ -1236,7 +1439,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             },
             observeAuthorizationCommand(named: .gitActivityRefreshRequested) { [weak self] in
-                self?.gitActivityRefreshCoordinator.handleManualRefresh()
+                guard let self, self.hasStartedGitActivityRefresh else { return }
+                self.gitActivityRefreshCoordinator.handleManualRefresh()
             },
             observeAuthorizationCommand(
                 named: .tinyBuddyResetRequested,
@@ -1255,13 +1459,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func quiesceRuntimeForReset() {
+        startupProjectIdentityAutoMergeCompletion.wait()
+        hasPendingStartupWidgetReload = false
         // Stop every component that can schedule work or write state before
         // the journal is consumed. `stop()` advances the refresh generation,
         // cancels its child process and makes late queue completions no-ops.
-        hudVisibilityMonitor.stop()
-        powerStateMonitor.stop()
+        if hasStartedDeferredStartupServices {
+            hudVisibilityMonitor.stop()
+            powerStateMonitor.stop()
+        }
         timeEnvironmentChangeMonitor.stop()
-        gitActivityRefreshCoordinator.stop()
+        if hasStartedGitActivityRefresh {
+            gitActivityRefreshCoordinator.stop()
+        }
         petViewModel.stopManualControlRefresh()
         focusSessionBridge?.stop()
         manualFocusMenuBarController.stop()
@@ -1342,7 +1552,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
-        gitActivityRefreshCoordinator.handleAuthorizationChanged()
+        if hasStartedGitActivityRefresh {
+            gitActivityRefreshCoordinator.handleAuthorizationChanged()
+        }
         // Authorization changes already start the replacement refresh above;
         // update the secondary config projection without scheduling another one.
         configCoordinator.reconcilePersistedScanRoots()
@@ -1352,7 +1564,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleAuthorizationRequest(result: GitScanRootAuthorizationRequestResult) {
         notificationCenter.post(name: .gitScanRootAuthorizationsDidChange, object: nil)
         if result.didChangeAuthorization {
-            gitActivityRefreshCoordinator.handleAuthorizationChanged()
+            if hasStartedGitActivityRefresh {
+                gitActivityRefreshCoordinator.handleAuthorizationChanged()
+            }
             configCoordinator.reconcilePersistedScanRoots()
             restoreHUDWindow(from: NSApp)
             return
@@ -1360,58 +1574,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if result.requiresStandaloneWidgetReload {
             TinyBuddyWidgetReloadCoordinator.shared.requestReload()
-        }
-    }
-
-    /// Ensures the combined snapshot for the current local day is committed
-    /// to the App Group store at launch, regardless of when the PetViewModel
-    /// initializes or the first Git refresh completes.
-    ///
-    /// If a combined snapshot for today already exists, the read-validated
-    /// check returns it without writing. Otherwise a new snapshot is built
-    /// from whatever DailyStats and activity data are currently available
-    /// and published atomically, followed by a Widget timeline reload so the
-    /// Widget can immediately consume it.
-    private func initializeCombinedSnapshotForCurrentDay() {
-        guard resetRecoveryError == nil else { return }
-
-        let timeContext = timeEnvironment.capture()
-        let expectedDayIdentifier = timeContext?.dayIdentifier
-            ?? dailyStatsStore.loadSnapshot().stats.dayIdentifier
-
-        // Fast path: a valid snapshot for today already exists.
-        let existingRead = combinedSnapshotStore.readValidated(
-            expectedDayIdentifier: expectedDayIdentifier
-        )
-        if existingRead.observation == nil, existingRead.snapshot != nil {
-            return
-        }
-
-        // Build and publish a snapshot for today from available data.
-        let snapshot = dailyStatsStore.loadSnapshot()
-        var fallbackActivitySnapshot: GitTodayActivitySnapshot?
-        var fallbackActivityRevision: Int64?
-        if timeContext?.dayIdentifier == snapshot.stats.dayIdentifier {
-            let activityRead = activityStore.loadTodaySnapshotRead()
-            fallbackActivitySnapshot = activityRead.snapshot
-            fallbackActivityRevision = activityRead.trustedRevision
-        }
-
-        let result = combinedSnapshotStore.updatePetSlice(
-            snapshot,
-            fallbackActivitySnapshot: fallbackActivitySnapshot,
-            fallbackActivityRevision: fallbackActivityRevision
-        )
-
-        if result.didPersist || result.outcome == .alreadyCurrent {
-            tinyBuddyStartupLogger.notice(
-                "Combined snapshot initialized for day=\(expectedDayIdentifier, privacy: .public) outcome=\(String(describing: result.outcome), privacy: .public)"
-            )
-            TinyBuddyWidgetReloadCoordinator.shared.requestReload()
-        } else {
-            tinyBuddyStartupLogger.error(
-                "Failed to initialize combined snapshot for day=\(expectedDayIdentifier, privacy: .public) outcome=\(String(describing: result.outcome), privacy: .public)"
-            )
         }
     }
 
@@ -1500,6 +1662,7 @@ struct WindowConfigurator: NSViewRepresentable {
         window.minSize = targetSize
         window.maxSize = targetSize
         window.standardWindowButton(.zoomButton)?.isHidden = true
+        TinyBuddyHUDPresentationGate.shared.attach(window)
         HUDWindowPositionController.shared.attach(to: window)
         NotificationCenter.default.post(
             name: .tinyBuddyHUDWindowDidConfigure,

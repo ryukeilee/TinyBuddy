@@ -168,6 +168,7 @@ final class PetViewModel: ObservableObject {
         combinedSnapshotStore: TinyBuddyCombinedSnapshotStore? = nil,
         refreshStatusStore: GitActivityRefreshStatusStore = GitActivityRefreshStatusStore(),
         developmentInterruptionStore: DevelopmentInterruptionSnapshotStore = DevelopmentInterruptionSnapshotStore(),
+        reloadWidgetForNewCurrentDaySnapshot: Bool = false,
         notificationCenter: NotificationCenter = .default,
         timeEnvironment: TinyBuddyTimeEnvironment = TinyBuddyTimeEnvironment(),
         registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] },
@@ -293,6 +294,9 @@ final class PetViewModel: ObservableObject {
             || (combinedHUDState.didPersist
                 && (hadSameDayCommittedSnapshot
                     || widgetPresentationBeforePublication != widgetPresentation))
+            || (reloadWidgetForNewCurrentDaySnapshot
+                && combinedHUDState.didPersist
+                && !hadSameDayCommittedSnapshot)
             || (!hadSameDayCommittedSnapshot
                 && combinedHUDState.dataAvailability == .available
                 && committedSnapshotBeforePublication != nil) {

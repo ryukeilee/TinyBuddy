@@ -19,6 +19,51 @@ final class RegressionGateScriptTests: XCTestCase {
         XCTAssertTrue(result.output.contains("SOURCED"), result.output)
     }
 
+    func testColdStartMarkersAreBoundToTheCurrentProcessAndExposeProcessDuration() throws {
+        try withTemporaryDirectory { directory in
+            let fakeLog = try writeExecutable(
+                """
+                #!/bin/bash
+                printf '%s\\n' "$*" >> "$FAKE_LOG_CALLS"
+                case "$*" in
+                  *"processIdentifier == 4242"*)
+                    printf '%s\\n' 'TinyBuddy[4242:1] [local.tinybuddy:HUD] HUD ready identifier=TinyBuddy.HUDWindow width=284 height=520'
+                    printf '%s\\n' 'TinyBuddy[4242:1] [local.tinybuddy:Startup] Cold start completed duration=1234ms'
+                    ;;
+                esac
+                """,
+                named: "fake-log",
+                in: directory
+            )
+            let calls = directory.appendingPathComponent("log-calls.txt")
+
+            let result = try runBash(
+                """
+                source "$GATE_SCRIPT"
+                LOG_BIN="$FAKE_LOG"
+                COLD_START_TIMEOUT=30
+                fresh_markers="$(app_startup_markers_for_pid 4242)"
+                stale_markers="$(app_startup_markers_for_pid 5150)"
+                printf 'READY=%s\\n' "$(printf '%s\\n' "$fresh_markers" | /usr/bin/grep -F 'HUD ready identifier=TinyBuddy.HUDWindow' >/dev/null && echo yes || echo no)"
+                printf 'DURATION=%s\\n' "$(printf '%s\\n' "$fresh_markers" | startup_duration_ms_from_markers)"
+                printf 'STALE_READY=%s\\n' "$(printf '%s\\n' "$stale_markers" | /usr/bin/grep -F 'HUD ready identifier=TinyBuddy.HUDWindow' >/dev/null && echo yes || echo no)"
+                """,
+                environment: [
+                    "FAKE_LOG": fakeLog.path,
+                    "FAKE_LOG_CALLS": calls.path
+                ]
+            )
+
+            XCTAssertEqual(result.exitCode, 0, result.error)
+            XCTAssertTrue(result.output.contains("READY=yes"), result.output)
+            XCTAssertTrue(result.output.contains("DURATION=1234"), result.output)
+            XCTAssertTrue(result.output.contains("STALE_READY=no"), result.output)
+            let recordedCalls = try String(contentsOf: calls, encoding: .utf8)
+            XCTAssertTrue(recordedCalls.contains("processIdentifier == 4242"), recordedCalls)
+            XCTAssertTrue(recordedCalls.contains("processIdentifier == 5150"), recordedCalls)
+        }
+    }
+
     func testProbeCountersAcceptsCumulativeCounters() throws {
         try withTemporaryDirectory { directory in
             let probe = try writeExecutable(

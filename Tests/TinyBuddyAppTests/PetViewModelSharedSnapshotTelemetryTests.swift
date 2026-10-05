@@ -14,6 +14,8 @@ final class PetViewModelSharedSnapshotTelemetryTests: XCTestCase {
             .appendingPathComponent("Sources/TinyBuddy/TinyBuddyApp.swift"))
 
         XCTAssertTrue(source.contains(#"category: "Startup""#))
+        XCTAssertTrue(source.contains("TinyBuddyStartupClock.markProcessStart()"))
+        XCTAssertTrue(source.contains("static func elapsedMilliseconds() -> Int"))
         XCTAssertTrue(source.contains(
             #""Cold start completed duration=\(startupDuration, privacy: .public)ms""#
         ))

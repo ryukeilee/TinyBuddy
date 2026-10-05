@@ -347,11 +347,30 @@ run_git_cancel() {
 # ---------------------------------------------------------------------------
 # Stage 4: Cold app start duration
 # ---------------------------------------------------------------------------
+app_startup_markers_for_pid() {
+  local app_pid="$1"
+  local message_filter
+  message_filter="processIdentifier == $app_pid AND subsystem == \"local.tinybuddy\" AND (eventMessage CONTAINS \"HUD ready identifier=TinyBuddy.HUDWindow\" OR eventMessage CONTAINS \"Cold start completed duration=\")"
+
+  "$LOG_BIN" show \
+    --last "${COLD_START_TIMEOUT}s" \
+    --style compact \
+    --predicate "$message_filter" \
+    2>/dev/null
+}
+
+startup_duration_ms_from_markers() {
+  /usr/bin/sed -nE 's/.*Cold start completed duration=([0-9]+)ms.*/\1/p' \
+    | /usr/bin/tail -n 1
+}
+
 run_app_cold_start() {
   stage_start "app-cold-start"
   local start_ms
   local elapsed_ms
   local app_pid=""
+  local startup_duration_ms=""
+  local startup_markers=""
   local deadline
   local message="HUD ready identifier=TinyBuddy.HUDWindow"
 
@@ -371,15 +390,15 @@ run_app_cold_start() {
   deadline=$((SECONDS + COLD_START_TIMEOUT))
   while [ "$SECONDS" -le "$deadline" ]; do
     if app_pid="$(/usr/bin/pgrep -x "$APP_NAME" 2>/dev/null)"; then
-      # Check for HUD-ready log message
-      if "$LOG_BIN" show \
-        --last "${COLD_START_TIMEOUT}s" \
-        --style compact \
-        --predicate "subsystem == \"local.tinybuddy\" AND category == \"HUD\" AND eventMessage CONTAINS \"$message\"" \
-        2>/dev/null | /usr/bin/grep -F "$message" >/dev/null
-      then
-        elapsed_ms=$(( $(now_milliseconds) - start_ms ))
-        break
+      # Bind both ready and in-process duration events to this launch PID so a
+      # previous process cannot satisfy a cold-start observation.
+      startup_markers="$(app_startup_markers_for_pid "$app_pid" || true)"
+      if printf '%s\n' "$startup_markers" | /usr/bin/grep -F "$message" >/dev/null; then
+        startup_duration_ms="$(printf '%s\n' "$startup_markers" | startup_duration_ms_from_markers)"
+        if [[ "$startup_duration_ms" =~ ^[0-9]+$ ]]; then
+          elapsed_ms=$(( $(now_milliseconds) - start_ms ))
+          break
+        fi
       fi
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
@@ -396,7 +415,9 @@ run_app_cold_start() {
   limit_ms="$(/usr/bin/awk -v base="$baseline_ms" -v tol="$COLD_START_TOLERANCE" \
     'BEGIN { if (base > 0) print int(base * tol + 0.5); else print 99999 }')"
 
-  echo "cold start: ${elapsed_ms}ms (baseline=${baseline_ms}ms, limit=${limit_ms}ms)"
+  echo "cold start: observed=${elapsed_ms}ms process=${startup_duration_ms}ms pid=${app_pid} (baseline=${baseline_ms}ms, limit=${limit_ms}ms)"
+  echo "cold_start_sample pid=${app_pid} observed_ms=${elapsed_ms} process_ms=${startup_duration_ms}" \
+    >> "$EVIDENCE_DIR/${EVIDENCE_TIMESTAMP}-summary.txt"
 
   if [ "$baseline_ms" -gt 0 ] && [ "$elapsed_ms" -gt "$limit_ms" ]; then
     stage_fail "cold start ${elapsed_ms}ms exceeds ${limit_ms}ms (baseline ${baseline_ms}ms * tolerance ${COLD_START_TOLERANCE})"
