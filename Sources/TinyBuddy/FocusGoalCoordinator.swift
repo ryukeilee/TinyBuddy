@@ -5,9 +5,33 @@ import TinyBuddyCore
 /// Reminder inputs are captured before scheduling so a delayed permission
 /// lookup cannot change which day or instant is being evaluated.
 struct FocusReminderEvaluationInput: Sendable {
-    let sessions: [FocusSession]
+    let metrics: FocusReminderMetrics
     let dayIdentifier: String
     let now: Date
+
+    init(metrics: FocusReminderMetrics, dayIdentifier: String, now: Date) {
+        self.metrics = metrics
+        self.dayIdentifier = dayIdentifier
+        self.now = now
+    }
+
+    /// Durable event callers already own an immutable archive snapshot. Reduce
+    /// it before enqueueing so permission delays never retain the full archive.
+    init(sessions: [FocusSession], dayIdentifier: String, now: Date) {
+        let open = sessions.first(where: \.isOpen)
+        self.init(
+            metrics: FocusReminderMetrics(
+                totalFocusDuration: sessions.filter { $0.dayIdentifier == dayIdentifier }
+                    .reduce(0) { $0 + $1.activeDuration(now: now) },
+                openSessionID: open?.id,
+                openSessionIsActive: open?.status == .active,
+                openSessionIsPaused: open?.currentPauseStartedAt != nil,
+                continuousFocusDuration: open?.continuousActiveDuration(now: now) ?? 0
+            ),
+            dayIdentifier: dayIdentifier,
+            now: now
+        )
+    }
 }
 
 /// Coordinates the focus goal configuration, reminder evaluation, and
@@ -141,7 +165,7 @@ final class FocusGoalCoordinator {
         // app must not infer DND from its own foreground state: TinyBuddy is
         // normally inactive while the user is doing the focused work.
         let evaluation = FocusReminderEngine.evaluate(
-            allSessions: input.sessions,
+            metrics: input.metrics,
             config: config,
             state: state,
             now: input.now,

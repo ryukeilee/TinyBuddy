@@ -343,8 +343,8 @@ final class FocusNotificationDeliveryTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(inputs.count, 2)
         XCTAssertEqual(inputs[0].dayIdentifier, "2026-08-06")
         XCTAssertEqual(inputs[0].now, rolloverDate)
-        XCTAssertEqual(inputs[0].sessions.first?.status, .ended)
-        XCTAssertEqual(inputs[0].sessions.first?.activeDuration(now: inputs[0].now) ?? -1, 0)
+        XCTAssertNil(inputs[0].metrics.openSessionID)
+        XCTAssertEqual(inputs[0].metrics.totalFocusDuration, 0)
         XCTAssertEqual(inputs[1].dayIdentifier, "2026-08-07")
         XCTAssertEqual(
             deliverer.canDeliverCallCount,
@@ -470,7 +470,8 @@ final class FocusNotificationDeliveryTests: XCTestCase {
         XCTAssertEqual(engine.allSessions.first?.status, .ended)
         XCTAssertEqual(inputs.first?.dayIdentifier, "2026-08-07")
         XCTAssertEqual(inputs.first?.now, jumpDate)
-        XCTAssertEqual(inputs.first?.sessions.first?.endedAt, jumpDate)
+        XCTAssertNil(inputs.first?.metrics.openSessionID)
+        XCTAssertEqual(inputs.first?.metrics.totalFocusDuration, 0)
         XCTAssertEqual(inputs.dropFirst().first?.dayIdentifier, "2026-08-06")
     }
 

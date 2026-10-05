@@ -400,7 +400,7 @@ final class FocusSessionAppBridge {
         guard outcome == .saved || outcome == .noChange else { return }
         reminderEvaluationHandler?(
             FocusReminderEvaluationInput(
-                sessions: engine.allSessions,
+                metrics: engine.reminderMetrics(dayIdentifier: dayIdentifier, now: now),
                 dayIdentifier: dayIdentifier,
                 now: now
             )
@@ -413,10 +413,11 @@ final class FocusSessionAppBridge {
     }
 
     private func evaluateCurrentDayReminders(at now: Date) {
+        let dayIdentifier = engine.currentDayIdentifier
         reminderEvaluationHandler?(
             FocusReminderEvaluationInput(
-                sessions: engine.allSessions,
-                dayIdentifier: engine.currentDayIdentifier,
+                metrics: engine.reminderMetrics(dayIdentifier: dayIdentifier, now: now),
+                dayIdentifier: dayIdentifier,
                 now: now
             )
         )

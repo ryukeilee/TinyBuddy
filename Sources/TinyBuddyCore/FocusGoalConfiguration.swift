@@ -176,6 +176,30 @@ public struct FocusReminderEvaluation: Equatable, Sendable {
 
 // MARK: - Reminder Engine
 
+/// Immutable, bounded reminder input. Elapsed time is captured before an
+/// asynchronous permission lookup, just like the original session snapshot.
+public struct FocusReminderMetrics: Equatable, Sendable {
+    public let totalFocusDuration: TimeInterval
+    public let openSessionID: UUID?
+    public let openSessionIsActive: Bool
+    public let openSessionIsPaused: Bool
+    public let continuousFocusDuration: TimeInterval
+
+    public init(
+        totalFocusDuration: TimeInterval,
+        openSessionID: UUID?,
+        openSessionIsActive: Bool,
+        openSessionIsPaused: Bool,
+        continuousFocusDuration: TimeInterval
+    ) {
+        self.totalFocusDuration = totalFocusDuration
+        self.openSessionID = openSessionID
+        self.openSessionIsActive = openSessionIsActive
+        self.openSessionIsPaused = openSessionIsPaused
+        self.continuousFocusDuration = continuousFocusDuration
+    }
+}
+
 /// Pure, deterministic reminder evaluator. Takes current sessions, config,
 /// persisted state, and time; returns the action and the new state to persist.
 /// The engine never sends notifications — it only decides what should happen.
@@ -210,6 +234,34 @@ public enum FocusReminderEngine {
         isSystemDND: Bool = false,
         canDeliverNotifications: Bool = true
     ) -> FocusReminderEvaluation {
+        let openSession = allSessions.first(where: \.isOpen)
+        return evaluate(
+            metrics: FocusReminderMetrics(
+                totalFocusDuration: allSessions.filter { $0.dayIdentifier == dayIdentifier }
+                    .reduce(0) { $0 + $1.activeDuration(now: now) },
+                openSessionID: openSession?.id,
+                openSessionIsActive: openSession?.status == .active,
+                openSessionIsPaused: openSession?.currentPauseStartedAt != nil,
+                continuousFocusDuration: openSession?.continuousActiveDuration(now: now) ?? 0
+            ),
+            config: config, state: state, now: now, dayIdentifier: dayIdentifier,
+            isInQuietHours: isInQuietHours, isSystemDND: isSystemDND,
+            canDeliverNotifications: canDeliverNotifications
+        )
+    }
+
+    /// Constant-size evaluation used by the live heartbeat. The array overload
+    /// remains available for callers that already own a historical snapshot.
+    public static func evaluate(
+        metrics: FocusReminderMetrics,
+        config: FocusGoalConfiguration,
+        state: FocusReminderState,
+        now: Date,
+        dayIdentifier: String,
+        isInQuietHours: Bool = false,
+        isSystemDND: Bool = false,
+        canDeliverNotifications: Bool = true
+    ) -> FocusReminderEvaluation {
         // Day boundary check — reset state if day changed.
         var currentState = state
         if currentState.dayIdentifier != dayIdentifier {
@@ -217,9 +269,7 @@ public enum FocusReminderEngine {
         }
 
         let goalSeconds = TimeInterval(config.dailyFocusGoalMinutes * 60)
-        let totalFocusDuration = allSessions
-            .filter { $0.dayIdentifier == dayIdentifier }
-            .reduce(0) { $0 + $1.activeDuration(now: now) }
+        let totalFocusDuration = metrics.totalFocusDuration
 
         // A manual edit/delete can move progress back below the goal. Reopen
         // the one-shot notification gate so crossing the goal again is eligible
@@ -232,11 +282,10 @@ public enum FocusReminderEngine {
         // Pausing an open session resets its continuous interval. If the same
         // session was reminded before the pause, remove its gate while it is
         // below the threshold so a later uninterrupted interval can qualify.
-        if let activeSession = allSessions.first(where: \.isOpen) {
+        if let openSessionID = metrics.openSessionID {
             let threshold = TimeInterval(config.continuousFocusThresholdMinutes * 60)
-            if activeSession.currentPauseStartedAt != nil
-                || activeSession.continuousActiveDuration(now: now) < threshold {
-                currentState.triggeredBreakReminderSessionIDs.removeAll { $0 == activeSession.id }
+            if metrics.openSessionIsPaused || metrics.continuousFocusDuration < threshold {
+                currentState.triggeredBreakReminderSessionIDs.removeAll { $0 == openSessionID }
             }
         }
 
@@ -270,14 +319,14 @@ public enum FocusReminderEngine {
         // === Break Reminder Check ===
         if config.isBreakReminderEnabled {
             // Find the current active session(s). Only one can be open.
-            guard let activeSession = allSessions.first(where: \.isOpen),
-                  activeSession.status == .active else {
+            guard let openSessionID = metrics.openSessionID,
+                  metrics.openSessionIsActive else {
                 return FocusReminderEvaluation(action: .none, updatedState: currentState)
             }
 
             // Only trigger break reminder for active sessions that haven't been
             // reminded yet.
-            guard !currentState.triggeredBreakReminderSessionIDs.contains(activeSession.id) else {
+            guard !currentState.triggeredBreakReminderSessionIDs.contains(openSessionID) else {
                 return FocusReminderEvaluation(action: .none, updatedState: currentState)
             }
 
@@ -286,12 +335,12 @@ public enum FocusReminderEngine {
                 return FocusReminderEvaluation(action: .none, updatedState: currentState)
             }
 
-            let continuousDuration = activeSession.continuousActiveDuration(now: now)
+            let continuousDuration = metrics.continuousFocusDuration
             let threshold = TimeInterval(config.continuousFocusThresholdMinutes * 60)
 
             if continuousDuration >= threshold {
                 var newState = currentState
-                newState.triggeredBreakReminderSessionIDs.append(activeSession.id)
+                newState.triggeredBreakReminderSessionIDs.append(openSessionID)
                 newState.lastReminderDeliveryDate = now
                 return FocusReminderEvaluation(
                     action: .breakReminder(continuousDuration: continuousDuration),

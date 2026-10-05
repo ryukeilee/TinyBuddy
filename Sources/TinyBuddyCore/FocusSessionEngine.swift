@@ -37,6 +37,11 @@ public final class FocusSessionEngine: @unchecked Sendable {
     /// the same unused token before either command records it.
     private var manualCommandLock: NSLock = .init()
     private var sessions: [FocusSession] = []
+    // Rebuilt only after authoritative session changes, never on a heartbeat.
+    // Keep reminders independent of the presentation/history aggregation rules.
+    private var endedReminderDurationByDay: [String: TimeInterval] = [:]
+    private var openReminderSession: FocusSession?
+    private var continuousReminderStartedAt: Date?
     /// Local‑day identifier for *now*.
     private var currentDay: String = ""
     /// Pending cross‑project switch (brief interruption candidate).
@@ -188,6 +193,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
                 projectResolver: projectContextResolver
             )
         }
+        rebuildReminderCache()
     }
 
     // MARK: - Public API
@@ -266,7 +272,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
             lock.unlock()
             return .noChange
         }
-        if let current = sessions.first(where: \.isOpen),
+        if let current = openReminderSession,
            current.mode == .manual || current.project == project {
             lock.unlock()
             return .noChange
@@ -362,7 +368,17 @@ public final class FocusSessionEngine: @unchecked Sendable {
     @discardableResult
     public func endPausedSessionAfterLongAbsence(at date: Date) -> FocusSessionUpdateOutcome {
         let when = clampToNow(date)
-        return apply { sessions in
+        lock.lock()
+        // Repeated idle polls normally have no transition to commit. Check the
+        // same eligibility on the cached live record before archive validation.
+        guard let open = openReminderSession,
+              open.mode != .manual,
+              let pauseStart = open.currentPauseStartedAt,
+              when.timeIntervalSince(pauseStart) >= config.longAbsenceThreshold else {
+            lock.unlock()
+            return .noChange
+        }
+        let result = applyLocked { sessions in
             guard let idx = sessions.firstIndex(where: \.isOpen),
                   sessions[idx].mode != .manual,
                   let pauseStart = sessions[idx].currentPauseStartedAt else { return }
@@ -372,6 +388,9 @@ public final class FocusSessionEngine: @unchecked Sendable {
             pendingSwitch = nil
             confirmationGate.reset()
         }
+        lock.unlock()
+        publish(result)
+        return result.outcome
     }
 
     @discardableResult
@@ -652,6 +671,45 @@ public final class FocusSessionEngine: @unchecked Sendable {
     public var allSessions: [FocusSession] {
         lock.lock(); defer { lock.unlock() }
         return sessions
+    }
+
+    /// O(1) with respect to both historical days and sessions in today's day.
+    /// Reads one day aggregate and at most one live session under the same lock.
+    public func reminderMetrics(dayIdentifier: String, now: Date) -> FocusReminderMetrics {
+        lock.lock(); defer { lock.unlock() }
+        let open = openReminderSession
+        var duration = endedReminderDurationByDay[dayIdentifier] ?? 0
+        if let open, open.dayIdentifier == dayIdentifier {
+            duration += open.activeDuration(now: now)
+        }
+        let segmentEnd = open?.currentPauseStartedAt ?? open?.endedAt ?? now
+        let continuousDuration = continuousReminderStartedAt.map {
+            max(0, min(segmentEnd, now).timeIntervalSince($0))
+        } ?? 0
+        return FocusReminderMetrics(
+            totalFocusDuration: duration,
+            openSessionID: open?.id,
+            openSessionIsActive: open?.status == .active,
+            openSessionIsPaused: open?.currentPauseStartedAt != nil,
+            continuousFocusDuration: continuousDuration
+        )
+    }
+
+    private func rebuildReminderCache() {
+        endedReminderDurationByDay.removeAll(keepingCapacity: true)
+        openReminderSession = nil
+        continuousReminderStartedAt = nil
+        for session in sessions {
+            if session.isOpen {
+                openReminderSession = session
+                continuousReminderStartedAt = session.decisionEvents?
+                    .last(where: { $0.kind == .started || $0.kind == .resumed })?.at
+                    ?? session.startedAt
+            } else {
+                endedReminderDurationByDay[session.dayIdentifier, default: 0] +=
+                    session.activeDuration(now: session.endedAt ?? session.startedAt)
+            }
+        }
     }
 
     public var currentDayIdentifier: String {
@@ -1121,6 +1179,7 @@ public final class FocusSessionEngine: @unchecked Sendable {
         let update = historyCache.apply(historyChanges(from: sessions, to: restored))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = restored
+        rebuildReminderCache()
         evidenceBySessionID = evidence
         evidenceArchiveRevision += 1
         lastEditUndo = nil
@@ -1213,6 +1272,7 @@ private extension FocusSessionEngine {
         let update = historyCache.apply(historyChanges(from: previous, to: working))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
+        rebuildReminderCache()
         evidenceBySessionID = evidence
         evidenceArchiveRevision = nextEvidenceRevision
         archiveRevision = nextArchiveRevision
@@ -1345,6 +1405,7 @@ private extension FocusSessionEngine {
         let update = historyCache.apply(historyChanges(from: previous, to: working))
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
+        rebuildReminderCache()
         evidenceBySessionID = evidence
         evidenceArchiveRevision += 1
         lastEditUndo = previous
