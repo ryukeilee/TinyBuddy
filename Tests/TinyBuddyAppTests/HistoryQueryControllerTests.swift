@@ -15,6 +15,66 @@ private final class SessionProviderBox: @unchecked Sendable {
     }
 }
 
+/// Precomputed pages isolate controller accumulation from provider filtering/sorting.
+private actor HistoryPageFixture: FocusSessionQuerying {
+    private let pages: [FocusSessionQueryPage]
+    private let offsets: [FocusSessionCursor: Int]
+    private var pauseNextPage = false
+    private var pending: CheckedContinuation<FocusSessionQueryPage?, Never>?
+    private var didPause: CheckedContinuation<Void, Never>?
+
+    init(sessions: [FocusSession], pageSize: Int = 50, totals: [Int?]? = nil) {
+        var pages: [FocusSessionQueryPage] = []
+        var offsets: [FocusSessionCursor: Int] = [:]
+        for start in stride(from: 0, to: sessions.count, by: pageSize) {
+            let end = min(start + pageSize, sessions.count)
+            let chunk = Array(sessions[start ..< end])
+            let cursor = FocusSessionCursor(lastStartedAt: chunk.last!.startedAt, lastID: chunk.last!.id)
+            offsets[cursor] = pages.count + 1
+            let total: Int?
+            if let totals {
+                total = totals[pages.count]
+            } else {
+                total = sessions.count
+            }
+            pages.append(FocusSessionQueryPage(
+                sessions: chunk, nextCursor: end < sessions.count ? cursor : nil,
+                hasMore: end < sessions.count, totalEstimatedCount: total
+            ))
+        }
+        self.pages = pages
+        self.offsets = offsets
+    }
+
+    func execute(query: FocusSessionQuery, cursor: FocusSessionCursor?, limit: Int, version: Int) async -> FocusSessionQueryPage? {
+        let index = cursor.flatMap { offsets[$0] } ?? 0
+        let page = index < pages.count ? pages[index] : .empty
+        if cursor != nil, pauseNextPage {
+            pauseNextPage = false
+            return await withCheckedContinuation { continuation in
+                pending = continuation
+                didPause?.resume()
+                didPause = nil
+            }
+        }
+        return page
+    }
+
+    func suspendNextPage() { pauseNextPage = true }
+    func waitForSuspendedPage() async {
+        if pending != nil { return }
+        await withCheckedContinuation { didPause = $0 }
+    }
+    func resumePage(_ page: FocusSessionQueryPage?) {
+        pending?.resume(returning: page)
+        pending = nil
+    }
+
+    func invalidateQueries() async {}
+    func applyChanges(_ changes: [FocusSessionChangeType]) async {}
+    func estimatedCount(query: FocusSessionQuery) async -> Int { pages.first?.totalEstimatedCount ?? 0 }
+}
+
 /// Controller-level coverage for pagination consistency: deduplication and
 /// re-sorting when data changes between pages, nil-page recovery (never stuck
 /// in `.loading`), debounced update coalescing, and restart-on-invalidation.
@@ -89,6 +149,149 @@ final class HistoryQueryControllerTests: XCTestCase {
                       cur.id.uuidString < prev.id.uuidString {
                 XCTFail("Tie-break order jump at index \(i)", file: file, line: line)
             }
+        }
+    }
+
+    /// Run with a Release build on both revisions. Fixtures and first-page work
+    /// are outside the timer; each sample loads identical 50-row pages. Quarter
+    /// timings expose growth with loaded history, not just aggregate speed.
+    func testContinuousPaginationPerformance() async {
+        let clock = ContinuousClock()
+        for count in [2_000, 8_000, 16_000] {
+            let sessions = makeSessions(count: count)
+            let fixture = HistoryPageFixture(sessions: sessions)
+            var firstQuarters: [Double] = []
+            var lastQuarters: [Double] = []
+            for sample in 1 ... 3 {
+                let controller = HistoryQueryController(queryService: fixture)
+                await controller.refresh()
+                let pageCount = count / 50
+                var quarters = [Double](repeating: 0, count: 4)
+                for page in 1 ..< pageCount {
+                    let start = clock.now
+                    await controller.loadMore()
+                    let duration = start.duration(to: clock.now).components
+                    quarters[min(page * 4 / pageCount, 3)] += Double(duration.seconds)
+                        + Double(duration.attoseconds) / 1e18
+                }
+                XCTAssertEqual(controller.allSessions.map(\.id), sessions.map(\.id))
+                guard case .loaded(let page) = controller.loadState else {
+                    return XCTFail("expected loaded")
+                }
+                XCTAssertEqual(page.sessions, controller.allSessions)
+                XCTAssertEqual(page.totalEstimatedCount, count)
+                XCTAssertFalse(page.hasMore)
+                firstQuarters.append(quarters[0])
+                lastQuarters.append(quarters[3])
+                print("HISTORY_PAGINATION count=\(count) sample=\(sample) seconds=\(quarters.reduce(0, +)) quarters=\(quarters)")
+            }
+            if count == 16_000 {
+                // Median suppresses isolated scheduling noise. The former full
+                // rescan has a ~6–7x last/first-quarter ratio at this workload.
+                XCTAssertLessThan(lastQuarters.sorted()[1], firstQuarters.sorted()[1] * 3)
+            }
+        }
+    }
+
+    func testMalformedAndDriftingPagesMatchOriginalNormalization() async {
+        var sessions = makeSessions(count: 250)
+        sessions[20] = sessions[0] // Duplicate on the unnormalized first page.
+        var duplicate = sessions[1]
+        duplicate.startedAt = sessions[55].startedAt
+        sessions[55] = duplicate // Cross-page duplicate: original value wins.
+        sessions[65] = newestSession(olderThan: sessions) // Boundary order drift.
+        sessions.swapAt(112, 118) // Within-page order drift after recovery.
+        sessions[165].startedAt = sessions[0].startedAt.addingTimeInterval(120)
+        // A later boundary jump must be repaired by the incremental path too.
+        let original = sessions
+        let controller = HistoryQueryController(queryService: HistoryPageFixture(sessions: sessions))
+        await controller.refresh()
+        var expected = Array(original.prefix(50))
+        XCTAssertEqual(controller.allSessions, expected) // Refresh semantics unchanged.
+        for start in stride(from: 50, to: original.count, by: 50) {
+            expected.append(contentsOf: original[start ..< min(start + 50, original.count)])
+            var seen = Set<UUID>()
+            expected = expected.filter { seen.insert($0.id).inserted }.sorted {
+                $0.startedAt != $1.startedAt ? $0.startedAt > $1.startedAt : $0.id.uuidString < $1.id.uuidString
+            }
+            await controller.loadMore()
+            XCTAssertEqual(controller.allSessions, expected)
+            XCTAssertEqual(controller.loadState.currentPage?.sessions, expected)
+            XCTAssertEqual(controller.loadState.currentPage?.totalEstimatedCount, original.count)
+            assertCanonicallyOrdered(controller.allSessions)
+        }
+        XCTAssertEqual(controller.allSessions.first?.id, sessions[165].id)
+        XCTAssertEqual(controller.allSessions.first { $0.id == duplicate.id }, original[1])
+    }
+
+    func testTieOrderDriftAndDuplicateOnlyPagePreserveFirstTotal() async {
+        let source = makeSessions(count: 150)
+        for firstTotal: Int? in [nil, 150] {
+            // A page entirely made of duplicates still advances the cursor.
+            // Its last key is distinct from the first page's last key.
+            var pages = Array(source.prefix(50))
+            pages.append(contentsOf: source[0 ..< 49])
+            pages.append(source[0])
+            var tied = Array(source[50 ..< 100])
+            for index in tied.indices { tied[index].startedAt = source[49].startedAt }
+            tied.reverse()
+            pages.append(contentsOf: tied)
+            let fixture = HistoryPageFixture(sessions: pages, totals: [firstTotal, 999, 888])
+            let controller = HistoryQueryController(queryService: fixture)
+            await controller.refresh()
+            await controller.loadMore()
+            XCTAssertEqual(controller.allSessions, Array(source.prefix(50)))
+            XCTAssertTrue(controller.loadState.currentPage?.hasMore == true)
+            await controller.loadMore()
+            XCTAssertEqual(controller.allSessions.count, 100)
+            assertCanonicallyOrdered(controller.allSessions)
+            XCTAssertEqual(controller.allSessions.suffix(50).map(\.id), source[50 ..< 100].map(\.id))
+            XCTAssertEqual(controller.loadState.currentPage?.totalEstimatedCount, firstTotal)
+            XCTAssertFalse(controller.loadState.currentPage?.hasMore == true)
+        }
+    }
+
+    func testEqualTimestampsAcrossManyPagesAndFilterReset() async {
+        let sessions = makeSessions(count: 600).map { session in
+            var result = session
+            result.startedAt = Date(timeIntervalSinceReferenceDate: 100)
+            return result
+        }
+        let controller = makeController(box: SessionProviderBox(Array(sessions.reversed())))
+        await controller.refresh()
+        while controller.loadState.currentPage?.hasMore == true { await controller.loadMore() }
+        XCTAssertEqual(controller.allSessions.map(\.id), sessions.map(\.id))
+        XCTAssertEqual(controller.loadState.currentPage?.totalEstimatedCount, 600)
+        await controller.updateQuery(FocusSessionQuery(projectKey: beta.key), debounceSeconds: 0)
+        while controller.loadState.currentPage?.hasMore == true { await controller.loadMore() }
+        XCTAssertEqual(controller.allSessions, sessions.filter { $0.project.key == beta.key })
+        XCTAssertEqual(controller.loadState.currentPage?.totalEstimatedCount, 200)
+        await controller.updateQuery(.init(), debounceSeconds: 0)
+        while controller.loadState.currentPage?.hasMore == true { await controller.loadMore() }
+        XCTAssertEqual(controller.allSessions.map(\.id), sessions.map(\.id))
+    }
+
+    func testSupersededAppendCannotPolluteRefreshedUUIDIndex() async {
+        for staleResultIsNil in [false, true] {
+            let sessions = makeSessions(count: 150)
+            let fixture = HistoryPageFixture(sessions: sessions)
+            let controller = HistoryQueryController(queryService: fixture)
+            await controller.refresh()
+            await fixture.suspendNextPage()
+            let oldAppend = Task { await controller.loadMore() }
+            await fixture.waitForSuspendedPage()
+            await controller.updateQuery(FocusSessionQuery(keyword: "new query"), debounceSeconds: 0)
+            let oldPage = FocusSessionQueryPage(
+                sessions: Array(sessions[50 ..< 100]), nextCursor: nil, hasMore: false, totalEstimatedCount: 999
+            )
+            await fixture.resumePage(staleResultIsNil ? nil : oldPage)
+            await oldAppend.value
+            XCTAssertEqual(controller.allSessions, Array(sessions.prefix(50)))
+            await controller.loadMore()
+            XCTAssertEqual(controller.allSessions, Array(sessions.prefix(100)))
+            await controller.loadMore()
+            XCTAssertEqual(controller.allSessions, sessions)
+            XCTAssertEqual(controller.loadState.currentPage?.totalEstimatedCount, 150)
         }
     }
 

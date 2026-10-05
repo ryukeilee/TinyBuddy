@@ -187,7 +187,11 @@ final class HistoryQueryController {
     private var operationID = 0
 
     /// The underlying query service.
-    private let queryService: FocusSessionQueryService
+    private let queryService: any FocusSessionQuerying
+
+    /// Pagination metadata is rebuilt only when refresh installs a first page.
+    @ObservationIgnored private var loadedSessionIDs = Set<UUID>()
+    @ObservationIgnored private var needsInitialNormalization = false
 
     /// Default page size.
     private let pageSize = 50
@@ -203,7 +207,7 @@ final class HistoryQueryController {
 
     // MARK: - Init
 
-    init(queryService: FocusSessionQueryService) {
+    init(queryService: any FocusSessionQuerying) {
         self.queryService = queryService
     }
 
@@ -220,6 +224,8 @@ final class HistoryQueryController {
     func refresh() async {
         loadState = .loading
         allSessions.removeAll()
+        loadedSessionIDs.removeAll()
+        needsInitialNormalization = false
 
         var lastOpID = 0
         for _ in 0 ..< maxRefreshAttempts {
@@ -234,6 +240,9 @@ final class HistoryQueryController {
             if let page {
                 guard isLatest(lastOpID) else { return }
                 allSessions = page.sessions
+                loadedSessionIDs = Set(page.sessions.map(\.id))
+                needsInitialNormalization = loadedSessionIDs.count != page.sessions.count
+                    || !isCanonicallyOrdered(page.sessions)
                 loadState = .loaded(page)
                 return
             }
@@ -257,15 +266,16 @@ final class HistoryQueryController {
     /// display order so data changed between pages cannot produce duplicate
     /// rows or order jumps.
     func loadMore() async {
-        guard case .loaded(let currentPage) = loadState, currentPage.hasMore,
-              let cursor = currentPage.nextCursor else { return }
+        // Retain only scalar continuation metadata. Holding the loaded page
+        // across the append would keep its array alive and force a full copy.
+        guard let continuation = paginationContinuation() else { return }
 
         let opID = nextOperationID()
         loadState = .loading
 
         let page = await queryService.execute(
             query: query,
-            cursor: cursor,
+            cursor: continuation.cursor,
             limit: pageSize,
             version: opID
         )
@@ -279,19 +289,14 @@ final class HistoryQueryController {
         }
 
         guard isLatest(opID) else { return }
-        allSessions.append(contentsOf: page.sessions)
-
-        // Guard against duplicates/order jumps when data changed between
-        // pages without invalidating the query.
-        let mergedSessions = deduplicatedAndSorted(allSessions)
-        allSessions = mergedSessions
+        appendPage(page.sessions)
 
         // Preserve original total estimate from first page.
         let merged = FocusSessionQueryPage(
-            sessions: mergedSessions,
+            sessions: allSessions,
             nextCursor: page.nextCursor,
             hasMore: page.hasMore,
-            totalEstimatedCount: currentPage.totalEstimatedCount
+            totalEstimatedCount: continuation.totalEstimatedCount
         )
         loadState = .loaded(merged)
     }
@@ -372,6 +377,54 @@ final class HistoryQueryController {
         opID >= operationID
     }
 
+    private func paginationContinuation() -> (cursor: FocusSessionCursor, totalEstimatedCount: Int?)? {
+        guard case .loaded(let page) = loadState, page.hasMore,
+              let cursor = page.nextCursor else { return nil }
+        return (cursor, page.totalEstimatedCount)
+    }
+
+    private func appendPage(_ sessions: [FocusSession]) {
+        // Refresh intentionally exposes the first page unchanged. If that
+        // page was malformed, preserve the old normalization-on-append behavior.
+        if needsInitialNormalization {
+            allSessions.append(contentsOf: sessions)
+            allSessions = deduplicatedAndSorted(allSessions)
+            loadedSessionIDs = Set(allSessions.map(\.id))
+            needsInitialNormalization = false
+            return
+        }
+
+        var additions: [FocusSession] = []
+        additions.reserveCapacity(sessions.count)
+        var previous = allSessions.last
+        var ordered = true
+        for session in sessions where loadedSessionIDs.insert(session.id).inserted {
+            if let previous, isOrderJump(from: previous, to: session) {
+                ordered = false
+            }
+            additions.append(session)
+            previous = session
+        }
+        // First occurrence wins, including when a duplicate's fields changed.
+        // Stable pages inspect only new UUIDs, adjacent rows and the boundary.
+        allSessions.append(contentsOf: additions)
+        if !ordered {
+            allSessions.sort(by: Self.canonicalOrder)
+        }
+    }
+
+    private static func canonicalOrder(_ a: FocusSession, _ b: FocusSession) -> Bool {
+        if a.startedAt != b.startedAt {
+            return a.startedAt > b.startedAt
+        }
+        return a.id.uuidString < b.id.uuidString
+    }
+
+    private func isOrderJump(from previous: FocusSession, to current: FocusSession) -> Bool {
+        current.startedAt > previous.startedAt
+            || (current.startedAt == previous.startedAt && current.id.uuidString < previous.id.uuidString)
+    }
+
     /// Removes duplicate sessions (by id) and restores the canonical display
     /// order (startedAt descending, then id.uuidString ascending) after pages
     /// accumulated across data mutations.
@@ -389,12 +442,7 @@ final class HistoryQueryController {
         if isCanonicallyOrdered(unique) {
             return unique
         }
-        return unique.sorted { a, b in
-            if a.startedAt != b.startedAt {
-                return a.startedAt > b.startedAt
-            }
-            return a.id.uuidString < b.id.uuidString
-        }
+        return unique.sorted(by: Self.canonicalOrder)
     }
 
     private func isCanonicallyOrdered(_ sessions: [FocusSession]) -> Bool {
@@ -402,11 +450,7 @@ final class HistoryQueryController {
         for i in 1 ..< sessions.count {
             let previous = sessions[i - 1]
             let current = sessions[i]
-            if current.startedAt > previous.startedAt {
-                return false
-            }
-            if current.startedAt == previous.startedAt,
-               current.id.uuidString < previous.id.uuidString {
+            if isOrderJump(from: previous, to: current) {
                 return false
             }
         }
