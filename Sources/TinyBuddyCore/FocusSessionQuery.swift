@@ -141,6 +141,10 @@ public protocol FocusSessionQuerying: Sendable {
         version: Int
     ) async -> FocusSessionQueryPage?
 
+    /// Distinct projects from the entire current history, independent of filters
+    /// and pagination. Returns nil when the supplied query version is stale.
+    func projects(version: Int) async -> [FocusProjectContext]?
+
     /// Bumps the version, causing all in-flight queries with an older
     /// version to return nil on completion.
     func invalidateQueries() async

@@ -7,14 +7,19 @@ import Foundation
 public actor FocusSessionQueryService: FocusSessionQuerying {
     private let sessionProvider: @Sendable () -> [FocusSession]
     private var currentQueryVersion = 0
+    private let projectResolver: @Sendable (FocusProjectContext) -> FocusProjectContext
 
     // MARK: - Init
 
     /// - Parameter sessionProvider: A closure that returns the current set of
     ///   sessions. Called synchronously on each query; the list is expected to
     ///   be already in memory so the call is cheap.
-    public init(sessionProvider: @escaping @Sendable () -> [FocusSession]) {
+    public init(
+        sessionProvider: @escaping @Sendable () -> [FocusSession],
+        projectResolver: @escaping @Sendable (FocusProjectContext) -> FocusProjectContext = { $0 }
+    ) {
         self.sessionProvider = sessionProvider
+        self.projectResolver = projectResolver
     }
 
     // MARK: - FocusSessionQuerying
@@ -32,7 +37,7 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         // when a very large limit is supplied.
         guard limit > 0 else { return .empty }
 
-        let sessions = sessionProvider()
+        let sessions = resolvedSessions()
         let filtered = applyFilters(sessions, query: query)
         let sorted = filtered.sorted { a, b in
             if a.startedAt != b.startedAt {
@@ -101,12 +106,31 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         )
     }
 
+    public func projects(version: Int) async -> [FocusProjectContext]? {
+        guard version >= currentQueryVersion else { return nil }
+        // Select the newest name deterministically if legacy rows disagree.
+        // Return only project summaries; never fetch or accumulate extra pages.
+        var newest: [String: FocusSession] = [:]
+        for session in sessionProvider() {
+            let key = projectResolver(session.project).key
+            if let previous = newest[key],
+               previous.startedAt > session.startedAt
+                || (previous.startedAt == session.startedAt
+                    && previous.id.uuidString < session.id.uuidString) { continue }
+            newest[key] = session
+        }
+        return newest.values.map { projectResolver($0.project) }.sorted {
+            let comparison = $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
+            return comparison == .orderedSame ? $0.key < $1.key : comparison == .orderedAscending
+        }
+    }
+
     public func invalidateQueries() async {
         currentQueryVersion += 1
     }
 
     public func estimatedCount(query: FocusSessionQuery) async -> Int {
-        let sessions = sessionProvider()
+        let sessions = resolvedSessions()
         return applyFilters(sessions, query: query).count
     }
 
@@ -118,6 +142,14 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
     }
 
     // MARK: - Helpers
+
+    private func resolvedSessions() -> [FocusSession] {
+        sessionProvider().map { session in
+            var resolved = session
+            resolved.project = projectResolver(session.project)
+            return resolved
+        }
+    }
 
     private func applyFilters(
         _ sessions: [FocusSession],

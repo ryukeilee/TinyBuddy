@@ -13,6 +13,62 @@ final class FocusSessionQueryTests: XCTestCase {
     private let beta = FocusProjectContext(key: "repo.beta", displayName: "Beta")
     private let gamma = FocusProjectContext(key: "repo.gamma", displayName: "Gamma")
 
+    func testProjectSummariesUseNewestNameAndStableOrdering() async throws {
+        let base = Date(timeIntervalSince1970: 100)
+        let renamed = FocusProjectContext(key: alpha.key, displayName: "Same")
+        let sameName = FocusProjectContext(key: beta.key, displayName: "Same")
+        let rows = [
+            session(project: alpha, day: "2020-01-01", start: base),
+            session(project: renamed, day: "2026-07-20", start: base.addingTimeInterval(10)),
+            session(project: sameName, day: "2026-07-20", start: base.addingTimeInterval(20))
+        ]
+        let service = makeService(sessions: rows.reversed())
+        let projects = await service.projects(version: 0)
+        XCTAssertEqual(projects, [renamed, sameName])
+        await service.invalidateQueries()
+        let stale = await service.projects(version: 0)
+        XCTAssertNil(stale)
+    }
+
+    func testProjectRenameMergeAndUndoResolveSummariesAndQueriesTogether() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TinyBuddyProjectRegistryFileStore(fileURL: directory.appendingPathComponent("registry.json"))
+        let target = TinyBuddyProject(id: TinyBuddyProjectID(rawValue: "target"), kind: .manual,
+                                     displayName: "Target", aliases: [alpha.key])
+        let source = TinyBuddyProject(id: TinyBuddyProjectID(rawValue: "source"), kind: .manual,
+                                     displayName: "Source", aliases: [beta.key])
+        XCTAssertTrue(store.save(TinyBuddyProjectRegistrySnapshot(projects: [target, source])))
+        let registry = TinyBuddyProjectRegistry(store: store)
+        let rows = [session(project: alpha, day: "2026-07-20", start: Date(timeIntervalSince1970: 100)),
+                    session(project: beta, day: "2020-01-01", start: Date(timeIntervalSince1970: 50))]
+        let service = FocusSessionQueryService(sessionProvider: { rows }, projectResolver: { context in
+            guard let project = registry.resolve(projectKey: context.key) else { return context }
+            return FocusProjectContext(key: project.id.rawValue, displayName: project.displayName)
+        })
+        guard case .saved = registry.rename(id: target.id, displayName: "Renamed") else {
+            return XCTFail("rename failed")
+        }
+        let renamed = FocusProjectContext(key: target.id.rawValue, displayName: "Renamed")
+        let beforeMerge = await service.projects(version: 0)
+        XCTAssertEqual(beforeMerge, [renamed, FocusProjectContext(key: source.id.rawValue, displayName: "Source")])
+        let preview = try XCTUnwrap(registry.previewMerge(targetID: target.id, sourceIDs: [source.id],
+                                                        sessions: rows, now: Date(timeIntervalSince1970: 200)))
+        guard case .saved(_, let undo) = registry.merge(preview) else { return XCTFail("merge failed") }
+        let merged = await service.projects(version: 0)
+        XCTAssertEqual(merged, [renamed])
+        let page = await service.execute(query: FocusSessionQuery(projectKey: target.id.rawValue, keyword: "Renamed"),
+                                         cursor: nil, limit: 50, version: 0)
+        XCTAssertEqual(page?.sessions.map(\.id), rows.map(\.id))
+        XCTAssertTrue(page?.sessions.allSatisfy { $0.project == renamed } == true)
+        let count = await service.estimatedCount(query: FocusSessionQuery(projectKey: target.id.rawValue))
+        XCTAssertEqual(count, 2)
+        guard case .saved = registry.undoMerge(undo) else { return XCTFail("undo failed") }
+        let restored = await service.projects(version: 0)
+        XCTAssertEqual(restored, beforeMerge)
+    }
+
     // MARK: - Helpers
 
     private func makeService(

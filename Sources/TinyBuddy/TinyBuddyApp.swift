@@ -506,8 +506,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// review views. Created once the focus session engine is available.
     lazy var historyQueryController: HistoryQueryController? = {
         guard let engine = focusSessionBridge?.sessionEngine else { return nil }
+        let registry = projectRegistry
         let queryService = FocusSessionQueryService(sessionProvider: { [weak engine] in
             engine?.allSessions ?? []
+        }, projectResolver: { context in
+            guard let project = registry?.resolve(projectKey: context.key) else { return context }
+            return FocusProjectContext(key: project.id.rawValue, displayName: project.displayName)
         })
         return HistoryQueryController(queryService: queryService)
     }()

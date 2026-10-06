@@ -19,6 +19,9 @@ private final class SessionProviderBox: @unchecked Sendable {
 private actor HistoryPageFixture: FocusSessionQuerying {
     private let pages: [FocusSessionQueryPage]
     private let offsets: [FocusSessionCursor: Int]
+    private var pauseNextProjects = false
+    private var pendingProjects: CheckedContinuation<[FocusProjectContext]?, Never>?
+    private var didPauseProjects: CheckedContinuation<Void, Never>?
     private var pauseNextPage = false
     private var pending: CheckedContinuation<FocusSessionQueryPage?, Never>?
     private var didPause: CheckedContinuation<Void, Never>?
@@ -70,6 +73,28 @@ private actor HistoryPageFixture: FocusSessionQuerying {
         pending = nil
     }
 
+    func projects(version: Int) async -> [FocusProjectContext]? {
+        if pauseNextProjects {
+            pauseNextProjects = false
+            return await withCheckedContinuation { continuation in
+                pendingProjects = continuation
+                didPauseProjects?.resume()
+                didPauseProjects = nil
+            }
+        }
+        return Array(Set(pages.flatMap(\.sessions).map(\.project)))
+    }
+
+    func suspendNextProjects() { pauseNextProjects = true }
+    func waitForSuspendedProjects() async {
+        if pendingProjects != nil { return }
+        await withCheckedContinuation { didPauseProjects = $0 }
+    }
+    func resumeProjects(_ projects: [FocusProjectContext]) {
+        pendingProjects?.resume(returning: projects)
+        pendingProjects = nil
+    }
+
     func invalidateQueries() async {}
     func applyChanges(_ changes: [FocusSessionChangeType]) async {}
     func estimatedCount(query: FocusSessionQuery) async -> Int { pages.first?.totalEstimatedCount ?? 0 }
@@ -83,6 +108,73 @@ final class HistoryQueryControllerTests: XCTestCase {
     private let alpha = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
     private let beta = FocusProjectContext(key: "repo.beta", displayName: "Beta")
     private let gamma = FocusProjectContext(key: "repo.gamma", displayName: "Gamma")
+
+    func testStaleProjectSummaryCannotOverwriteNewerRefresh() async {
+        let row = makeSession(id: UUID(), project: alpha, startedAt: Date(timeIntervalSince1970: 100))
+        let service = HistoryPageFixture(sessions: [row])
+        let controller = HistoryQueryController(queryService: service)
+        await service.suspendNextProjects()
+        let stale = Task { await controller.refresh() }
+        await service.waitForSuspendedProjects()
+        await controller.updateQuery(FocusSessionQuery(projectKey: alpha.key), debounceSeconds: 0)
+        await service.resumeProjects([beta])
+        await stale.value
+        XCTAssertEqual(controller.projectOptions, [alpha])
+        XCTAssertEqual(controller.query.projectKey, alpha.key)
+        XCTAssertEqual(controller.allSessions, [row])
+    }
+
+    func testProjectOnlyInLaterPageIsSelectableWithoutLoadingMore() async {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let recent = (0 ..< 60).map {
+            makeSession(id: UUID(), project: alpha, startedAt: base.addingTimeInterval(Double($0)))
+        }
+        let older = makeSession(id: UUID(), project: beta,
+                                startedAt: base.addingTimeInterval(-100), dayIdentifier: "2025-01-01")
+        let box = SessionProviderBox(recent + [older])
+        let controller = makeController(box: box)
+        await controller.refresh()
+        XCTAssertEqual(controller.allSessions.count, 50)
+        XCTAssertTrue(controller.allSessions.allSatisfy { $0.project == alpha })
+        XCTAssertEqual(Set(controller.projectOptions), Set([alpha, beta]))
+        XCTAssertEqual(box.providerCallCount, 2, "summaries plus first page, no pagination fetch")
+
+        await controller.updateQuery(FocusSessionQuery(projectKey: beta.key), debounceSeconds: 0)
+        XCTAssertEqual(controller.allSessions.map(\.id), [older.id])
+        XCTAssertEqual(Set(controller.projectOptions), Set([alpha, beta]))
+
+        await controller.updateQuery(FocusSessionQuery(
+            dayStart: "2026-07-20", dayEnd: "2026-07-20", projectKey: beta.key,
+            status: .ended, keyword: "Beta"
+        ), debounceSeconds: 0)
+        XCTAssertTrue(controller.allSessions.isEmpty)
+        XCTAssertEqual(Set(controller.projectOptions), Set([alpha, beta]))
+
+        await controller.updateQuery(FocusSessionQuery(
+            dayStart: "2025-01-01", dayEnd: "2025-01-01", projectKey: beta.key,
+            status: .ended, keyword: "Beta"
+        ), debounceSeconds: 0)
+        XCTAssertEqual(controller.allSessions.map(\.id), [older.id])
+    }
+
+    func testReloadReplacesProjectOptionsAfterHistoryCorrection() async {
+        let original = makeSession(id: UUID(), project: beta, startedAt: Date(timeIntervalSince1970: 100))
+        let box = SessionProviderBox([original])
+        let controller = makeController(box: box)
+        await controller.updateQuery(FocusSessionQuery(projectKey: beta.key, status: .ended), debounceSeconds: 0)
+        var corrected = original
+        corrected.project = gamma
+        box.value = [corrected]
+        await controller.notifyChanges([.updated(previous: original, current: corrected)])
+        await controller.reload()
+        XCTAssertEqual(controller.projectOptions, [gamma])
+        XCTAssertNil(controller.query.projectKey)
+        XCTAssertEqual(controller.query.status, .ended)
+        XCTAssertEqual(controller.allSessions, [corrected])
+        box.value = []
+        await controller.reload()
+        XCTAssertTrue(controller.projectOptions.isEmpty)
+    }
 
     // MARK: - Helpers
 
@@ -501,8 +593,8 @@ final class HistoryQueryControllerTests: XCTestCase {
         await first.value
         await second.value
 
-        // Exactly one query reached the service.
-        XCTAssertEqual(box.providerCallCount, 1)
+        // Only the latest refresh reads the project summaries and first page.
+        XCTAssertEqual(box.providerCallCount, 2)
         guard case .loaded = controller.loadState else {
             return XCTFail("expected .loaded, got \(controller.loadState)")
         }
@@ -804,7 +896,7 @@ final class HistoryQueryControllerTests: XCTestCase {
     /// consistency-test convention): both history views reload the shared
     /// controller when the committed snapshot is republished, the list replays
     /// its own toolbar filters on appear (no `.ended` leak from the review
-    /// view), and project options refresh whenever the loaded set changes.
+    /// view), and project options come from complete history summaries.
     func testHistoryListViewWiringReloadsOnSnapshotSynchronization() throws {
         let list = try source("Sources/TinyBuddy/FocusHistoryListView.swift")
         let review = try source("Sources/TinyBuddy/FocusSessionReviewView.swift")
@@ -819,7 +911,7 @@ final class HistoryQueryControllerTests: XCTestCase {
 
         XCTAssertTrue(list.contains(".focusSessionSnapshotSynchronizationDidFinish"))
         XCTAssertTrue(list.contains("await controller.reload()"))
-        XCTAssertTrue(list.contains("await loadProjectOptions()"))
+        XCTAssertTrue(list.contains("ForEach(controller.projectOptions, id: \\.key)"))
         XCTAssertTrue(review.contains(".focusSessionSnapshotSynchronizationDidFinish"))
         XCTAssertTrue(review.contains("await historyController.reload()"))
 
@@ -827,8 +919,9 @@ final class HistoryQueryControllerTests: XCTestCase {
         // controller's query cannot leak across views.
         XCTAssertTrue(list.contains("updateQuery(makeQuery(), debounceSeconds: 0)"))
 
-        // Project options refresh when pagination or reload changes the set.
-        XCTAssertTrue(list.contains("onChange(of: controller.allSessions.count)"))
+        // Identity transactions reload summaries even when the row count is unchanged.
+        XCTAssertTrue(list.contains("TinyBuddy.projectRegistryDidChange"))
+        XCTAssertTrue(list.contains("onChange(of: controller.query.projectKey)"))
 
         // Date submissions use the controller's validated path; failed input
         // stays visible, while Clear resets the draft and committed bounds.

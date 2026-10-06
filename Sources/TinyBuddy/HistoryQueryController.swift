@@ -177,6 +177,9 @@ final class HistoryQueryController {
     /// All sessions accumulated across pages, in display order (newest first).
     private(set) var allSessions: [FocusSession] = []
 
+    /// Project summaries from the entire history, independent of loaded pages.
+    private(set) var projectOptions: [FocusProjectContext] = []
+
     /// The currently active query filter.
     private(set) var query: FocusSessionQuery = .init()
 
@@ -230,6 +233,15 @@ final class HistoryQueryController {
         var lastOpID = 0
         for _ in 0 ..< maxRefreshAttempts {
             lastOpID = nextOperationID()
+            guard let projects = await queryService.projects(version: lastOpID) else {
+                guard isLatest(lastOpID) else { return }
+                continue
+            }
+            guard isLatest(lastOpID) else { return }
+            projectOptions = projects
+            if let key = query.projectKey, !projects.contains(where: { $0.key == key }) {
+                query.projectKey = nil
+            }
             let page = await queryService.execute(
                 query: query,
                 cursor: nil,

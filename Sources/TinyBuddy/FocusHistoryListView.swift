@@ -25,7 +25,6 @@ struct FocusHistoryListView: View {
     @State private var dateFilterError: HistoryDateFilterValidationError?
     @State private var showDateFilter = false
     @State private var appliedDayRequestID: UUID?
-    @State private var projectOptions: [(key: String, name: String)] = []
 
     private let daySelection: FocusHistoryDaySelection?
 
@@ -58,7 +57,6 @@ struct FocusHistoryListView: View {
                 showDateFilter = false
             }
             await controller.updateQuery(makeQuery(), debounceSeconds: 0)
-            await loadProjectOptions()
         }
         .onChange(of: searchText) { _, _ in
             Task {
@@ -73,13 +71,15 @@ struct FocusHistoryListView: View {
             // never keeps stale rows, duplicates, or missing items.
             Task {
                 await controller.reload()
-                await loadProjectOptions()
             }
         }
-        .onChange(of: controller.allSessions.count) { _, _ in
-            // Project options derive from loaded sessions; refresh them as
-            // pagination and edits bring new projects in or remove old ones.
-            Task { await loadProjectOptions() }
+        .onReceive(NotificationCenter.default.publisher(
+            for: Notification.Name("TinyBuddy.projectRegistryDidChange")
+        )) { _ in
+            Task { await controller.reload() }
+        }
+        .onChange(of: controller.query.projectKey) { _, key in
+            selectedProjectKey = key
         }
     }
 
@@ -138,8 +138,8 @@ struct FocusHistoryListView: View {
             }
             .foregroundColor(selectedProjectKey == nil ? .accentColor : .primary)
 
-            ForEach(projectOptions, id: \.key) { option in
-                Button(option.name) {
+            ForEach(controller.projectOptions, id: \.key) { option in
+                Button(option.displayName) {
                     selectedProjectKey = option.key
                     applyFilters()
                 }
@@ -149,7 +149,7 @@ struct FocusHistoryListView: View {
             HStack(spacing: 4) {
                 Image(systemName: "folder")
                 if let key = selectedProjectKey,
-                   let name = projectOptions.first(where: { $0.key == key })?.name {
+                   let name = controller.projectOptions.first(where: { $0.key == key })?.displayName {
                     Text(name)
                         .lineLimit(1)
                         .font(.subheadline)
@@ -409,7 +409,6 @@ struct FocusHistoryListView: View {
         .listStyle(.inset)
         .refreshable {
             await controller.refresh()
-            await loadProjectOptions()
         }
     }
 
@@ -447,16 +446,6 @@ struct FocusHistoryListView: View {
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         q.keyword = trimmed.isEmpty ? nil : trimmed
         return q
-    }
-
-    private func loadProjectOptions() async {
-        // Derive unique projects from all loaded sessions
-        var unique: [String: String] = [:]
-        for session in controller.allSessions {
-            unique[session.project.key] = session.project.displayName
-        }
-        projectOptions = unique.map { (key: $0.key, name: $0.value) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 }
 
