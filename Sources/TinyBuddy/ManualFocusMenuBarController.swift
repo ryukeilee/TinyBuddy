@@ -9,17 +9,22 @@ import TinyBuddyCore
 /// All state reads go through the shared engine; the menu bar never creates
 /// parallel sessions or duplicate records.
 @MainActor
-final class ManualFocusMenuBarController: NSObject {
+final class ManualFocusMenuBarController: NSObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
+    private(set) var popover: NSPopover?
     private var popoverHostingController: NSHostingController<MenuBarFocusView>?
     private var refreshTimer: Timer?
+    private let scheduleRefresh: (TimeInterval, Bool, @escaping @MainActor () -> Void) -> Timer
     private var engine: FocusSessionEngine?
     private var projectRegistryObserver: NSObjectProtocol?
+    private var presentationObservers: [NSObjectProtocol] = []
+    private var wakeObserver: NSObjectProtocol?
+    private let notificationCenter: NotificationCenter
+    private let workspaceNotificationCenter: NotificationCenter
     private var registeredProjectsProvider: () -> [TinyBuddyProject]
     private var recentProjectNameProvider: () -> String?
 
-    private var lastDisplayedState: ManualFocusControlState = .idle
+    private var lastDisplayedTransition: String?
     private var lastDisplayedProject: String?
     private var lastDisplayedDuration: TimeInterval = 0
 
@@ -28,8 +33,18 @@ final class ManualFocusMenuBarController: NSObject {
 
     init(
         recentProjectNameProvider: @escaping () -> String? = { nil },
-        registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] }
+        registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] },
+        notificationCenter: NotificationCenter = .default,
+        workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+        scheduleRefresh: @escaping (TimeInterval, Bool, @escaping @MainActor () -> Void) -> Timer = { interval, repeats, action in
+            Timer.scheduledTimer(withTimeInterval: interval, repeats: repeats) { _ in
+                MainActor.assumeIsolated { action() }
+            }
+        }
     ) {
+        self.notificationCenter = notificationCenter
+        self.workspaceNotificationCenter = workspaceNotificationCenter
+        self.scheduleRefresh = scheduleRefresh
         self.recentProjectNameProvider = recentProjectNameProvider
         self.registeredProjectsProvider = registeredProjectsProvider
         super.init()
@@ -39,8 +54,10 @@ final class ManualFocusMenuBarController: NSObject {
         MainActor.assumeIsolated {
             refreshTimer?.invalidate()
             if let projectRegistryObserver {
-                NotificationCenter.default.removeObserver(projectRegistryObserver)
+                notificationCenter.removeObserver(projectRegistryObserver)
             }
+            presentationObservers.forEach(notificationCenter.removeObserver)
+            if let wakeObserver { workspaceNotificationCenter.removeObserver(wakeObserver) }
         }
     }
 
@@ -49,7 +66,7 @@ final class ManualFocusMenuBarController: NSObject {
     func start(with engine: FocusSessionEngine) {
         self.engine = engine
         if projectRegistryObserver == nil {
-            projectRegistryObserver = NotificationCenter.default.addObserver(
+            projectRegistryObserver = notificationCenter.addObserver(
                 forName: Notification.Name("TinyBuddy.projectRegistryDidChange"),
                 object: nil,
                 queue: .main
@@ -59,7 +76,24 @@ final class ManualFocusMenuBarController: NSObject {
                 }
             }
         }
-        guard statusItem == nil else { return }
+        if presentationObservers.isEmpty {
+            for name in [Notification.Name.gitActivitySnapshotDidChange,
+                         .tinyBuddyTimeEnvironmentDidChange,
+                         NSApplication.didBecomeActiveNotification] {
+                presentationObservers.append(notificationCenter.addObserver(
+                    forName: name, object: nil, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refresh() }
+                })
+            }
+            wakeObserver = workspaceNotificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        }
+        guard statusItem == nil else { refresh(); return }
+        lastDisplayedTransition = nil
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "🎯"
@@ -69,27 +103,28 @@ final class ManualFocusMenuBarController: NSObject {
         item.button?.action = #selector(togglePopover)
         statusItem = item
 
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.refresh()
-            }
-        }
         refresh()
     }
 
     func stop() {
+        engine = nil
         refreshTimer?.invalidate()
         refreshTimer = nil
         if let projectRegistryObserver {
-            NotificationCenter.default.removeObserver(projectRegistryObserver)
+            notificationCenter.removeObserver(projectRegistryObserver)
             self.projectRegistryObserver = nil
+        }
+        presentationObservers.forEach(notificationCenter.removeObserver)
+        presentationObservers.removeAll()
+        if let wakeObserver {
+            workspaceNotificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
         }
         dismissPopover()
         if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
             statusItem = nil
         }
-        engine = nil
     }
 
     func setEngine(_ engine: FocusSessionEngine?) {
@@ -105,32 +140,34 @@ final class ManualFocusMenuBarController: NSObject {
 
     // MARK: - Popover
 
-    @objc private func togglePopover() {
+    @objc func togglePopover() {
         guard let button = statusItem?.button else { return }
 
-        if let popover, popover.isShown {
+        if popover != nil {
             dismissPopover()
         } else {
             showPopover(relativeTo: button)
         }
     }
 
-    private func showPopover(relativeTo view: NSView) {
+    func showPopover(relativeTo view: NSView) {
         let hosting = NSHostingController(rootView: makePopoverContent())
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 280, height: 320)
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = hosting
-        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
         self.popover = popover
         popoverHostingController = hosting
+        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        refresh()
     }
 
-    private func makePopoverContent() -> MenuBarFocusView {
+    private func makePopoverContent(state: ManualFocusControlState? = nil) -> MenuBarFocusView {
         MenuBarFocusView(
             recentProjectName: recentProjectNameProvider(),
             registeredProjects: registeredProjectsProvider(),
-            manualControlState: engine?.manualControlState ?? .idle,
+            manualControlState: state ?? engine?.manualControlState ?? .idle,
             onStartFocus: { [weak self] project in
                 self?.startManualFocus(project: project)
             },
@@ -146,30 +183,59 @@ final class ManualFocusMenuBarController: NSObject {
         )
     }
 
-    private func refreshPopoverContent() {
-        guard popoverHostingController != nil else { return }
-        popoverHostingController?.rootView = makePopoverContent()
+    private func refreshPopoverContent(_ state: ManualFocusControlState) {
+        guard popover != nil else { return }
+        popoverHostingController?.rootView = makePopoverContent(state: state)
     }
 
     private func dismissPopover() {
+        popover?.delegate = nil
         popover?.close()
         popover = nil
         popoverHostingController = nil
+        if engine != nil, statusItem != nil { refresh() }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        guard notification.object as? NSPopover === popover else { return }
+        popover = nil
+        popoverHostingController = nil
+        if engine != nil, statusItem != nil { refresh() }
     }
 
     // MARK: - Status Display
 
     /// Refreshes the menu-bar projection from the shared engine immediately.
     /// App lifecycle and HUD commands use this hook so the menu bar does not
-    /// wait for its polling timer to converge.
+    /// wait for a duration tick to converge.
     func refresh() {
-        refreshStatusDisplay()
-        refreshPopoverContent()
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        guard let engine, statusItem != nil else { return }
+        let state = engine.manualControlState
+        refreshStatusDisplay(state)
+        refreshPopoverContent(state)
+        if let interval = Self.refreshInterval(for: state, popoverIsShown: popover != nil) {
+            refreshTimer = scheduleRefresh(interval, false) { [weak self] in
+                self?.refresh()
+            }
+        }
     }
 
-    private func refreshStatusDisplay() {
-        guard let engine, let button = statusItem?.button else { return }
-        let state = engine.manualControlState
+    /// Transitions arrive through the committed engine callback and registry
+    /// observer. Only accumulating duration needs a timer: minute precision
+    /// in the status item, second precision from presentation until didClose.
+    /// Do not sample isShown during presentation: AppKit sets it asynchronously.
+    static func refreshInterval(for state: ManualFocusControlState, popoverIsShown: Bool) -> TimeInterval? {
+        guard case .focusing(_, _, let duration) = state else { return nil }
+        let precision: TimeInterval = popoverIsShown ? 1 : 60
+        return max(0.05, precision - max(0, duration).truncatingRemainder(dividingBy: precision))
+    }
+
+    var statusTitle: String? { statusItem?.button?.title }
+
+    private func refreshStatusDisplay(_ state: ManualFocusControlState) {
+        guard let button = statusItem?.button else { return }
 
         // Debounce: don't update title unless state or project changed.
         let projectName: String? = {
@@ -187,13 +253,13 @@ final class ManualFocusMenuBarController: NSObject {
             }
         }()
 
-        guard state != lastDisplayedState
+        guard state.transitionIdentity != lastDisplayedTransition
                 || projectName != lastDisplayedProject
                 || Int(duration / 60) != Int(lastDisplayedDuration / 60) else {
             return
         }
 
-        lastDisplayedState = state
+        lastDisplayedTransition = state.transitionIdentity
         lastDisplayedProject = projectName
         lastDisplayedDuration = duration
 
