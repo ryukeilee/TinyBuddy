@@ -1,6 +1,62 @@
 import SwiftUI
 import TinyBuddyCore
 
+enum FocusSessionReviewProjectSelection: Hashable {
+    case registered(TinyBuddyProjectID)
+    case custom
+}
+
+/// Keeps review project selection on the same active registry identities used
+/// by manual focus controls. Custom contexts remain available for legacy and
+/// intentionally unregistered project identities.
+enum FocusSessionReviewProjectResolver {
+    static func selectableProjects(_ projects: [TinyBuddyProject]) -> [TinyBuddyProject] {
+        projects
+            .filter { project in
+                project.state == .active
+                    && !project.id.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !project.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            .sorted { lhs, rhs in
+                let order = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+                return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
+            }
+    }
+
+    static func selection(
+        for project: FocusProjectContext,
+        registeredProjects: [TinyBuddyProject]
+    ) -> FocusSessionReviewProjectSelection {
+        let projects = selectableProjects(registeredProjects)
+        if let exactMatch = projects.first(where: { $0.id.rawValue == project.key }) {
+            return .registered(exactMatch.id)
+        }
+
+        let aliasMatches = projects.filter { $0.aliases.contains(project.key) }
+        guard aliasMatches.count == 1, let match = aliasMatches.first else {
+            return .custom
+        }
+        return .registered(match.id)
+    }
+
+    static func context(
+        for selection: FocusSessionReviewProjectSelection,
+        registeredProjects: [TinyBuddyProject],
+        customProjectKey: String,
+        customDisplayName: String
+    ) -> FocusProjectContext? {
+        switch selection {
+        case .custom:
+            return FocusProjectContext(key: customProjectKey, displayName: customDisplayName)
+        case .registered(let id):
+            guard let project = selectableProjects(registeredProjects).first(where: { $0.id == id }) else {
+                return nil
+            }
+            return FocusProjectContext(key: project.id.rawValue, displayName: project.displayName)
+        }
+    }
+}
+
 /// Settings-only correction surface. Every command carries a session UUID to
 /// the engine; it never indexes into a rescanned list or writes the journal.
 ///
@@ -9,10 +65,13 @@ import TinyBuddyCore
 struct FocusSessionReviewView: View {
     let engineProvider: () -> FocusSessionEngine?
     let historyController: HistoryQueryController
+    private let registeredProjectsProvider: () -> [TinyBuddyProject]
 
     @State private var selected = Set<UUID>()
     @State private var projectKey = ""
     @State private var projectName = ""
+    @State private var projectSelection = FocusSessionReviewProjectSelection.custom
+    @State private var projectRegistryRefreshID = UUID()
     @State private var start = Date()
     @State private var end = Date()
     @State private var sessionMode: FocusMode = .automatic
@@ -20,7 +79,21 @@ struct FocusSessionReviewView: View {
     @State private var message: String?
     @State private var refreshID = UUID()
 
+    init(
+        engineProvider: @escaping () -> FocusSessionEngine?,
+        historyController: HistoryQueryController,
+        registeredProjectsProvider: @escaping () -> [TinyBuddyProject] = { [] }
+    ) {
+        self.engineProvider = engineProvider
+        self.historyController = historyController
+        self.registeredProjectsProvider = registeredProjectsProvider
+    }
+
     private var engine: FocusSessionEngine? { engineProvider() }
+    private var registeredProjects: [TinyBuddyProject] {
+        _ = projectRegistryRefreshID
+        return FocusSessionReviewProjectResolver.selectableProjects(registeredProjectsProvider())
+    }
     private var sessions: [FocusSession] {
         _ = refreshID
         return historyController.allSessions
@@ -87,6 +160,15 @@ struct FocusSessionReviewView: View {
             // edits made outside this editor (manual/automatic control) are
             // reflected here too, and stale selected rows are dropped.
             Task { await historyController.reload() }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: Notification.Name("TinyBuddy.projectRegistryDidChange")
+        )) { _ in
+            projectRegistryRefreshID = UUID()
+            if case .registered(let id) = projectSelection,
+               !registeredProjects.contains(where: { $0.id == id }) {
+                message = "所选项目已不可用。请重新选择可用项目，或改用自定义项目。"
+            }
         }
     }
 
@@ -194,8 +276,44 @@ struct FocusSessionReviewView: View {
                 sourceExplanation(session)
                 Divider()
             }
-            TextField("项目标识", text: $projectKey)
-            TextField("项目名称", text: $projectName)
+            Picker("项目归属", selection: $projectSelection) {
+                Text("自定义项目…")
+                    .tag(FocusSessionReviewProjectSelection.custom)
+                ForEach(registeredProjects) { project in
+                    Text(project.displayName)
+                        .tag(FocusSessionReviewProjectSelection.registered(project.id))
+                }
+                if case .registered(let id) = projectSelection,
+                   !registeredProjects.contains(where: { $0.id == id }) {
+                    Text("项目已不可用（请重新选择）")
+                        .tag(FocusSessionReviewProjectSelection.registered(id))
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(selectedSession == nil)
+            .onChange(of: projectSelection) { _, selection in
+                updateProjectDraft(for: selection)
+            }
+
+            if case .registered(let id) = projectSelection {
+                if let project = registeredProjects.first(where: { $0.id == id }) {
+                    LabeledContent("项目", value: project.displayName)
+                    Text("将使用已注册项目身份：\(project.id.rawValue)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else {
+                    Label("所选项目已不可用，请重新选择或改用自定义项目。", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Text("自定义项目兜底")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField("项目标识", text: $projectKey)
+                TextField("项目名称", text: $projectName)
+            }
             DatePicker("开始", selection: $start)
             DatePicker("结束", selection: $end)
             Picker("模式", selection: $sessionMode) {
@@ -225,6 +343,10 @@ struct FocusSessionReviewView: View {
         guard let session = selectedSession else { return }
         projectKey = session.project.key
         projectName = session.project.displayName
+        projectSelection = FocusSessionReviewProjectResolver.selection(
+            for: session.project,
+            registeredProjects: registeredProjects
+        )
         start = session.startedAt
         end = session.endedAt ?? session.startedAt
         sessionMode = session.mode
@@ -233,7 +355,36 @@ struct FocusSessionReviewView: View {
 
     private func saveEdit() {
         guard let id = selectedSession?.id else { return }
-        apply(engine?.editSession(id: id, project: FocusProjectContext(key: projectKey, displayName: projectName), startedAt: start, endedAt: end, mode: sessionMode))
+        guard let project = FocusSessionReviewProjectResolver.context(
+            for: projectSelection,
+            registeredProjects: registeredProjectsProvider(),
+            customProjectKey: projectKey,
+            customDisplayName: projectName
+        ) else {
+            message = "所选项目已不可用。请重新选择可用项目，或改用自定义项目。"
+            return
+        }
+        apply(engine?.editSession(
+            id: id,
+            project: project,
+            startedAt: start,
+            endedAt: end,
+            mode: sessionMode
+        ))
+    }
+
+    private func updateProjectDraft(for selection: FocusSessionReviewProjectSelection) {
+        guard case .registered(let id) = selection else {
+            message = nil
+            return
+        }
+        guard let project = registeredProjects.first(where: { $0.id == id }) else {
+            message = "所选项目已不可用。请重新选择可用项目，或改用自定义项目。"
+            return
+        }
+        projectKey = project.id.rawValue
+        projectName = project.displayName
+        message = nil
     }
     private func confirm() { guard let id = selectedSession?.id else { return }; apply(engine?.confirmSession(id: id)) }
     private func delete() { guard let id = selectedSession?.id else { return }; apply(engine?.deleteSession(id: id)) }

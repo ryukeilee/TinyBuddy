@@ -160,7 +160,8 @@ struct TinyBuddyApp: App {
                         engineProvider: { appDelegate.focusSessionEngine },
                         historyController: appDelegate.historyQueryController ?? HistoryQueryController(
                             queryService: FocusSessionQueryService(sessionProvider: { [] })
-                        )
+                        ),
+                        registeredProjectsProvider: { appDelegate.activeManualFocusProjects }
                     )
                         .tabItem { Label("专注记录", systemImage: "clock.arrow.circlepath") }
                     FocusHistoryView(

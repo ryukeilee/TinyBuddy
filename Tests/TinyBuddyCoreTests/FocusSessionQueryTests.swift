@@ -8,6 +8,29 @@ final class SessionBox: @unchecked Sendable {
     init(_ value: [FocusSession]) { self.value = value }
 }
 
+/// Thread-safe resolver invocation counter. Project resolution walks the
+/// registry identity graph, so the number of calls per query pass is the
+/// algorithmic property behind the history load/pagination budget.
+final class ResolverCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return calls
+    }
+
+    func record() {
+        lock.lock(); defer { lock.unlock() }
+        calls += 1
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        calls = 0
+    }
+}
+
 final class FocusSessionQueryTests: XCTestCase {
     private let alpha = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
     private let beta = FocusProjectContext(key: "repo.beta", displayName: "Beta")
@@ -75,6 +98,479 @@ final class FocusSessionQueryTests: XCTestCase {
         sessions: [FocusSession]
     ) -> FocusSessionQueryService {
         FocusSessionQueryService(sessionProvider: { sessions })
+    }
+
+    /// Builds a service whose resolver records every invocation, over
+    /// `sessionCount` sessions that share only `projectCount` distinct projects.
+    private func makeCountingService(
+        sessionCount: Int,
+        projectCount: Int,
+        counter: ResolverCallCounter
+    ) -> FocusSessionQueryService {
+        let sessions = (0 ..< sessionCount).map { index in
+            let offset = TimeInterval(index) * 60
+            let project = FocusProjectContext(
+                key: "repo.\(index % projectCount)",
+                displayName: "Project \(index % projectCount)"
+            )
+            return FocusSession(
+                id: UUID(),
+                project: project,
+                dayIdentifier: "2026-07-20",
+                startedAt: Date(timeIntervalSinceReferenceDate: offset),
+                endedAt: Date(timeIntervalSinceReferenceDate: offset + 1_800),
+                status: .ended,
+                lastUserActivityAt: Date(timeIntervalSinceReferenceDate: offset + 1_800),
+                lastStateChangeAt: Date(timeIntervalSinceReferenceDate: offset + 1_800)
+            )
+        }
+        return FocusSessionQueryService(
+            sessionProvider: { sessions },
+            projectResolver: { context in
+                counter.record()
+                return FocusProjectContext(
+                    key: "canonical.\(context.key)",
+                    displayName: context.displayName
+                )
+            }
+        )
+    }
+
+    // ======================================================================
+    // MARK: - Resolution cost scaling
+    // ======================================================================
+
+    /// A filtered history query must consult the project resolver once per
+    /// distinct project, not once per session. Before memoisation a 2,000-row
+    /// history with five projects called the resolver 2,000 times per pass.
+    func testFilteredQueryResolvesEachDistinctProjectOnce() async throws {
+        let counter = ResolverCallCounter()
+        let service = makeCountingService(sessionCount: 2_000, projectCount: 5, counter: counter)
+
+        let page = await service.execute(
+            query: FocusSessionQuery(keyword: "project"),
+            cursor: nil,
+            limit: 50,
+            version: 0
+        )
+        XCTAssertEqual(page?.totalEstimatedCount, 2_000)
+        XCTAssertEqual(page?.sessions.count, 50)
+        XCTAssertLessThanOrEqual(counter.count, 10)
+
+        counter.reset()
+        let projects = await service.projects(version: 0)
+        XCTAssertEqual(projects?.count, 5)
+        XCTAssertLessThanOrEqual(counter.count, 10)
+    }
+
+    /// The returned first page bounds how many rows need a resolved identity:
+    /// an unfiltered history page must not resolve the entire history. Before
+    /// the page-slice path this was one resolution per session (2,000).
+    func testUnfilteredPageResolvesOnlyVisibleRows() async throws {
+        let counter = ResolverCallCounter()
+        let service = makeCountingService(sessionCount: 2_000, projectCount: 500, counter: counter)
+
+        let page = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 50,
+            version: 0
+        )
+        XCTAssertEqual(page?.totalEstimatedCount, 2_000)
+        XCTAssertEqual(page?.sessions.count, 50)
+        XCTAssertLessThanOrEqual(counter.count, 50)
+        // Every returned row still carries its resolved project identity.
+        XCTAssertTrue(page?.sessions.allSatisfy { $0.project.key.hasPrefix("canonical.repo.") } ?? false)
+    }
+
+    /// Day/status-only filters constrain rows without consulting project
+    /// identity at all; only the visible page is resolved.
+    func testRowLocalFilterDoesNotResolveNonVisibleRows() async throws {
+        let counter = ResolverCallCounter()
+        let service = makeCountingService(sessionCount: 2_000, projectCount: 500, counter: counter)
+
+        let page = await service.execute(
+            query: FocusSessionQuery(status: .ended),
+            cursor: nil,
+            limit: 50,
+            version: 0
+        )
+        XCTAssertEqual(page?.totalEstimatedCount, 2_000)
+        XCTAssertEqual(page?.sessions.count, 50)
+        XCTAssertLessThanOrEqual(counter.count, 50)
+        XCTAssertTrue(page?.sessions.allSatisfy { $0.project.key.hasPrefix("canonical.repo.") } ?? false)
+    }
+
+    // ======================================================================
+    // MARK: - Memoised path vs. per-row reference
+    // ======================================================================
+
+    /// Naive implementation of the documented query semantics: resolve every
+    /// row, filter, sort, locate the cursor, and materialise one page. The
+    /// cursor search is intentionally the same shape as the service's, so the
+    /// differential comparison guards what the optimisation changed: which rows
+    /// are returned, in which order, with which resolved project identity, and
+    /// with which page metadata.
+    private func referencePage(
+        sessions: [FocusSession],
+        query: FocusSessionQuery,
+        cursor: FocusSessionCursor?,
+        limit: Int,
+        resolver: (FocusProjectContext) -> FocusProjectContext
+    ) -> FocusSessionQueryPage? {
+        var resolved: [FocusSession] = []
+        for session in sessions {
+            var row = session
+            row.project = resolver(session.project)
+            if let dayStart = query.dayStart, row.dayIdentifier < dayStart { continue }
+            if let dayEnd = query.dayEnd, row.dayIdentifier > dayEnd { continue }
+            if let status = query.status, row.status != status { continue }
+            if let projectKey = query.projectKey, row.project.key != projectKey { continue }
+            if let keyword = query.keyword, !keyword.isEmpty {
+                let lowered = keyword.lowercased()
+                guard row.project.displayName.lowercased().contains(lowered)
+                    || row.project.key.lowercased().contains(lowered) else { continue }
+            }
+            resolved.append(row)
+        }
+        resolved.sort { a, b in
+            if a.startedAt != b.startedAt { return a.startedAt > b.startedAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+
+        let totalCount = resolved.count
+        let startIndex: Int
+        var cursorMissed = false
+        if let cursor {
+            var lowerBound = 0
+            var upperBound = totalCount
+            while lowerBound < upperBound {
+                let middle = lowerBound + (upperBound - lowerBound) / 2
+                let session = resolved[middle]
+                let comesBeforeOrAtCursor = session.startedAt > cursor.lastStartedAt
+                    || (session.startedAt == cursor.lastStartedAt
+                        && session.id.uuidString <= cursor.lastID.uuidString)
+                if comesBeforeOrAtCursor {
+                    lowerBound = middle + 1
+                } else {
+                    upperBound = middle
+                }
+            }
+            if lowerBound < totalCount {
+                startIndex = lowerBound
+            } else {
+                startIndex = totalCount
+                cursorMissed = true
+            }
+        } else {
+            startIndex = 0
+        }
+
+        guard startIndex < totalCount else {
+            return cursorMissed ? nil : .empty
+        }
+        let endIndex = min(startIndex + limit, totalCount)
+        let page = Array(resolved[startIndex ..< endIndex])
+        let hasMore = endIndex < totalCount
+        return FocusSessionQueryPage(
+            sessions: page,
+            nextCursor: hasMore
+                ? FocusSessionCursor(lastStartedAt: page.last!.startedAt, lastID: page.last!.id)
+                : nil,
+            hasMore: hasMore,
+            totalEstimatedCount: totalCount
+        )
+    }
+
+    /// Every page the optimised service returns must equal the naive per-row
+    /// reference: same rows, same order, same resolved project identity, same
+    /// cursor and counts. Rows are emitted newest first with legacy alias keys
+    /// so resolution is observable in the returned page.
+    func testMemoisedQueryMatchesPerRowReferenceImplementation() async throws {
+        let sessions: [FocusSession] = (0 ..< 240).map { index in
+            let day = String(format: "2026-07-%02d", 1 + index / 20)
+            let slot = index % 20
+            // A block of identical timestamps straddles the 25-row page
+            // boundary, so the uuid tie-break has to agree across pages.
+            let sharedTimestamp = (30 ..< 60).contains(index)
+            let startedAt = sharedTimestamp
+                ? Date(timeIntervalSinceReferenceDate: 800_000_000 + 50 * 900)
+                : Date(timeIntervalSinceReferenceDate: 800_000_000 + Double(index) * 900)
+            let isOpen = index % 61 == 0
+            let isPaused = index % 47 == 0
+            return FocusSession(
+                id: UUID(),
+                project: FocusProjectContext(key: "repo.\(index % 5)", displayName: "Legacy \(index % 5)"),
+                dayIdentifier: day,
+                startedAt: startedAt,
+                endedAt: isOpen || isPaused ? nil : startedAt.addingTimeInterval(600),
+                status: isOpen ? .active : (isPaused ? .paused : .ended),
+                lastUserActivityAt: startedAt,
+                lastStateChangeAt: startedAt,
+                decisionEvents: slot.isMultiple(of: 3)
+                    ? [FocusSessionDecisionEvent(at: startedAt, kind: .started, reason: .userActivity, source: .automatic)]
+                    : nil
+            )
+        }
+        // Duplicate-free permutation: newest and oldest interleaved, so the
+        // provider order is neither display order nor a single sorted run.
+        var providerRows: [FocusSession] = []
+        providerRows.reserveCapacity(sessions.count)
+        var lower = 0
+        var upper = sessions.count - 1
+        while lower <= upper {
+            providerRows.append(sessions[upper])
+            if lower != upper { providerRows.append(sessions[lower]) }
+            lower += 1
+            upper -= 1
+        }
+        XCTAssertEqual(Set(providerRows.map(\.id)).count, sessions.count, "fixture rows must be unique")
+
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = { context in
+            guard let index = Int(context.key.dropFirst("repo.".count)) else { return context }
+            return FocusProjectContext(key: "project.\(index)", displayName: "Project \(index)")
+        }
+        let providerSnapshot = providerRows
+        let service = FocusSessionQueryService(
+            sessionProvider: { providerSnapshot },
+            projectResolver: resolver
+        )
+
+        let queries: [FocusSessionQuery] = [
+            FocusSessionQuery(),
+            FocusSessionQuery(dayStart: "2026-07-04", dayEnd: "2026-07-09"),
+            FocusSessionQuery(status: .ended),
+            FocusSessionQuery(status: .active),
+            FocusSessionQuery(projectKey: "project.3"),
+            FocusSessionQuery(keyword: "PROJECT 1"),
+            FocusSessionQuery(keyword: "repo.2"),
+            FocusSessionQuery(keyword: ""),
+            FocusSessionQuery(
+                dayStart: "2026-07-05",
+                dayEnd: "2026-07-11",
+                projectKey: "project.4",
+                status: .ended,
+                keyword: "project"
+            )
+        ]
+
+        for query in queries {
+            var cursor: FocusSessionCursor?
+            var pages = 0
+            var visited: [UUID] = []
+            var reportedTotal: Int?
+            // The fixture holds 240 rows, so an unbounded walk must end because
+            // `hasMore` became false, not because a page cap was hit.
+            while pages < 40 {
+                let expected = referencePage(
+                    sessions: providerRows,
+                    query: query,
+                    cursor: cursor,
+                    limit: 25,
+                    resolver: resolver
+                )
+                let actual = await service.execute(
+                    query: query,
+                    cursor: cursor,
+                    limit: 25,
+                    version: 0
+                )
+                XCTAssertEqual(
+                    actual,
+                    expected,
+                    "page \(pages) diverged for query \(query) with cursor \(String(describing: cursor))"
+                )
+                let estimatedCount = await service.estimatedCount(query: query)
+                XCTAssertEqual(
+                    estimatedCount,
+                    expected?.totalEstimatedCount ?? 0,
+                    "estimated count diverged for query \(query)"
+                )
+                guard let page = actual else {
+                    // Continuity break: pagination must restart, so the walk ends.
+                    XCTFail("pagination lost continuity for query \(query) at page \(pages)")
+                    break
+                }
+                reportedTotal = reportedTotal ?? page.totalEstimatedCount
+                visited.append(contentsOf: page.sessions.map(\.id))
+                guard page.hasMore, let next = page.nextCursor else { break }
+                cursor = next
+                pages += 1
+            }
+            // Walking every page visits each matching row exactly once and stops
+            // on its own, independent of the shared cursor search shape.
+            XCTAssertEqual(visited.count, reportedTotal ?? 0, "pagination must visit every matching row")
+            XCTAssertEqual(Set(visited).count, visited.count, "pagination must not repeat a row")
+            XCTAssertLessThan(pages, 40, "pagination must terminate by exhausting the result set")
+        }
+    }
+
+    /// Rows sharing a timestamp across a page boundary must still be visited
+    /// exactly once, in the documented uuid order.
+    func testIdenticalTimestampsAcrossPageBoundaryVisitEveryRowOnce() async throws {
+        let shared = Date(timeIntervalSinceReferenceDate: 900_000_000)
+        let rows: [FocusSession] = (0 ..< 40).map { index in
+            FocusSession(
+                project: FocusProjectContext(key: "repo.alpha", displayName: "Alpha"),
+                dayIdentifier: "2026-07-20",
+                startedAt: index < 12 ? shared : shared.addingTimeInterval(-Double(index)),
+                endedAt: shared.addingTimeInterval(600),
+                status: .ended,
+                lastUserActivityAt: shared,
+                lastStateChangeAt: shared
+            )
+        }
+        let service = FocusSessionQueryService(sessionProvider: { rows })
+
+        var visited: [UUID] = []
+        var cursor: FocusSessionCursor?
+        while true {
+            let pageResult = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: cursor,
+                limit: 5,
+                version: 0
+            )
+            let page = try XCTUnwrap(pageResult)
+            visited.append(contentsOf: page.sessions.map(\.id))
+            guard page.hasMore, let next = page.nextCursor else { break }
+            cursor = next
+        }
+        XCTAssertEqual(visited.count, rows.count)
+        XCTAssertEqual(Set(visited).count, rows.count, "tie rows must not repeat")
+        // The 12 tied rows come first, ordered by uuidString ascending.
+        let tiedIDs = rows.filter { $0.startedAt == shared }.map(\.id)
+        XCTAssertEqual(Array(visited.prefix(12)), tiedIDs.sorted { $0.uuidString < $1.uuidString })
+    }
+
+    /// A deleted cursor row with surviving rows after it: the frozen behaviour
+    /// is to continue from the next surviving row (no gap, no duplicate), not to
+    /// restart from the first page.
+    func testPaginationContinuesAfterCursorRowDeletion() async throws {
+        let base = Date(timeIntervalSinceReferenceDate: 950_000_000)
+        let box = SessionBox((0 ..< 10).map { index in
+            FocusSession(
+                project: FocusProjectContext(key: "repo.alpha", displayName: "Alpha"),
+                dayIdentifier: "2026-07-20",
+                startedAt: base.addingTimeInterval(-Double(index) * 600),
+                endedAt: base,
+                status: .ended,
+                lastUserActivityAt: base,
+                lastStateChangeAt: base
+            )
+        })
+        let rows = box.value
+        let service = FocusSessionQueryService(sessionProvider: { box.value })
+
+        // Page 1 is the three newest rows; the cursor points at the third.
+        let firstPageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 3,
+            version: 0
+        )
+        let firstPage = try XCTUnwrap(firstPageResult)
+        let cursor = try XCTUnwrap(firstPage.nextCursor)
+        XCTAssertEqual(firstPage.sessions.map(\.id), Array(rows.prefix(3).map(\.id)))
+
+        // The cursor row (and the one before it) disappear between pages.
+        box.value.removeAll { $0.id == rows[2].id || $0.id == rows[1].id }
+
+        let secondPageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: cursor,
+            limit: 3,
+            version: 0
+        )
+        let secondPage = try XCTUnwrap(secondPageResult)
+        XCTAssertEqual(secondPage.sessions.map(\.id), Array(rows[3 ..< 6].map(\.id)))
+        XCTAssertEqual(secondPage.totalEstimatedCount, 8)
+    }
+
+    /// The memo fixes the first resolution of an exact input context for the
+    /// duration of one call, so a single page cannot mix two identities of the
+    /// same project. This pins the documented concurrent-registry-mutation
+    /// boundary instead of leaving it implicit.
+    func testSinglePageUsesOneIdentityPerInputContext() async throws {
+        let counter = ResolverCallCounter()
+        let base = Date(timeIntervalSinceReferenceDate: 960_000_000)
+        let rows: [FocusSession] = (0 ..< 9).map { index in
+            FocusSession(
+                project: FocusProjectContext(key: "repo.alpha", displayName: "Alpha"),
+                dayIdentifier: "2026-07-20",
+                startedAt: base.addingTimeInterval(-Double(index) * 600),
+                endedAt: base,
+                status: .ended,
+                lastUserActivityAt: base,
+                lastStateChangeAt: base
+            )
+        }
+        let service = FocusSessionQueryService(
+            sessionProvider: { rows },
+            projectResolver: { context in
+                counter.record()
+                // Simulates a registry that is renamed between two lookups.
+                let name = counter.count == 1 ? "Before" : "After"
+                return FocusProjectContext(key: context.key, displayName: name)
+            }
+        )
+        let identityPageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 9,
+            version: 0
+        )
+        let page = try XCTUnwrap(identityPageResult)
+        XCTAssertEqual(counter.count, 1, "one input context must resolve once per call")
+        XCTAssertEqual(Set(page.sessions.map(\.project.displayName)), ["Before"])
+    }
+
+    /// Project summaries keep the documented newest-name and uuid tie-break rule
+    /// when two historical contexts of one project share a timestamp.
+    func testProjectSummaryTieBreakMatchesPerRowResolution() async throws {
+        let shared = Date(timeIntervalSinceReferenceDate: 970_000_000)
+        let older = shared.addingTimeInterval(-3_600)
+        let rows: [FocusSession] = [
+            FocusSession(
+                project: FocusProjectContext(key: "repo.alpha", displayName: "Renamed Later"),
+                dayIdentifier: "2026-07-20",
+                startedAt: shared,
+                endedAt: shared,
+                status: .ended,
+                lastUserActivityAt: shared,
+                lastStateChangeAt: shared
+            ),
+            FocusSession(
+                project: FocusProjectContext(key: "canonical", displayName: "Older Name"),
+                dayIdentifier: "2026-07-19",
+                startedAt: older,
+                endedAt: older,
+                status: .ended,
+                lastUserActivityAt: older,
+                lastStateChangeAt: older
+            )
+        ]
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = { context in
+            FocusProjectContext(key: "project.alpha", displayName: context.displayName)
+        }
+        let service = FocusSessionQueryService(sessionProvider: { rows }, projectResolver: resolver)
+
+        let projectsResult = await service.projects(version: 0)
+        let projects = try XCTUnwrap(projectsResult)
+        // Both contexts resolve to the same canonical key, so the newest row's
+        // name is the only summary.
+        XCTAssertEqual(projects.count, 1)
+        XCTAssertEqual(projects.first?.key, "project.alpha")
+        XCTAssertEqual(projects.first?.displayName, "Renamed Later")
+        XCTAssertEqual(counterFreeRowCount(rows, resolver: resolver), projects.count)
+    }
+
+    /// Number of distinct resolved identities, computed one row at a time.
+    private func counterFreeRowCount(
+        _ rows: [FocusSession],
+        resolver: (FocusProjectContext) -> FocusProjectContext
+    ) -> Int {
+        Set(rows.map { resolver($0.project) }.map(\.key)).count
     }
 
     private func session(

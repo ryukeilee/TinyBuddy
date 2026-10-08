@@ -34,6 +34,50 @@ enum ManualFocusProjectIdentityResolver {
     }
 }
 
+/// Name-based search/filter for the manual focus project picker. Filtering only
+/// hides rows from the caller-supplied registry projection; it never mints,
+/// rewrites, or duplicates a project identity, so confirming a filtered row
+/// resolves to exactly the same stable `FocusProjectContext` as before.
+enum ManualFocusProjectFilter {
+    /// Below this many registered projects the option list is short enough to
+    /// scan directly, so the search field stays hidden and the picker keeps its
+    /// original layout.
+    static let searchFieldMinimumProjectCount = 6
+
+    static func shouldShowSearchField(registeredProjectCount: Int) -> Bool {
+        registeredProjectCount >= searchFieldMinimumProjectCount
+    }
+
+    /// Trims surrounding whitespace/newlines so a stray space never hides every
+    /// row, without otherwise altering the typed query.
+    static func normalizedQuery(_ query: String) -> String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func isSearching(_ query: String) -> Bool {
+        !normalizedQuery(query).isEmpty
+    }
+
+    /// Case- and diacritic-insensitive substring match. Locale is deliberately
+    /// unspecified so the result is deterministic across systems.
+    static func matches(_ name: String, query: String) -> Bool {
+        let trimmed = normalizedQuery(query)
+        guard !trimmed.isEmpty else { return true }
+        return fold(name).contains(fold(trimmed))
+    }
+
+    /// Empty or whitespace-only queries return the input untouched, preserving
+    /// the registry's existing ordering and deduplication.
+    static func projects(_ projects: [TinyBuddyProject], query: String) -> [TinyBuddyProject] {
+        guard isSearching(query) else { return projects }
+        return projects.filter { matches($0.displayName, query: query) }
+    }
+
+    private static func fold(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+}
+
 /// A reusable project picker used by both the HUD and menu bar.
 /// It surfaces recent Git projects, registered projects from the identity
 /// registry, and allows entering a custom project name.
@@ -50,6 +94,7 @@ struct ManualFocusProjectPicker: View {
     @State private var customName: String = ""
     @State private var selectedRegisteredID: TinyBuddyProjectID?
     @State private var lastConfirmedToken: UUID?
+    @State private var searchQuery: String = ""
     @FocusState private var isSearchFocused: Bool
 
     private enum Source: Hashable {
@@ -93,7 +138,12 @@ struct ManualFocusProjectPicker: View {
 
     @ViewBuilder
     private var projectOptions: some View {
-        if let recent = recentProjectName {
+        if ManualFocusProjectFilter.shouldShowSearchField(registeredProjectCount: registeredProjects.count) {
+            searchField
+        }
+
+        if let recent = recentProjectName,
+           ManualFocusProjectFilter.matches(recent, query: searchQuery) {
             sourceRow(
                 source: .recent(recent),
                 icon: "clock.arrow.circlepath",
@@ -103,13 +153,23 @@ struct ManualFocusProjectPicker: View {
             )
         }
 
+        let visibleProjects = ManualFocusProjectFilter.projects(registeredProjects, query: searchQuery)
+
         if !registeredProjects.isEmpty {
-            Text("已知项目")
+            Text(ManualFocusProjectFilter.isSearching(searchQuery)
+                 ? "已知项目（\(visibleProjects.count)）"
+                 : "已知项目")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
 
-            ForEach(registeredProjects) { project in
+            if visibleProjects.isEmpty {
+                Text("没有名称匹配“\(ManualFocusProjectFilter.normalizedQuery(searchQuery))”的项目")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(visibleProjects) { project in
                 sourceRow(
                     source: .registered(project.id),
                     icon: project.kind == .gitRepository ? "shippingbox" : "app",
@@ -126,6 +186,37 @@ struct ManualFocusProjectPicker: View {
             label: "自定义项目",
             detail: nil,
             isRecommended: false
+        )
+    }
+
+    // MARK: - Search
+
+    private var searchField: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            TextField("搜索项目名称", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(.caption)
+            if ManualFocusProjectFilter.isSearching(searchQuery) {
+                Button {
+                    searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("清除搜索")
+                .accessibilityLabel("清除搜索")
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12))
         )
     }
 
