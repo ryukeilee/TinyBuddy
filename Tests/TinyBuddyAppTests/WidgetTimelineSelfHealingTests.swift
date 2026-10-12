@@ -23,6 +23,26 @@ final class WidgetTimelineSelfHealingTests: XCTestCase {
         XCTAssertTrue(healingBlock.contains("dataAvailability: .stale"))
     }
 
+    func testPrebuiltRolloverEntryDoesNotClaimAvailableData() throws {
+        let source = try widgetSource()
+        // The rollover entry owns the local-day boundary before the new day's
+        // snapshot can exist. Claiming `.available` for its neutral snapshot
+        // resolves to `.idle`, which renders "待机" and reports a settled empty
+        // day instead of "today's data is not read yet". It must stay
+        // `.loading` so the placeholder is honest and keeps self-healing.
+        let rolloverRange = try XCTUnwrap(source.range(of: "private func makeRolloverEntry"))
+        let endIndex = source.index(
+            rolloverRange.lowerBound,
+            offsetBy: min(
+                900,
+                source.count - source.distance(from: source.startIndex, to: rolloverRange.lowerBound)
+            )
+        )
+        let rolloverBlock = String(source[rolloverRange.lowerBound..<endIndex])
+        XCTAssertTrue(rolloverBlock.contains("dataAvailability: .loading"))
+        XCTAssertFalse(rolloverBlock.contains("dataAvailability: .available"))
+    }
+
     func testAppDelegateRegistersPostUpgradeReloadObserver() throws {
         let source = try appSource()
         XCTAssertTrue(source.contains("registerPostUpgradeWidgetReloadObserver()"))

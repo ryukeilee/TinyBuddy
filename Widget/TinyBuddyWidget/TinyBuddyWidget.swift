@@ -165,6 +165,14 @@ struct TinyBuddyProvider: TimelineProvider {
             || entry.focusHistoryPublication != nil
     }
 
+    /// The prebuilt entry that owns the local-day boundary. It never reads the
+    /// combined snapshot, because the new day's committed snapshot cannot exist
+    /// yet, so it must not claim `.available` either: an available neutral
+    /// snapshot resolves to `.idle` and renders "待机", which reads as "nothing
+    /// to do today" instead of "today's data is not read yet". `.loading` keeps
+    /// the placeholder honest, stays inside the renderable-data contract that
+    /// drives the post-midnight re-probe, and schedules the same bounded
+    /// recovery cadence until a real publication or this day's snapshot lands.
     private func makeRolloverEntry(for timeContext: TinyBuddyTimeContext) -> TinyBuddyEntry {
         let continuity = TinyBuddyTimeContinuityRecord.load(
             userDefaults: sharedDefaults
@@ -174,7 +182,7 @@ struct TinyBuddyProvider: TimelineProvider {
             snapshot: neutralSnapshot(dayIdentifier: timeContext.dayIdentifier),
             activitySnapshot: neutralActivitySnapshot,
             refreshStatus: nil,
-            dataAvailability: .available,
+            dataAvailability: .loading,
             timeContext: timeContext,
             calibrationGeneration: continuity.calibrationGeneration
         )
