@@ -251,6 +251,11 @@ private struct HistoryBenchmarkFixture {
 /// array order defaults to production append order; set
 /// `TINYBUDDY_HISTORY_BENCHMARK_ORDER=shuffled` for the unsorted proxy, or
 /// `=edited` for a user-edited archive.
+///
+/// `lastPage` and `serviceFullPagination` are service-level measurements that
+/// have no separate user-visible operation: one page near the end of the
+/// result set, and the aggregate cost of every page without the controller's
+/// accumulation.
 final class HistoryQueryPerformanceTests: XCTestCase {
     private static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["TINYBUDDY_HISTORY_BENCHMARK"] == "1"
@@ -372,17 +377,95 @@ final class HistoryQueryPerformanceTests: XCTestCase {
                 await controller.updateQuery(query, debounceSeconds: 0)
             }
 
+            // Scrolling to the end of the history: place the cursor one row
+            // before the final page so exactly one page remains. The fixture's
+            // own rows are ordered the way the service orders them (startedAt
+            // descending, then uuidString ascending) to build a realistic
+            // deep-page cursor; the timed body is a single service call.
+            //
+            // This scenario places the cursor one row before the final full
+            // page, so it needs more rows than one page; a history that is not
+            // longer than one page has no such cursor and reports 0 instead of
+            // indexing off the start of `orderedRows`.
+            let orderedRows = fixture.sessions.sorted { a, b in
+                if a.startedAt != b.startedAt { return a.startedAt > b.startedAt }
+                return a.id.uuidString < b.id.uuidString
+            }
+            let lastPage: Double
+            if orderedRows.count > HistoryBenchmarkFixture.pageSize {
+                let deepCursorRow = orderedRows[orderedRows.count - HistoryBenchmarkFixture.pageSize - 1]
+                let deepCursor = FocusSessionCursor(
+                    lastStartedAt: deepCursorRow.startedAt,
+                    lastID: deepCursorRow.id
+                )
+
+                lastPage = await medianMilliseconds {
+                    _ = await fixture.service.execute(
+                        query: FocusSessionQuery(),
+                        cursor: deepCursor,
+                        limit: HistoryBenchmarkFixture.pageSize,
+                        version: 0
+                    )
+                }
+
+                let lastPageProbeResult = await fixture.service.execute(
+                    query: FocusSessionQuery(),
+                    cursor: deepCursor,
+                    limit: HistoryBenchmarkFixture.pageSize,
+                    version: 0
+                )
+                let lastPageProbe = try XCTUnwrap(lastPageProbeResult)
+                XCTAssertEqual(lastPageProbe.sessions.count, HistoryBenchmarkFixture.pageSize)
+                XCTAssertFalse(lastPageProbe.hasMore)
+            } else {
+                lastPage = 0
+            }
+
+            // Service-only traversal: the query service's aggregate cost over
+            // every page, without the controller's accumulation and without
+            // this harness's own loop state.
+            //
+            // `fullPagination` binds the requested page for the length of its
+            // loop body, so that page stays alive across `loadMore()` and
+            // shares the accumulated array with it: every append then copies
+            // the whole accumulation. The total elapsed difference between the
+            // two scenarios is about 0.5 ms per page at 8_000 rows and 0.9 ms
+            // per page at 16_000, with the same magnitude on both sides of
+            // this change; that difference is not a pure copy-on-write
+            // measurement, it also contains `projects()`, the controller's
+            // bookkeeping and scheduling. This scenario has no such holder, so
+            // it isolates the service's per-page cost from a caller that
+            // retains a page across an append.
+            let serviceFullPagination = await medianMilliseconds {
+                var cursor: FocusSessionCursor?
+                var visited = 0
+                while true {
+                    guard let page = await fixture.service.execute(
+                        query: FocusSessionQuery(),
+                        cursor: cursor,
+                        limit: HistoryBenchmarkFixture.pageSize,
+                        version: 0
+                    ) else { break }
+                    visited += page.sessions.count
+                    guard page.hasMore, let next = page.nextCursor else { break }
+                    cursor = next
+                }
+                XCTAssertEqual(visited, size)
+            }
+
             let report: [(String, Double)] = [
                 ("refreshFirstPage", refreshFirstPage),
                 ("serviceProjects", serviceProjects),
                 ("serviceFilterOnly", serviceFilterOnly),
                 ("serviceFirstPage", serviceFirstPage),
+                ("serviceFullPagination", serviceFullPagination),
                 ("fullPagination", fullPagination),
                 ("keywordFilterSwitch", keywordFilterSwitch),
                 ("dayRangeFilterSwitch", dayRangeFilterSwitch),
                 ("projectFilterSwitch", projectFilterSwitch),
                 ("statusFilterSwitch", statusFilterSwitch),
-                ("reviewViewLoad", reviewViewLoad)
+                ("reviewViewLoad", reviewViewLoad),
+                ("lastPage", lastPage)
             ]
             for (scenario, value) in report {
                 print("HISTORY_QUERY_BENCHMARK size=\(size) order=\(rowOrder.rawValue) scenario=\(scenario) milliseconds=\(String(format: "%.3f", value))")

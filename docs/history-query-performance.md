@@ -174,7 +174,8 @@ git stash pop
 - **残留下界**：每次翻页仍要重新读取并排序整档历史（带筛选条件时还要重新筛选）。跨页缓存派生结果可以消除该
   成本，但需要显式的数据版本失效信号：生产代码中 `notifyChanges` 只由复核编辑路径调用，
   会话自动/手动开始结束只触发视图 `reload()`，不会给查询服务提供可作为缓存键的版本，
-  缓存会让翻页读到陈旧行；因此本次没有引入，也没有为极端滚动长期保留第二份历史快照。
+  缓存会让翻页读到陈旧行；因此本次没有引入，也没有为极端滚动长期保留第二份历史快照。（第二轮把
+  每页的排序对象从整行改成 32 字节排序键，见 §第二轮：排序键分页；「不引入跨页缓存」的理由不变。）
 
 渲染侧的微基准显示 `Date.formatted(date:time:)` 每行约 0.85–1.3 µs，缓存
 `Date.FormatStyle` 只快 6–14%，不足以支撑改动，因此没有修改行渲染；`FocusHistoryListView`
@@ -223,7 +224,7 @@ git stash pop
 | B 无筛选只解析返回页且外部不可观察 | 部分支持 | 解析次数与页内容有测试支撑；「任何外部消费者」过宽：注入的解析器与实时注册表变更可观察 |
 | C 性能数字可信 | 部分支持 | 表格全部数值与六份原始日志一致、工作负载与预热方法明确；只有中位数、无离散度，未独立重跑六组 benchmark |
 | D 内存没有变差 | 不支持 | 未测分配量或 RSS，只能证明无筛选页少物化一份整档数组 |
-| E 残留下界与未设缓存理由 | 支持 | 每页仍重读并排序（带筛选条件时还要筛选）；生产缺少覆盖所有会话变化的缓存失效版本 |
+| E 残留下界与未设缓存理由 | 支持 | 每页仍重读并排序（带筛选条件时还要筛选）；生产缺少覆盖所有会话变化的缓存失效版本（第二轮的每页成本见 §第二轮：排序键分页） |
 
 ## 验证范围与独立复核
 
@@ -272,3 +273,200 @@ active/paused 会话不真实，已改为只有最新一天保留开放会话；
 `FocusSessionRecalculationEngine` 的重算会把范围内所有被修改的自动会话删除后按字典哈希序
 重新追加（布局更接近 `shuffled`），但 `FocusSessionUpgradeCoordinator` 在当前 App target
 中没有接线，因此这条路径目前不会影响真实档案的顺序。
+
+## 第二轮：排序键分页（整行排序 → 32 字节键排序）
+
+本轮基线是上一轮结果所在的 `95e436e`（工作树无未提交改动）。数据集、页面大小（50）、三种
+provider 顺序、预热与中位数方法与 §可重复工作负载 相同；只新增两个服务级场景：`lastPage`
+（把游标放在结果集末尾前一行，测最后一页）与 `serviceFullPagination`（只经查询服务翻完
+全部页面，不经控制器累积）。
+
+本轮的数值都来自该合成 fixture（真实注册表解析器 + 真实控制器接线 + 合成会话分布），
+**不是真实用户档案的测量**；也没有测真实档案中重写行的占比。取值口径限于本机、
+8,000/16,000 两种规模与三种 provider 布局。
+
+```sh
+# 基线：只回退查询服务本身，保留同一份测试文件
+git stash push -- Sources/TinyBuddyCore/FocusSessionQueryService.swift
+for order in chronological edited shuffled; do
+  TINYBUDDY_HISTORY_BENCHMARK=1 TINYBUDDY_HISTORY_BENCHMARK_SIZES=8000,16000 \
+  TINYBUDDY_HISTORY_BENCHMARK_SAMPLES=3 TINYBUDDY_HISTORY_BENCHMARK_ORDER=$order \
+    ./script/swiftpm.sh test -c release --filter HistoryQueryPerformanceTests
+done
+git stash pop
+# 本轮：直接重跑同样三条命令
+```
+
+两侧原始输出（每行一条场景中位数）保存在本机 `.build/history-query-perf/r2-base2-<order>.txt`
+与 `r2-cand-<order>.txt`；基线提交记录在 `r2-baseline-commit.txt`。单位毫秒，三样本中位数。
+
+### `chronological`（从未重写过，生产可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 5.662 | 3.399 | 1.7× | 10.800 | 6.375 | 1.7× |
+| `serviceProjects` | 2.922 | 2.919 | 1.0× | 5.361 | 5.323 | 1.0× |
+| `serviceFilterOnly` | 0.955 | 0.157 | 6.1× | 1.864 | 0.282 | 6.6× |
+| `serviceFirstPage` | 2.867 | 0.506 | 5.7× | 5.603 | 0.963 | 5.8× |
+| `serviceFullPagination` | 453.491 | 83.450 | 5.4× | 1,785.690 | 304.642 | 5.9× |
+| `fullPagination` | 531.741 | 160.534 | 3.3× | 2,109.331 | 598.030 | 3.5× |
+| `keywordFilterSwitch` | 10.076 | 7.346 | 1.4× | 18.440 | 13.445 | 1.4× |
+| `dayRangeFilterSwitch` | 9.013 | 6.537 | 1.4× | 16.525 | 12.033 | 1.4× |
+| `projectFilterSwitch` | 9.422 | 7.282 | 1.3× | 17.471 | 13.089 | 1.3× |
+| `statusFilterSwitch` | 11.509 | 6.939 | 1.7× | 21.923 | 12.684 | 1.7× |
+| `reviewViewLoad` | 5.688 | 3.453 | 1.6× | 10.841 | 6.310 | 1.7× |
+| `lastPage` | 2.797 | 0.493 | 5.7× | 5.589 | 0.909 | 6.1× |
+
+### `edited`（被重写过的档案，生产可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 8.250 | 3.676 | 2.2× | 15.919 | 6.977 | 2.3× |
+| `serviceProjects` | 3.002 | 2.834 | 1.1× | 5.519 | 5.293 | 1.0× |
+| `serviceFilterOnly` | 0.951 | 0.157 | 6.1× | 1.908 | 0.288 | 6.6× |
+| `serviceFirstPage` | 5.245 | 0.841 | 6.2× | 10.387 | 1.617 | 6.4× |
+| `serviceFullPagination` | 834.038 | 135.192 | 6.2× | 3,358.401 | 512.046 | 6.6× |
+| `fullPagination` | 914.824 | 212.770 | 4.3× | 3,668.788 | 804.452 | 4.6× |
+| `keywordFilterSwitch` | 12.970 | 7.635 | 1.7× | 24.875 | 13.809 | 1.8× |
+| `dayRangeFilterSwitch` | 11.610 | 6.802 | 1.7× | 22.151 | 12.641 | 1.8× |
+| `projectFilterSwitch` | 12.078 | 7.527 | 1.6× | 23.072 | 13.475 | 1.7× |
+| `statusFilterSwitch` | 16.584 | 7.441 | 2.2× | 32.383 | 13.601 | 2.4× |
+| `reviewViewLoad` | 8.351 | 3.772 | 2.2× | 16.203 | 6.880 | 2.4× |
+| `lastPage` | 5.180 | 0.825 | 6.3× | 10.517 | 1.567 | 6.7× |
+
+### `shuffled`（固定种子乱序代理，不可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 49.574 | 11.499 | 4.3× | 102.160 | 23.243 | 4.4× |
+| `serviceProjects` | 2.202 | 2.287 | 1.0× | 3.879 | 4.285 | 0.9× |
+| `serviceFilterOnly` | 0.914 | 0.150 | 6.1× | 1.793 | 0.283 | 6.3× |
+| `serviceFirstPage` | 47.396 | 9.127 | 5.2× | 98.177 | 19.308 | 5.1× |
+| `serviceFullPagination` | 7,578.589 | 1,476.258 | 5.1× | 31,424.069 | 6,035.094 | 5.2× |
+| `fullPagination` | 7,693.328 | 1,550.048 | 5.0× | 31,614.742 | 6,334.768 | 5.0× |
+| `keywordFilterSwitch` | 59.166 | 15.983 | 3.7× | 120.472 | 31.974 | 3.8× |
+| `dayRangeFilterSwitch` | 52.297 | 14.172 | 3.7× | 106.756 | 27.792 | 3.8× |
+| `projectFilterSwitch` | 53.052 | 14.845 | 3.6× | 108.744 | 28.987 | 3.8× |
+| `statusFilterSwitch` | 98.946 | 23.258 | 4.3× | 204.058 | 45.945 | 4.4× |
+| `reviewViewLoad` | 49.503 | 11.476 | 4.3× | 101.665 | 23.420 | 4.3× |
+| `lastPage` | 47.276 | 9.138 | 5.2× | 98.080 | 18.736 | 5.2× |
+
+### 收益来源与量级
+
+每页的查询服务成本下降 5.1–6.7×（`chronological`/`edited` 为 5.4–6.7×，`shuffled` 为
+5.1–5.2×；口径为 `serviceFirstPage` / `serviceFullPagination` / `lastPage` 三者）。首尾页成本
+在同一量级：`lastPage` 与 `serviceFirstPage` 在每个规模与顺序下都接近（16,000 `chronological`：
+0.909 vs 0.963 ms），说明每页成本与游标位置无关；这是单次中位数的比较，不是重复测量的
+保证（复测 8,000 行时两者相差约 16%）。整段滚动
+每页成本也不随页数上升：`serviceFullPagination` 除以页数后与 `serviceFirstPage` 相等
+（16,000 `chronological`：304.642/320 = 0.952 vs 0.963；`edited`：512.046/320 = 1.600 vs
+1.617；`shuffled`：6,035.094/320 = 18.86 vs 19.31；8,000 同样吻合）。
+
+`serviceProjects` 在三种顺序下没有呈现一致方向的改善（8,000 `chronological` 1.0×、8,000
+`edited` 1.1×、16,000 `shuffled` 0.9×，单次中位数，无离散度数据可据此宣称“在噪声内”）；
+改动没有触及该项目摘要路径的依据是 diff
+（`projects()` 逐字未改），本轮改的是查询服务的筛选/排序/分页与计数路径（`estimatedCount`
+也改用了同一 helper）。
+
+基线选择「整行排序」的原因不是比较器，而是元素搬运：`FocusSession` 是 177 字节、含 4 个引用
+计数字段的值类型，排序整行要付整档写时复制拷贝，并在每次交换上付 retain/release 流量。
+下列数字来自**未提交的辅助微基准、没有保留原始输出**，只是方向性观察，不能单独当作
+可复现证据（本轮的正式证据是上面三张表）：同机 Release、16,000 行、`chronological` 顺序下
+
+| 做法 | 耗时 | 结论 |
+| --- | ---: | --- |
+| 排序整行（比较器用 `id.uuidString`） | 6.85 ms | 参照 |
+| 排序整行（比较器改用 `id < id`） | 6.44 ms | 只快 6%，比较器不是瓶颈 |
+| 只做写时复制拷贝、不排序 | 2.10 ms | 拷贝本身占参照的 ~30% |
+| 建 32 字节键 + 排序键 + 只物化 50 行 | 0.83 ms | 本轮采用 |
+| 其中：按值迭代整行建键 | 3.44 ms | 若写成 `for session in sessions` 会吃掉大部分收益 |
+| 其中：按索引读缓冲区建键（每行只取所需字段） | 0.207 ms | 最终实现形态（16.6×） |
+
+同一微基准还否掉了「只选择前 K 行、不全排序」的方案：20,000 行下 `nth` 式选择前三页首屏
+（K=50）为 4.38 ms、选择末页（K=N−50）为 10.90 ms，而全排序是 6.73 ms——首屏只快 1.5×，
+末页反而更慢，因此没有采用。（同样只是方向性观察，原始输出未保留。）
+
+50,001 个样本（含 00/0a/0f/10/9f/a0/f0/ff 首字节边界与全 0/全 f）上两种排序结果完全相同
+（同样为未保留输出的辅助观察；可提交的等价性证据是新增测试）
+
+   排序键的 tie-break 用 `UUID` 字节序而不是 `id.uuidString` 字符串。二者对规范 UUID 等价：
+`uuidString` 是定宽带连字符十六进制，字符序与半字节值同序（大小写都不影响相对序），
+`UUID` 的 `Comparable` 按 16 字节左到右比较；50,001 个样本（含 00/0a/0f/10/9f/a0/f0/ff
+首字节边界与全 0/全 f）上两种排序结果完全相同。该等价性由新增测试
+`testDisplayOrderTieBreakMatchesUUIDStringOrdering` 固定为契约，既有
+`testTieBreakerUUID`、`testSortStabilityWithIdenticalTimestamps` 继续断言 `uuidString`
+升序。
+
+### `fullPagination` 与 `serviceFullPagination` 的差：调用方保留上一页时的整档写时复制
+
+`fullPagination` 的加速（`chronological`/`edited` 3.3–4.6×，`shuffled` 5.0×）低于服务级加速，
+差的不是查询服务，而是基准循环自己：
+它的 `while case .loaded(let page) = controller.loadState, page.hasMore { await
+controller.loadMore() }` 把上一页绑定到整个循环体，`page.sessions` 与控制器累积的
+`allSessions` 共享同一份缓冲，于是每次追加都对整档累积数组做一次写时复制。该开销在改动前后
+都在（`fullPagination − serviceFullPagination`）：
+
+| 顺序 | 8,000 基线 | 8,000 本轮 | 16,000 基线 | 16,000 本轮 |
+| --- | ---: | ---: | ---: | ---: |
+| `chronological` | 78.2 ms（0.49/页） | 77.1 ms（0.48/页） | 323.6 ms（1.01/页） | 293.4 ms（0.92/页） |
+| `edited` | 80.8 ms（0.51/页） | 77.6 ms（0.49/页） | 310.4 ms（0.97/页） | 292.4 ms（0.91/页） |
+
+即约 0.5 ms/页 @8,000、0.9 ms/页 @16,000：与行数成正比，两侧量级一致（0.49 vs 0.48、
+1.01 vs 0.92）。该差值不是纯写时复制的测量：它同时包含 `projects()`、控制器累积维护与
+调度差异。与「额外写时复制」解释一致的直接诊断只来自同一份代码、同一会话内的三次测量
+（16,000 `chronological`，本轮实现）：`fullPagination` 607.5 ms；把循环改成
+`while controller.loadState.currentPage?.hasMore == true`（不再跨 `await` 保留上一页）
+318.8 ms；只走服务、完全不经控制器 304.3 ms。生产触发点是行内 `onAppear` 的
+`Task { await controller.loadMore() }`，它不显式保留旧页；但 `ForEach(controller.allSessions)`
+这类遍历是否让数组在追加期间保持共享没有测过 GUI 生命周期，因此不能断定生产当前不付这份
+拷贝。任何长期持有 `loadState` 的页的调用方都会付。
+
+### 残留下界（本轮结束时）
+
+- **`projects()` 未改动，已成为 `refreshFirstPage` 的主导项**：16,000 `chronological` 下
+  `serviceProjects` 5.323 ms 占 `refreshFirstPage` 6.375 ms 的 83%（8,000：2.919 / 3.399）。
+  同一微基准里把它的「按值迭代整行 + 折叠最新名称」改成按索引读缓冲区，实测 5.95 → 3.59 ms
+  （16,000，1.66×）。这是下一个已确认热点，本轮未做：它每次刷新只调用一次、与翻页成本无关，
+  本轮范围限定在 `execute` 的每页重复筛选与排序。
+- **每页仍是 O(N) 建键 + O(N log N) 键排序**：常数小了 5–6×，形状没变，滚完整档仍然是
+  页数 × 整档成本；本轮没有引入跨页缓存（理由见 §实现与一致性边界）。
+- **调用方跨追加保留页面时的整档写时复制**（上节），本轮未改。
+- **`shuffled` 仍是 ~19 ms/页 @16,000**，它只是不可达的乱序代理；本轮在它上面也有 5.1–5.2×。
+
+### 实现与一致性边界（本轮）
+
+1. 每页对整档做一趟 O(N) 键构建（32 字节 `{startedAt, id, index}`），只排序键，只物化返回页
+   的行；无筛选与仅日期/状态筛选时只为返回页解析项目身份，带项目/关键词筛选时仍需对通过
+   行本地谓词的每种 distinct 上下文解析一次（与基线相同），`estimatedCount` 同基线一样会解析。
+2. 无筛选与带筛选走同一个 helper，删掉了原来 `query.isEmpty` 的双分支和
+   `precedesInDisplayOrder` 自由函数。边界语义逐字保留：版本过期先返回 `nil`；版本有效时
+   `limit <= 0` 返回 `.empty`；无游标且结果集为空返回 `.empty`（计数为 `nil`）；带游标且游标
+   之后没有行时返回 `nil`；此外 `hasMore`、`nextCursor`（改为由 `keys[endIndex - 1]` 构造，
+   去掉 `page.last!` 强解包）与 `totalEstimatedCount`（过滤后行数）不变。
+3. 二分查找的比较逐字保留，只把比较对象从行换成键；`ProjectResolutionMemo` 的语义、解析时机
+   （行本地谓词先判、只在需要项目谓词时解析、带项目/关键词筛选时对通过行本地谓词的每种
+   distinct 上下文解析一次、返回页行由 `makePage` 物化并解析）与关键词整趟只 lowercased 一次
+   的行为不变。
+4. 内存：本轮只测耗时。旧实现的两条路径不同：无筛选路径对 provider 数组做一次整档写时复制
+   再原地排序（16,000 行约 2.9 MB 的拷贝），带筛选路径先把匹配行追加进一个独占的结果数组
+   （最多同样大小）再排序。新实现不再复制整档行数组，只物化返回页的行，并有一个按 provider
+   总行数预留的键数组（32 字节/行，16,000 行约 0.51 MB；预留口径与旧 `matchingSessions` 相同）。
+   没有测分配量或 RSS，因此只声称工作缓冲元素的规模与「每页不再复制整档行数组」，不声称实际
+   内存占用下降。
+
+### 验证范围与独立复核（本轮）
+
+选择 **Module/contract**：改动集中在 `TinyBuddyCore` 的查询服务，公开 API 与协议签名不变，
+唯一生产消费者是 `HistoryQueryController`。执行了：
+
+```sh
+./script/swiftpm.sh test --filter 'FocusSessionQueryTests|FocusSessionQueryPerformanceTests'
+./script/swiftpm.sh test --filter 'HistoryQueryControllerTests|HistoryQueryPerformanceTests|FocusHistoryPresentationConsistencyTests'
+./script/swiftpm.sh test
+git diff --check
+```
+
+没有运行 GUI 回归、`script/regression_gate.sh`、`benchmark_git_refresh.sh` 或
+`release-install`：本轮不涉及 Git 刷新、签名、安装或 Widget，且这些命令会操作外部状态。
+因此证据覆盖查询服务的 CPU 工作量、控制器分页累积与历史列表的功能行为，不代表真实 GUI
+进程的滚动帧率、RSS 或整机能耗。

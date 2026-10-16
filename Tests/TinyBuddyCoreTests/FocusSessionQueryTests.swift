@@ -31,6 +31,27 @@ final class ResolverCallCounter: @unchecked Sendable {
     }
 }
 
+/// Thread-safe provider that records how often it was read. An accepted query
+/// request reads the provider's array exactly once, whatever its query shape.
+final class CountingSessionProvider: @unchecked Sendable {
+    let snapshot: [FocusSession]
+    private let lock = NSLock()
+    private var calls = 0
+
+    init(_ snapshot: [FocusSession]) { self.snapshot = snapshot }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return calls
+    }
+
+    func provide() -> [FocusSession] {
+        lock.lock(); defer { lock.unlock() }
+        calls += 1
+        return snapshot
+    }
+}
+
 final class FocusSessionQueryTests: XCTestCase {
     private let alpha = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
     private let beta = FocusProjectContext(key: "repo.beta", displayName: "Beta")
@@ -1243,6 +1264,183 @@ final class FocusSessionQueryTests: XCTestCase {
         XCTAssertEqual(page.sessions[0].id, idA)
         XCTAssertEqual(page.sessions[1].id, idB)
         XCTAssertEqual(page.sessions[2].id, idC)
+    }
+
+    /// One request reads the provider exactly once and never mutates the array
+    /// it was handed: the pre-key implementation sorted a copy-on-write copy of
+    /// the returned array, and the key implementation indexes that same
+    /// snapshot, so both must leave the caller's array untouched.
+    func testExecuteReadsProviderOnceAndLeavesSnapshotUnchanged() async throws {
+        let start = try date("2026-07-20T10:00:00Z")
+        let rows = [
+            session(project: alpha, day: "2026-07-20", start: start,
+                    end: start.addingTimeInterval(600), status: .ended),
+            session(project: beta, day: "2026-07-20", start: start.addingTimeInterval(60),
+                    status: .active),
+            session(project: gamma, day: "2026-07-20", start: start.addingTimeInterval(120),
+                    end: start.addingTimeInterval(720), status: .ended),
+            session(project: alpha, day: "2026-07-20", start: start.addingTimeInterval(180),
+                    end: start.addingTimeInterval(780), status: .ended)
+        ]
+        let snapshotBefore = rows
+        let provider = CountingSessionProvider(rows)
+        let service = FocusSessionQueryService(sessionProvider: { provider.provide() })
+
+        let query = FocusSessionQuery(status: .ended)
+        let pageResult = await service.execute(query: query, cursor: nil, limit: 2, version: 0)
+        let page = try XCTUnwrap(pageResult)
+        XCTAssertEqual(provider.count, 1, "execute must read the provider exactly once")
+
+        let estimated = await service.estimatedCount(query: query)
+        XCTAssertEqual(estimated, 3)
+        XCTAssertEqual(provider.count, 2, "estimatedCount must read the provider exactly once")
+
+        // The row that matches no filter stays where the caller put it, and
+        // every field of every row survives the query unchanged.
+        XCTAssertEqual(provider.snapshot.count, snapshotBefore.count)
+        for (actual, expected) in zip(provider.snapshot, snapshotBefore) {
+            XCTAssertEqual(actual.id, expected.id)
+            XCTAssertEqual(actual.project, expected.project)
+            XCTAssertEqual(actual.dayIdentifier, expected.dayIdentifier)
+            XCTAssertEqual(actual.startedAt, expected.startedAt)
+            XCTAssertEqual(actual.endedAt, expected.endedAt)
+            XCTAssertEqual(actual.status, expected.status)
+            XCTAssertEqual(actual.lastUserActivityAt, expected.lastUserActivityAt)
+            XCTAssertEqual(actual.lastStateChangeAt, expected.lastStateChangeAt)
+            XCTAssertEqual(actual.pausedTotal, expected.pausedTotal)
+            XCTAssertEqual(actual.currentPauseStartedAt, expected.currentPauseStartedAt)
+            XCTAssertEqual(actual.isManuallyConfirmed, expected.isManuallyConfirmed)
+            XCTAssertEqual(actual.manualRevision, expected.manualRevision)
+            XCTAssertEqual(actual.decisionEvents, expected.decisionEvents)
+            XCTAssertEqual(actual.mode, expected.mode)
+            XCTAssertEqual(actual.ruleVersion, expected.ruleVersion)
+        }
+        XCTAssertEqual(provider.snapshot, snapshotBefore, "the provider array must be unchanged")
+
+        // The page is the matching subset in display order, and every row
+        // equals the provider array value at its key's index.
+        let matchingIndexes = rows.indices
+            .filter { rows[$0].status == .ended }
+            .sorted { rows[$0].startedAt > rows[$1].startedAt }
+        XCTAssertEqual(page.sessions, matchingIndexes.prefix(2).map { provider.snapshot[$0] })
+        XCTAssertEqual(page.sessions.map(\.project), [alpha, gamma])
+        XCTAssertTrue(page.hasMore)
+    }
+
+    /// Two rows may share the exact same sort key (startedAt and id). The cursor
+    /// rule is "strictly after the cursor key", so the page holding one of them
+    /// reports `hasMore`, and the next request returns `nil`: pagination does
+    /// not promise per-row access to rows whose sort key equals the cursor's.
+    func testDuplicateSortKeysFollowTheStrictlyAfterCursorRule() async throws {
+        let start = try date("2026-07-20T10:00:00Z")
+        let sharedID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-0000000000ab"))
+        let rows = [
+            session(project: alpha, day: "2026-07-20", start: start, id: sharedID),
+            session(project: beta, day: "2026-07-20", start: start, id: sharedID)
+        ]
+        let service = makeService(sessions: rows)
+
+        let firstResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 1,
+            version: 0
+        )
+        let first = try XCTUnwrap(firstResult)
+        XCTAssertEqual(first.sessions.count, 1)
+        XCTAssertTrue(first.hasMore)
+        let next = try XCTUnwrap(first.nextCursor)
+        XCTAssertEqual(next.lastStartedAt, start)
+        XCTAssertEqual(next.lastID, sharedID)
+
+        let secondResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: next,
+            limit: 1,
+            version: 0
+        )
+        XCTAssertNil(secondResult, "no row sorts strictly after an identical sort key")
+    }
+
+    /// The display-order tie-break compares `UUID`s byte-wise, which must stay
+    /// equivalent to the documented `id.uuidString` ascending order. The sampled
+    /// ids cover the first-byte boundaries (00/0a/0f/10/9f/a0/f0/ff) where a
+    /// byte-wise and a string-wise comparison would disagree if either side
+    /// changed, plus mid-string (third group 00ff/0100, fourth group 0001) and
+    /// trailing (last group 0100) byte boundaries; the walk then asserts the
+    /// cursor's `id` comparison reaches the same order one row at a time.
+    func testDisplayOrderTieBreakMatchesUUIDStringOrdering() async throws {
+        let start = try date("2026-07-20T10:00:00Z")
+        let uuids = [
+            "00000000-0000-0000-0000-000000000000",
+            "00000000-0000-0000-0000-000000000001",
+            "0a000000-0000-0000-0000-000000000000",
+            "0f000000-0000-0000-0000-000000000000",
+            "10000000-0000-0000-0000-000000000000",
+            "9f000000-0000-0000-0000-000000000000",
+            "a0000000-0000-0000-0000-000000000000",
+            "f0000000-0000-0000-0000-000000000000",
+            // Mid-string and trailing byte boundaries: the comparison must keep
+            // ordering by nibble value beyond the first byte.
+            "00000000-0000-0100-0000-000000000000",
+            "00000000-0000-00ff-0000-000000000000",
+            "00000000-0000-0000-0001-000000000000",
+            "00000000-0000-0000-0000-000000000100",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ].compactMap { UUID(uuidString: $0) }
+        XCTAssertEqual(uuids.count, 13, "fixture ids must parse")
+        XCTAssertEqual(Set(uuids).count, uuids.count, "fixture ids must be unique")
+
+        // A fixed index permutation, so the provider order is neither
+        // ascending nor descending and holds every row exactly once.
+        let providerOrder = [7, 0, 4, 8, 2, 6, 1, 3, 5, 12, 9, 11, 10].map { uuids[$0] }
+        XCTAssertEqual(Set(providerOrder), Set(uuids), "permutation must keep every row")
+        XCTAssertEqual(providerOrder.count, uuids.count, "permutation must keep every row once")
+        let rows = providerOrder.map {
+            session(project: alpha, day: "2026-07-20", start: start, id: $0)
+        }
+        let service = makeService(sessions: rows)
+
+        let expected = uuids.sorted { $0.uuidString < $1.uuidString }
+        let result = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 100,
+            version: 0
+        )
+        let page = try XCTUnwrap(result)
+        XCTAssertEqual(page.sessions.map(\.id), expected)
+        XCTAssertFalse(page.hasMore)
+
+        // One row per page must visit the same order without gaps or repeats.
+        var visited: [UUID] = []
+        var hasMoreFlags: [Bool] = []
+        var cursor: FocusSessionCursor?
+        for _ in 0 ..< uuids.count {
+            let singleResult = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: cursor,
+                limit: 1,
+                version: 0
+            )
+            let single = try XCTUnwrap(singleResult)
+            XCTAssertEqual(single.sessions.count, 1)
+            visited.append(single.sessions[0].id)
+            hasMoreFlags.append(single.hasMore)
+            if single.hasMore {
+                XCTAssertNotNil(single.nextCursor)
+            } else {
+                XCTAssertNil(single.nextCursor)
+            }
+            cursor = single.nextCursor
+        }
+        XCTAssertEqual(visited, expected)
+        XCTAssertEqual(Set(visited).count, expected.count)
+        XCTAssertEqual(
+            hasMoreFlags,
+            Array(repeating: true, count: uuids.count - 1) + [false]
+        )
+        XCTAssertNil(cursor)
     }
 
     // ======================================================================

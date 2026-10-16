@@ -58,6 +58,30 @@ private struct ProjectResolutionMemo {
     }
 }
 
+/// Display-order key for one row of a query pass.
+///
+/// The service sorts these 32-byte keys instead of the `FocusSession` rows
+/// themselves: a row is 177 bytes and holds four reference-counted fields, so
+/// sorting rows costs a copy-on-write copy of the whole snapshot plus retain
+/// and release traffic on every swap, while a key carries only the two sort
+/// components and the row's index in the snapshot.
+private struct DisplayOrderKey {
+    let startedAt: Date
+    let id: UUID
+    let index: Int
+
+    /// The tie-break compares `UUID`s byte-wise, which orders exactly like the
+    /// `id.uuidString` ascending key the display order specifies: canonical
+    /// `uuidString` is fixed-width dashed hex whose digits order like their
+    /// nibble values. `testDisplayOrderTieBreakMatchesUUIDStringOrdering` pins
+    /// that equivalence, including at the hex digit boundaries.
+    @inline(__always)
+    static func precedes(_ a: DisplayOrderKey, _ b: DisplayOrderKey) -> Bool {
+        if a.startedAt != b.startedAt { return a.startedAt > b.startedAt }
+        return a.id < b.id
+    }
+}
+
 /// Concrete actor implementation of `FocusSessionQuerying` that reads
 /// sessions from an in-memory provider on each query.
 public actor FocusSessionQueryService: FocusSessionQuerying {
@@ -96,25 +120,27 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         // when a very large limit is supplied.
         guard limit > 0 else { return .empty }
 
-        // One pass resolves (memoised) and filters the history; the sort then
-        // happens in place, so a query never copies the whole history more than
-        // once, and only the rows of the returned page carry a resolved
-        // project identity.
+        // Every page performs one O(N) key-building pass over the history and
+        // one O(N log N) sort of the 32-byte keys, then materialises only the
+        // returned page's rows. Project identity is resolved while building the
+        // keys only when the query has project predicates (`projectKey` or a
+        // keyword), for each distinct context among the rows that pass the
+        // row-local predicates; the returned page's rows are resolved in
+        // `makePage`. Nothing is cached across pages: each request reads the
+        // provider again, so no page can observe a stale history and no extra
+        // full array is kept alive between requests.
         var resolution = ProjectResolutionMemo()
-        var sorted: [FocusSession]
-        if query.isEmpty {
-            // No filter constrains the result set, so the page is a slice of
-            // the history in display order. Sorting the provider's own value in
-            // place keeps copy-on-write from mutating the provider and avoids
-            // materialising a second full array on every page request.
-            sorted = sessionProvider()
-            sorted.sort(by: Self.precedesInDisplayOrder)
-        } else {
-            sorted = matchingSessions(query: query, resolution: &resolution)
-            sorted.sort(by: Self.precedesInDisplayOrder)
-        }
+        let sessions = sessionProvider()
+        var keys = matchingKeys(query: query, in: sessions, resolution: &resolution)
+        keys.sort(by: DisplayOrderKey.precedes)
 
-        return makePage(from: sorted, cursor: cursor, limit: limit, resolution: &resolution)
+        return makePage(
+            from: sessions,
+            keys: keys,
+            cursor: cursor,
+            limit: limit,
+            resolution: &resolution
+        )
     }
 
     public func projects(version: Int) async -> [FocusProjectContext]? {
@@ -145,7 +171,7 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
     public func estimatedCount(query: FocusSessionQuery) async -> Int {
         if query.isEmpty { return sessionProvider().count }
         var resolution = ProjectResolutionMemo()
-        return matchingSessions(query: query, resolution: &resolution).count
+        return matchingKeys(query: query, in: sessionProvider(), resolution: &resolution).count
     }
 
     /// Bumps the version so the next fetch reflects the changes. The
@@ -157,17 +183,10 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
 
     // MARK: - Helpers
 
-    private static func precedesInDisplayOrder(_ a: FocusSession, _ b: FocusSession) -> Bool {
-        if a.startedAt != b.startedAt {
-            return a.startedAt > b.startedAt
-        }
-        return a.id.uuidString < b.id.uuidString
-    }
-
     /// Locates the continuation point in display order and materialises the
     /// requested page.
     ///
-    /// Cursor continuity is unchanged from the filtered-array implementation:
+    /// Cursor continuity is unchanged from the row-array implementation:
     /// the binary search finds the first row that sorts strictly after the
     /// cursor key, and `nil` is returned only when no row sorts strictly after
     /// it (the search lands at or past the end of the current result set), which
@@ -179,12 +198,13 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
     /// accumulated list until the next `reload()`, which is true of every
     /// loaded row and not specific to the cursor.
     private func makePage(
-        from sorted: [FocusSession],
+        from sessions: [FocusSession],
+        keys: [DisplayOrderKey],
         cursor: FocusSessionCursor?,
         limit: Int,
         resolution: inout ProjectResolutionMemo
     ) -> FocusSessionQueryPage? {
-        let totalCount = sorted.count
+        let totalCount = keys.count
 
         // Determine the start index based on the cursor.
         let startIndex: Int
@@ -195,10 +215,10 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
             var upperBound = totalCount
             while lowerBound < upperBound {
                 let middle = lowerBound + (upperBound - lowerBound) / 2
-                let session = sorted[middle]
-                let comesBeforeOrAtCursor = session.startedAt > cursor.lastStartedAt
-                    || (session.startedAt == cursor.lastStartedAt
-                        && session.id.uuidString <= cursor.lastID.uuidString)
+                let key = keys[middle]
+                let comesBeforeOrAtCursor = key.startedAt > cursor.lastStartedAt
+                    || (key.startedAt == cursor.lastStartedAt
+                        && key.id <= cursor.lastID)
                 if comesBeforeOrAtCursor {
                     lowerBound = middle + 1
                 } else {
@@ -231,7 +251,12 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         let endIndex = startIndex + pageCount
         var page: [FocusSession] = []
         page.reserveCapacity(pageCount)
-        for session in sorted[startIndex ..< endIndex] {
+        // Only the requested page's rows leave the provider array, and only
+        // those rows are resolved in this step and copied into the page. Rows
+        // that a project or keyword predicate had to inspect were already
+        // resolved while the keys were built.
+        for offset in startIndex ..< endIndex {
+            let session = sessions[keys[offset].index]
             let project = resolution.resolve(session.project, using: projectResolver)
             if project == session.project {
                 page.append(session)
@@ -244,7 +269,10 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         let hasMore = endIndex < totalCount
 
         let nextCursor: FocusSessionCursor? = hasMore
-            ? FocusSessionCursor(lastStartedAt: page.last!.startedAt, lastID: page.last!.id)
+            ? FocusSessionCursor(
+                lastStartedAt: keys[endIndex - 1].startedAt,
+                lastID: keys[endIndex - 1].id
+            )
             : nil
 
         return FocusSessionQueryPage(
@@ -255,35 +283,49 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         )
     }
 
-    /// Resolves and filters the whole history in one pass. Rows keep their
-    /// stored project identity here; only `makePage` resolves the returned rows.
-    private func matchingSessions(
+    /// Filters the whole history in one pass and emits a display-order key per
+    /// surviving row. The keys keep the row's index instead of the row itself,
+    /// so neither this pass nor the sort copies rows. A `projectKey` or keyword
+    /// query resolves each distinct context among the rows that pass the
+    /// row-local predicates, exactly like the row-array implementation did; the
+    /// returned page's rows are materialised and resolved by `makePage`.
+    private func matchingKeys(
         query: FocusSessionQuery,
+        in sessions: [FocusSession],
         resolution: inout ProjectResolutionMemo
-    ) -> [FocusSession] {
+    ) -> [DisplayOrderKey] {
         // Day bounds and status are row-local and cheap, so they are tested
         // before the memoised project lookup; the keyword is normalised once
         // for the whole pass instead of once per session.
         let loweredKeyword = query.keyword.flatMap { $0.isEmpty ? nil : $0.lowercased() }
         let needsProjectPredicates = query.projectKey != nil || loweredKeyword != nil
-        let sessions = sessionProvider()
-        var result: [FocusSession] = []
-        result.reserveCapacity(sessions.count)
-        for session in sessions {
-            if let dayStart = query.dayStart, session.dayIdentifier < dayStart { continue }
-            if let dayEnd = query.dayEnd, session.dayIdentifier > dayEnd { continue }
-            if let status = query.status, session.status != status { continue }
+        var keys: [DisplayOrderKey] = []
+        // Iterating the rows by value (`for session in sessions`) would copy
+        // ~177 bytes and retain/release each row's reference-counted fields per
+        // row, which is the dominant cost of this pass. Reading only the fields
+        // the predicates and the key need out of the buffer avoids that copy.
+        sessions.withUnsafeBufferPointer { buffer in
+            keys.reserveCapacity(buffer.count)
+            for index in buffer.indices {
+                if let dayStart = query.dayStart, buffer[index].dayIdentifier < dayStart { continue }
+                if let dayEnd = query.dayEnd, buffer[index].dayIdentifier > dayEnd { continue }
+                if let status = query.status, buffer[index].status != status { continue }
 
-            if needsProjectPredicates {
-                let project = resolution.resolve(session.project, using: projectResolver)
-                guard resolution.matchesFilters(
-                    project,
-                    query: query,
-                    loweredKeyword: loweredKeyword
-                ) else { continue }
+                if needsProjectPredicates {
+                    let project = resolution.resolve(buffer[index].project, using: projectResolver)
+                    guard resolution.matchesFilters(
+                        project,
+                        query: query,
+                        loweredKeyword: loweredKeyword
+                    ) else { continue }
+                }
+                keys.append(DisplayOrderKey(
+                    startedAt: buffer[index].startedAt,
+                    id: buffer[index].id,
+                    index: index
+                ))
             }
-            result.append(session)
         }
-        return result
+        return keys
     }
 }
