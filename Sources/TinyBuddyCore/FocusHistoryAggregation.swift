@@ -575,10 +575,23 @@ public struct FocusHistoryAggregationCache: Sendable {
             goalMinutes: goal,
             goalCompletionRate: rate,
             isGoalMet: rate.map { $0 >= 1 },
-            contributingSessionIDs: accumulator?.sessionIDs.sorted {
-                $0.uuidString < $1.uuidString
-            } ?? []
+            contributingSessionIDs: Self.identifiersSortedByUUIDString(accumulator?.sessionIDs ?? [])
         )
+    }
+
+    /// Sorts stable session identifiers by their `uuidString` key. The key is
+    /// built once per identifier instead of twice per comparison, which is the
+    /// dominant cost of a history snapshot with many sessions per day. Ordering
+    /// is identical to `sorted { $0.uuidString < $1.uuidString }` because
+    /// `uuidString` is injective and the same strings are compared.
+    private static func identifiersSortedByUUIDString<S: Sequence>(_ identifiers: S) -> [UUID]
+    where S.Element == UUID {
+        let elements = Array(identifiers)
+        guard elements.count > 1 else { return elements }
+        return elements
+            .map { (key: $0.uuidString, id: $0) }
+            .sorted { $0.key < $1.key }
+            .map(\.id)
     }
 
     private func makeWeek(
@@ -662,9 +675,7 @@ public struct FocusHistoryAggregationCache: Sendable {
                 focusDuration: bucket.focusDuration,
                 completedSessionCount: bucket.completedSessionCount,
                 focusShare: totalDuration > 0 ? bucket.focusDuration / totalDuration : 0,
-                contributingSessionIDs: bucket.displayCandidates.keys.sorted {
-                    $0.uuidString < $1.uuidString
-                }
+                contributingSessionIDs: Self.identifiersSortedByUUIDString(bucket.displayCandidates.keys)
             )
         }
         .sorted {
@@ -698,11 +709,11 @@ public struct FocusHistoryAggregationCache: Sendable {
         }
     }
 
-    private static var calendar: Calendar {
+    private static let calendar: Calendar = {
         var calendar = Calendar(identifier: .iso8601)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         return calendar
-    }
+    }()
 
     private static func date(for identifier: String) throws -> Date {
         let components = identifier.split(separator: "-", omittingEmptySubsequences: false)

@@ -300,6 +300,47 @@ final class FocusHistoryAggregationTests: XCTestCase {
         XCTAssertNil(snapshot.currentGoalStreakDays)
     }
 
+    func testContributingSessionIdentifiersUseAscendingUUIDStringOrder() throws {
+        let project = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
+        let day = "2026-07-21"
+        let dayStart = try date("2026-07-21T01:00:00Z")
+        let firstID = try XCTUnwrap(UUID(uuidString: "11111111-1111-1111-1111-111111111111"))
+        let secondID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
+        let thirdID = try XCTUnwrap(UUID(uuidString: "1f0e0d0c-0b0a-4908-8706-050403020100"))
+        let fourthID = try XCTUnwrap(UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff"))
+        let liveID = try XCTUnwrap(UUID(uuidString: "22222222-2222-2222-2222-222222222222"))
+        let startedAt = dayStart.addingTimeInterval(60)
+        let ended = [firstID, secondID, thirdID, fourthID].enumerated().map { index, id in
+            session(
+                project: project,
+                day: day,
+                start: startedAt.addingTimeInterval(TimeInterval(index * 600)),
+                end: startedAt.addingTimeInterval(TimeInterval(index * 600 + 300)),
+                id: id
+            )
+        }
+        let live = FocusSession(
+            id: liveID,
+            project: project,
+            dayIdentifier: day,
+            startedAt: startedAt.addingTimeInterval(3_600),
+            status: .active,
+            lastUserActivityAt: startedAt.addingTimeInterval(3_600),
+            lastStateChangeAt: startedAt.addingTimeInterval(3_600)
+        )
+        let snapshot = try FocusHistoryAggregationCache(sessions: ended + [live]).snapshot(
+            for: query(reference: day, goals: [day: 300]),
+            now: try date("2026-07-21T05:00:00Z")
+        )
+
+        let expected = [firstID, secondID, thirdID, fourthID, liveID].sorted { $0.uuidString < $1.uuidString }
+        XCTAssertEqual(expected.count, 5)
+        XCTAssertEqual(snapshot.recentDays.last?.contributingSessionIDs, expected)
+        let distribution = try XCTUnwrap(snapshot.currentWeek.projectDistribution)
+        XCTAssertEqual(distribution.count, 1)
+        XCTAssertEqual(distribution.first?.contributingSessionIDs, expected)
+    }
+
     private func query(
         reference: String,
         goals: [String: Int] = [:],
