@@ -226,6 +226,422 @@ final class BuildAndRunScriptTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: oldWidget.path))
     }
 
+    func testDailyInstallerPreflightIgnoresThisBuildsOwnWidgetRegistration() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let canonicalizer = try XCTUnwrap(
+            shellFunction(named: "canonical_filesystem_path", in: installer)
+        )
+        let registeredPaths = try XCTUnwrap(shellFunction(named: "registered_widget_paths", in: installer))
+        let preflight = try XCTUnwrap(shellFunction(named: "verify_widget_registration_preflight", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerBuildArtifactTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        // APP_BUNDLE is reached through a symlinked alias while the recorded registry
+        // rows carry the physical path, so both sides have to be normalized.
+        let physicalRoot = temporaryDirectory.appendingPathComponent("physical")
+        let aliasRoot = temporaryDirectory.appendingPathComponent("alias")
+        let buildApp = aliasRoot.appendingPathComponent("DerivedData/Build/Products/Debug/TinyBuddy.app")
+        let buildArtifactRecord = physicalRoot
+            .appendingPathComponent("DerivedData/Build/Products/Debug/TinyBuddy.app")
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let installedApp = physicalRoot.appendingPathComponent("Applications/TinyBuddy.app")
+        let installedAppex = installedApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        try FileManager.default.createDirectory(at: buildArtifactRecord, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: aliasRoot, withDestinationURL: physicalRoot)
+        let fakePlugInKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        let commandLog = temporaryDirectory.appendingPathComponent("pluginkit-commands.log")
+        try writeExecutable(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >>"$PLUGINKIT_COMMAND_LOG"
+            case "$1" in
+              -m)
+                while IFS= read -r row; do
+                  if [ -z "$row" ]; then
+                    continue
+                  fi
+                  printf 'record-x\\tmetadata-x\\t%s\\n' "$row"
+                done <"$PLUGINKIT_RECORDS"
+                ;;
+              *) exit 64 ;;
+            esac
+            """,
+            to: fakePlugInKit
+        )
+
+        func run(
+            records: [String],
+            existingInstall: Bool
+        ) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
+            let recordsFile = temporaryDirectory.appendingPathComponent("records-\(UUID().uuidString).txt")
+            try Data(records.map { "\($0)\n" }.joined().utf8).write(to: recordsFile)
+            if existingInstall {
+                try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+            }
+            return try runBash("""
+            set -euo pipefail
+            PLUGINKIT_BIN=\(shellQuote(fakePlugInKit.path))
+            PLUGINKIT_RECORDS=\(shellQuote(recordsFile.path))
+            PLUGINKIT_COMMAND_LOG=\(shellQuote(commandLog.path))
+            export PLUGINKIT_RECORDS PLUGINKIT_COMMAND_LOG
+            WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+            BUILD_APP=\(shellQuote(buildApp.path))
+            INSTALL_APP=\(shellQuote(installedApp.path))
+            WIDGET_REGISTRATION_PRESERVED=0
+            fail() { echo "$*" >&2; return 1; }
+            \(canonicalizer)
+            \(registeredPaths)
+            \(preflight)
+            if verify_widget_registration_preflight; then
+              printf 'preflight=accepted preserved=%s\n' "$WIDGET_REGISTRATION_PRESERVED"
+            else
+              printf 'preflight=rejected preserved=%s\n' "$WIDGET_REGISTRATION_PRESERVED"
+            fi
+            """)
+        }
+
+        // Only the build product is registered and nothing is installed yet: the clean
+        // install must proceed without claiming an existing installation record.
+        let cleanInstall = try run(records: [buildArtifactRecord.path], existingInstall: false)
+        XCTAssertEqual(cleanInstall.exitCode, 0, cleanInstall.standardError)
+        XCTAssertEqual(cleanInstall.standardOutput, "preflight=accepted preserved=0\n")
+        XCTAssertTrue(cleanInstall.standardError.contains(
+            "忽略本次构建产物的 WidgetKit 注册记录"
+        ))
+
+        // The installed app already has its own unique record: it is preserved even
+        // though the build product is registered alongside it.
+        let preserved = try run(
+            records: [buildArtifactRecord.path, installedAppex.path],
+            existingInstall: true
+        )
+        XCTAssertEqual(preserved.exitCode, 0, preserved.standardError)
+        XCTAssertEqual(preserved.standardOutput, "preflight=accepted preserved=1\n")
+        XCTAssertTrue(preserved.standardError.contains("忽略本次构建产物的 WidgetKit 注册记录"))
+
+        // The judgment itself never touches the registry.
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+        XCTAssertFalse(commands.contains("-a "))
+        XCTAssertFalse(commands.contains("-r "))
+        XCTAssertTrue(commands.split(separator: "\n").allSatisfy { $0.hasPrefix("-m ") })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: buildArtifactRecord.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: installedApp.path))
+
+        // The preflight and the post-install uniqueness check share this one view.
+        XCTAssertTrue(installer.contains("paths=\"$(registered_widget_paths)\""))
+        XCTAssertTrue(installer.contains("registered_after_install=\"$(registered_widget_paths)\""))
+    }
+
+    func testDailyInstallerPreflightKeepsFailClosedForOtherRecordsAlongsideTheBuildArtifact() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let canonicalizer = try XCTUnwrap(
+            shellFunction(named: "canonical_filesystem_path", in: installer)
+        )
+        let registeredPaths = try XCTUnwrap(shellFunction(named: "registered_widget_paths", in: installer))
+        let preflight = try XCTUnwrap(shellFunction(named: "verify_widget_registration_preflight", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerBuildArtifactTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let buildApp = temporaryDirectory.appendingPathComponent("DerivedData/Build/Products/Debug/TinyBuddy.app")
+        let buildArtifactRecord = buildApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let installedApp = temporaryDirectory.appendingPathComponent("Applications/TinyBuddy.app")
+        let installedAppex = installedApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        try FileManager.default.createDirectory(at: buildArtifactRecord, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+        let fakePlugInKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        try writeExecutable(
+            """
+            #!/bin/bash
+            while IFS= read -r row; do
+              if [ -z "$row" ]; then
+                continue
+              fi
+              printf 'record-x\\tmetadata-x\\t%s\\n' "$row"
+            done <"$PLUGINKIT_RECORDS"
+            """,
+            to: fakePlugInKit
+        )
+
+        func run(records: [String]) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
+            let recordsFile = temporaryDirectory.appendingPathComponent("records-\(UUID().uuidString).txt")
+            try Data(records.map { "\($0)\n" }.joined().utf8).write(to: recordsFile)
+            return try runBash("""
+            set -euo pipefail
+            PLUGINKIT_BIN=\(shellQuote(fakePlugInKit.path))
+            PLUGINKIT_RECORDS=\(shellQuote(recordsFile.path))
+            export PLUGINKIT_RECORDS
+            WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+            BUILD_APP=\(shellQuote(buildApp.path))
+            INSTALL_APP=\(shellQuote(installedApp.path))
+            WIDGET_REGISTRATION_PRESERVED=0
+            fail() { echo "$*" >&2; return 1; }
+            \(canonicalizer)
+            \(registeredPaths)
+            \(preflight)
+            if verify_widget_registration_preflight; then
+              printf 'preflight=accepted preserved=%s\n' "$WIDGET_REGISTRATION_PRESERVED"
+            else
+              printf 'preflight=rejected preserved=%s\n' "$WIDGET_REGISTRATION_PRESERVED"
+            fi
+            """)
+        }
+
+        // The build product is the only record while an install exists: the missing
+        // installation record must still fail closed.
+        let missing = try run(records: [buildArtifactRecord.path])
+        XCTAssertEqual(missing.exitCode, 0, missing.standardError)
+        XCTAssertEqual(missing.standardOutput, "preflight=rejected preserved=0\n")
+        XCTAssertTrue(missing.standardError.contains("注册状态不唯一或路径不匹配"))
+
+        // A stale record and a duplicated installed record stay blocking even though
+        // the build product is filtered out.
+        for records in [
+            [buildArtifactRecord.path, installedAppex.path, "/tmp/stale-tinybuddy-widget.appex"],
+            [buildArtifactRecord.path, installedAppex.path, installedAppex.path]
+        ] {
+            let result = try run(records: records)
+            XCTAssertEqual(result.exitCode, 0, result.standardError)
+            XCTAssertEqual(result.standardOutput, "preflight=rejected preserved=0\n")
+            XCTAssertTrue(result.standardError.contains("注册状态不唯一或路径不匹配"))
+        }
+    }
+
+    func testDailyInstallerPreflightKeepsFailClosedForASymlinkDotDotAliasOfTheBuildArtifact() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        let canonicalizer = try XCTUnwrap(
+            shellFunction(named: "canonical_filesystem_path", in: installer)
+        )
+        let registeredPaths = try XCTUnwrap(shellFunction(named: "registered_widget_paths", in: installer))
+        let preflight = try XCTUnwrap(shellFunction(named: "verify_widget_registration_preflight", in: installer))
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerDotDotAliasTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        // A stale registration can reach this build's artifact only after textual folding
+        // of `..` through a symlinked alias. The path it physically denotes does not exist
+        // at all, so only physical resolution can tell it apart from the build artifact.
+        // The symlink is created here instead of relying on the host's /var layout so the
+        // counterexample stays deterministic.
+        let dotDotAliasTarget = temporaryDirectory.appendingPathComponent("nested/deep")
+        let dotDotAlias = temporaryDirectory.appendingPathComponent("deep-alias")
+        let buildArtifactRelativePath = "DerivedData/Build/Products/Debug/TinyBuddy.app/Contents/PlugIns/TinyBuddyWidgetExtension.appex"
+        let buildArtifactRecord = temporaryDirectory.appendingPathComponent(buildArtifactRelativePath)
+        let installedApp = temporaryDirectory.appendingPathComponent("Applications/TinyBuddy.app")
+        let installedAppex = installedApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        try FileManager.default.createDirectory(at: dotDotAliasTarget, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: dotDotAlias, withDestinationURL: dotDotAliasTarget)
+        try FileManager.default.createDirectory(at: buildArtifactRecord, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: installedAppex, withIntermediateDirectories: true)
+
+        // `<temp>/deep-alias/..` textually folds to `<temp>` but physically resolves to
+        // `<temp>/nested`, so this record must not be mistaken for the build artifact.
+        let dotDotAliasRecord = "\(dotDotAlias.path)/../\(buildArtifactRelativePath)"
+        XCTAssertEqual(
+            URL(fileURLWithPath: dotDotAliasRecord).standardized.path,
+            buildArtifactRecord.path,
+            "the textual fold of `..` is what makes this record look like the build artifact"
+        )
+        let physicalTarget = temporaryDirectory
+            .appendingPathComponent("nested")
+            .appendingPathComponent(buildArtifactRelativePath)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: physicalTarget.path),
+            "premise: the record denotes a path that does not physically exist"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: buildArtifactRecord.path))
+
+        let fakePlugInKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+        let commandLog = temporaryDirectory.appendingPathComponent("pluginkit-commands.log")
+        try writeExecutable(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >>"$PLUGINKIT_COMMAND_LOG"
+            case "$1" in
+              -m)
+                while IFS= read -r row; do
+                  if [ -z "$row" ]; then
+                    continue
+                  fi
+                  printf 'record-x\\tmetadata-x\\t%s\n' "$row"
+                done <"$PLUGINKIT_RECORDS"
+                ;;
+              *) exit 64 ;;
+            esac
+            """,
+            to: fakePlugInKit
+        )
+
+        func run(
+            records: [String],
+            canonicalFilesystemPath: String
+        ) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
+            let recordsFile = temporaryDirectory.appendingPathComponent("records-\(UUID().uuidString).txt")
+            try Data(records.map { "\($0)\n" }.joined().utf8).write(to: recordsFile)
+            return try runBash("""
+            set -euo pipefail
+            PLUGINKIT_BIN=\(shellQuote(fakePlugInKit.path))
+            PLUGINKIT_RECORDS=\(shellQuote(recordsFile.path))
+            PLUGINKIT_COMMAND_LOG=\(shellQuote(commandLog.path))
+            export PLUGINKIT_RECORDS PLUGINKIT_COMMAND_LOG
+            WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+            BUILD_APP=\(shellQuote(temporaryDirectory.appendingPathComponent("DerivedData/Build/Products/Debug/TinyBuddy.app").path))
+            INSTALL_APP=\(shellQuote(installedApp.path))
+            WIDGET_REGISTRATION_PRESERVED=0
+            fail() { echo "$*" >&2; return 1; }
+            \(canonicalFilesystemPath)
+            \(registeredPaths)
+            \(preflight)
+            if verify_widget_registration_preflight; then
+              printf 'preflight=accepted preserved=%s\n' "$WIDGET_REGISTRATION_PRESERVED"
+            else
+              printf 'preflight=rejected preserved=%s\n' "$WIDGET_REGISTRATION_PRESERVED"
+            fi
+            """)
+        }
+
+        // An existing install with exactly one recorded path: the stale dot-dot alias must
+        // keep failing closed instead of being filtered out as this build's artifact.
+        let rejected = try run(
+            records: [dotDotAliasRecord, installedAppex.path],
+            canonicalFilesystemPath: canonicalizer
+        )
+        XCTAssertEqual(rejected.exitCode, 0, rejected.standardError)
+        XCTAssertEqual(rejected.standardOutput, "preflight=rejected preserved=0\n")
+        XCTAssertTrue(rejected.standardError.contains("注册状态不唯一或路径不匹配"))
+        XCTAssertFalse(rejected.standardError.contains("忽略本次构建产物的 WidgetKit 注册记录"))
+
+        // Reconstructing the pre-fix helper (a logical `cd` that folds `..` textually)
+        // proves the counterexample is real and that this fix is what blocks it. The
+        // assertion also pins the physical form: reverting the script breaks it here.
+        let logicalDirectoryChangeVariant = canonicalizer.replacingOccurrences(
+            of: "cd -P -- \"$path\"",
+            with: "cd \"$path\""
+        )
+        XCTAssertNotEqual(
+            logicalDirectoryChangeVariant,
+            canonicalizer,
+            "canonical_filesystem_path must resolve its ancestor with `cd -P --`"
+        )
+        let beforeFix = try run(
+            records: [dotDotAliasRecord, installedAppex.path],
+            canonicalFilesystemPath: logicalDirectoryChangeVariant
+        )
+        XCTAssertEqual(beforeFix.exitCode, 0, beforeFix.standardError)
+        XCTAssertEqual(beforeFix.standardOutput, "preflight=accepted preserved=1\n")
+        XCTAssertTrue(beforeFix.standardError.contains("忽略本次构建产物的 WidgetKit 注册记录"))
+
+        // The judgment never mutates the registry.
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+        XCTAssertFalse(commands.contains("-a "))
+        XCTAssertFalse(commands.contains("-r "))
+        XCTAssertTrue(commands.split(separator: "\n").allSatisfy { $0.hasPrefix("-m ") })
+    }
+
+    func testDailyInstallerPostInstallRegistrationCheckFailsClosedWhenTheRecordNeverAppears() throws {
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let installer = try String(
+            contentsOf: repositoryURL.appendingPathComponent("script/tb-install.sh"),
+            encoding: .utf8
+        )
+        // The post-install check is inline script text rather than a function, so the real
+        // `pluginkit -a` / `lsregister` calls it follows cannot be executed here without
+        // touching the host LaunchServices/PlugInKit registry. This runs the literal guard
+        // text extracted from the script against a stub query instead, and separately pins
+        // that the guard still follows the registration attempt in the script.
+        let guardText = try XCTUnwrap(
+            scriptSection(
+                startingAt: "registered_after_install=\"$(registered_widget_paths)\"",
+                endingBefore: "ok \"已安装: $INSTALL_APP\"",
+                in: installer
+            )
+        )
+        XCTAssertTrue(guardText.contains("[ \"$registered_count\" -eq 1 ]"))
+        XCTAssertTrue(guardText.contains(
+            "[ \"$registered_after_install\" = \"$INSTALL_APP/Contents/PlugIns/TinyBuddyWidgetExtension.appex\" ]"
+        ))
+        let registrationAttempt = "\"$PLUGINKIT_BIN\" -a \"$INSTALL_APP/Contents/PlugIns/\"*.appex"
+        XCTAssertTrue(installer.contains(registrationAttempt))
+        let registrationAttemptOffset = try XCTUnwrap(installer.range(of: registrationAttempt)?.lowerBound)
+        let guardOffset = try XCTUnwrap(installer.range(of: guardText)?.lowerBound)
+        XCTAssertLessThan(
+            registrationAttemptOffset,
+            guardOffset,
+            "the post-install uniqueness check must follow the registration attempt"
+        )
+
+        let temporaryDirectory = try makeTemporaryDirectory(named: "TinyBuddyInstallerPostInstallGuardTests")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let installedApp = temporaryDirectory.appendingPathComponent("Applications/TinyBuddy.app")
+        let installedAppex = installedApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+
+        // `pluginkit -a` is gone here, so the stub only reports what a query would answer
+        // after a successful registration that failed to create the target record.
+        func run(records: [String]) throws -> (exitCode: Int32, standardOutput: String, standardError: String) {
+            let reporting = (records.map { "printf '%s\\n' \(shellQuote($0))" } + [":"]).joined(separator: "\n")
+            return try runBash("""
+            set -euo pipefail
+            INSTALL_APP=\(shellQuote(installedApp.path))
+            post_install_failed=0
+            fail() { printf '%s\n' "$*" >&2; post_install_failed=1; }
+            registered_widget_paths() {
+            \(reporting)
+            }
+            \(guardText)
+            if [ "$post_install_failed" -eq 0 ]; then
+              printf 'post-install=accepted\n'
+            else
+              printf 'post-install=rejected\n'
+            fi
+            """)
+        }
+
+        // The registration command succeeded but the target record never appears: the
+        // install must fail instead of reporting success on an empty registry.
+        let neverAppears = try run(records: [])
+        XCTAssertEqual(neverAppears.exitCode, 0, neverAppears.standardError)
+        XCTAssertEqual(neverAppears.standardOutput, "post-install=rejected\n")
+        XCTAssertTrue(neverAppears.standardError.contains("安装后 WidgetKit 注册未唯一指向当前 App"))
+
+        let unique = try run(records: [installedAppex.path])
+        XCTAssertEqual(unique.exitCode, 0, unique.standardError)
+        XCTAssertEqual(unique.standardOutput, "post-install=accepted\n")
+
+        for records in [[installedAppex.path, installedAppex.path], ["/tmp/stale-tinybuddy-widget.appex"]] {
+            let rejected = try run(records: records)
+            XCTAssertEqual(rejected.exitCode, 0, rejected.standardError)
+            XCTAssertEqual(rejected.standardOutput, "post-install=rejected\n")
+        }
+    }
+
     func testDailyInstallerRestoresPreviousAppWhenInstallFailsBeforeCommit() throws {
         let repositoryURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -920,6 +1336,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         INSTALLED_APP=\(shellQuote(installedApp.path))
         WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
         registered_widget_paths() { return 0; }
+        \(try widgetInstallRegistrationFunctions())
         \(preflightFunction)
         verify_widget_registration_preflight
         printf 'clean-install-safe\n'
@@ -1792,6 +2209,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         RELEASE_WIDGET_REGISTRATION_PRESERVED=0
         find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
         registered_widget_paths() { printf '%s\n' \(shellQuote(appex.path)); }
+        \(try widgetInstallRegistrationFunctions())
         \(registrationFunction)
         register_widget_extension \(shellQuote(app.path))
         printf 'preserved=%s\n' "$RELEASE_WIDGET_REGISTRATION_PRESERVED"
@@ -1835,6 +2253,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         export FAKE_PLUGIN_COMMAND_LOG
         find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
         registered_widget_paths() { return 0; }
+        \(try widgetInstallRegistrationFunctions())
         \(registrationFunction)
         register_widget_extension \(shellQuote(app.path)) 1
         """)
@@ -1875,6 +2294,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         export FAKE_PLUGIN_COMMAND_LOG
         find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
         registered_widget_paths() { return 0; }
+        \(try widgetInstallRegistrationFunctions())
         \(registrationFunction)
         register_widget_extension \(shellQuote(app.path))
         """)
@@ -1914,6 +2334,7 @@ final class BuildAndRunScriptTests: XCTestCase {
         export FAKE_PLUGIN_COMMAND_LOG
         find_widget_extension() { printf '%s\n' \(shellQuote(appex.path)); }
         registered_widget_paths() { printf '%s\n' /tmp/stale.appex; }
+        \(try widgetInstallRegistrationFunctions())
         \(registrationFunction)
         register_widget_extension \(shellQuote(app.path))
         """)
@@ -2286,6 +2707,12 @@ final class BuildAndRunScriptTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/TinyBuddy/TinyBuddyApp.swift")
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func widgetInstallRegistrationFunctions() throws -> String {
+        try ["canonical_filesystem_path", "registered_install_widget_paths"]
+            .map { try XCTUnwrap(shellFunction(named: $0, in: try buildAndRunScript())) }
+            .joined(separator: "\n")
     }
 
     private func shellFunction(named name: String, in script: String) -> String? {

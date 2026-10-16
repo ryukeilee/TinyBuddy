@@ -978,7 +978,7 @@ register_widget_extension() {
     return 1
   fi
 
-  registered_paths="$(registered_widget_paths)" || return $?
+  registered_paths="$(registered_install_widget_paths "$appex")" || return $?
   registered_count="$(printf '%s\n' "$registered_paths" | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }')"
   if [ "$registered_count" -eq 1 ] && [ "$registered_paths" = "$appex" ]; then
     RELEASE_WIDGET_REGISTRATION_PRESERVED=1
@@ -1000,7 +1000,7 @@ register_widget_extension() {
 
   deadline=$((SECONDS + WIDGET_RUNTIME_TIMEOUT))
   while [ "$SECONDS" -le "$deadline" ]; do
-    registered_paths="$(registered_widget_paths)" || return $?
+    registered_paths="$(registered_install_widget_paths "$appex")" || return $?
     registered_count="$(printf '%s\n' "$registered_paths" | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }')"
     if [ "$registered_count" -eq 1 ] && [ "$registered_paths" = "$appex" ]; then
       echo "registered unique widget extension: $appex"
@@ -1066,6 +1066,109 @@ registered_widget_paths() {
       '
 }
 
+# PlugInKit reports real paths, while a user-supplied
+# TINYBUDDY_DERIVED_DATA_DIR (or TMPDIR) may still carry a /var -> /private/var
+# style alias. Both sides of a registration comparison are therefore normalized
+# the same way: the deepest existing ancestor is resolved with `pwd -P` and the
+# remaining components are re-appended verbatim.
+#
+# The ancestor must be entered with `cd -P --`, not plain `cd`: bash's `cd` is
+# logical by default, collapsing `..` textually before following symlinks, so
+# `/var/../Users/...` (/var is a symlink to /private/var) would collapse to
+# `/Users/...` and let a stale registration that does not physically exist
+# impersonate this build's artifact and get excluded. `-P` forces physical
+# resolution (symlinks first, then `..`) and `--` keeps a leading-dash path from
+# being read as a cd option.
+#
+# Safety direction: prefer a missed exclusion over a wrong one. A record is
+# excluded only when physical equivalence is proven; failures to resolve, an
+# inaccessible path, a nonexistent path whose remaining components still carry
+# `..`/`.`, and dangling symlinks all fall back to the literal string, so they
+# are not equal to the build artifact and stay fail-closed.
+canonical_filesystem_path() {
+  local path="${1:-}"
+  local parent
+  local leaf
+  local suffix=""
+  local resolved
+
+  [ -n "$path" ] || return 0
+  while [ ! -e "$path" ] && [ ! -L "$path" ]; do
+    parent="$(/usr/bin/dirname "$path")"
+    if [ "$parent" = "$path" ]; then
+      break
+    fi
+    leaf="$(/usr/bin/basename "$path")"
+    suffix="/$leaf$suffix"
+    path="$parent"
+  done
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    # -P forces physical resolution; on failure resolved stays empty and the
+    # literal path (and any residual suffix) is returned unchanged.
+    resolved="$(cd -P -- "$path" 2>/dev/null && /bin/pwd -P)" || resolved=""
+    if [ -n "$resolved" ]; then
+      path="$resolved"
+    fi
+  fi
+  if [ "$path" = "/" ]; then
+    printf '%s\n' "/${suffix#/}"
+  else
+    printf '%s\n' "${path%/}$suffix"
+  fi
+}
+
+# Installation decisions must ignore the Widget registration that Xcode's
+# RegisterWithLaunchServices build step creates for this build's own DerivedData
+# artifact: that record is a build by-product, not installation state. Only an
+# exact, physically normalized full-path match against the build artifact is
+# excluded - never a basename, suffix, or DerivedData substring - and every
+# other record keeps its original order, duplicates included.
+# `registered_widget_paths` keeps reporting the complete raw registry for the
+# rollback paths. When the registration target is the build artifact itself (the
+# local run modes register `$APP_BUNDLE`), the exclusion is disabled so a
+# legitimate unique registration still converges. The notice goes to stderr: the
+# stdout of this function is captured by every caller, where a notice would be
+# swallowed and then counted as a registered path.
+registered_install_widget_paths() {
+  local target_appex="${1:-}"
+  local raw_paths
+  local build_appex
+  local target_path
+  local registered_path
+  local canonical_registered_path
+
+  raw_paths="$(registered_widget_paths)" || return $?
+  build_appex=""
+  if [ -n "${APP_BUNDLE:-}" ]; then
+    build_appex="$(canonical_filesystem_path "$APP_BUNDLE/Contents/PlugIns/${WIDGET_EXTENSION_NAME:-TinyBuddyWidgetExtension}.appex")" || return $?
+  fi
+  if [ -n "$build_appex" ]; then
+    target_path="$(canonical_filesystem_path "$target_appex")" || return $?
+    if [ "$target_path" = "$build_appex" ]; then
+      build_appex=""
+    fi
+  fi
+  if [ -z "$build_appex" ]; then
+    printf '%s\n' "$raw_paths"
+    return 0
+  fi
+
+  while IFS= read -r registered_path; do
+    if [ -z "$registered_path" ]; then
+      continue
+    fi
+    canonical_registered_path="$(canonical_filesystem_path "$registered_path")" || return $?
+    if [ "$canonical_registered_path" = "$build_appex" ]; then
+      printf 'ignoring the build-product Widget registration (build by-product, not installation state): %s\n' \
+        "$registered_path" >&2
+      continue
+    fi
+    printf '%s\n' "$registered_path"
+  done <<EOF
+$raw_paths
+EOF
+}
+
 unregister_release_candidate_widget_registration() {
   local candidate_appex
   local registered_paths
@@ -1115,7 +1218,7 @@ verify_widget_registration_preflight() {
   local registered_paths
   local registered_count
 
-  registered_paths="$(registered_widget_paths)" || return $?
+  registered_paths="$(registered_install_widget_paths "$expected_appex")" || return $?
   registered_count="$(printf '%s\n' "$registered_paths" | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }')"
   if [ "$registered_count" -eq 0 ]; then
     if [ ! -e "$INSTALLED_APP" ] && [ ! -L "$INSTALLED_APP" ]; then

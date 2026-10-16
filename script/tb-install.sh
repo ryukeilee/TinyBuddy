@@ -115,9 +115,83 @@ if [ -n "$XCODEGEN_BIN" ] && [ -n "$STALE_INPUT" ]; then
   ( cd "$ROOT" && "$XCODEGEN_BIN" generate ) || fail "xcodegen generate 失败：请安装 xcodegen 或手动运行它"
 fi
 
+# PlugInKit 报告物理路径；Build/Products 所在目录可能带着 /var 与
+# /private/var 一类的别名，因此比较的两侧都用同一规则规范化：把最深的存在
+# 祖先用 pwd -P 解析出来，再原样拼回剩余部分（整条路径都存在时即全部解析）。
+#
+# 解析祖先必须用 `cd -P --`：bash 的 `cd` 默认是逻辑路径语义，会先纯文本折叠
+# `..` 再跟随符号链接，于是 `/var/../Users/...`（/var 是指向 /private/var 的
+# 符号链接）会被错误地折叠成 `/Users/...`，使一条物理上并不存在的陈旧注册
+# 记录冒充本次构建产物而被排除。`-P` 强制物理语义（跟随符号链接后再应用
+# `..`），`--` 防止以短横线开头的路径被当成 cd 选项。
+#
+# 安全方向：宁可漏排除，不可误排除。只有能证明两侧物理等价时才允许排除该
+# 记录；解析失败、无法访问、不存在且剩余分量里仍含 `..`/`.`、断链等情况一律
+# 回退为原样字符串，从而不等于构建产物 → 不排除 → 判定继续 fail closed。
+canonical_filesystem_path() {
+  local path="${1:-}"
+  local parent
+  local leaf
+  local suffix=""
+  local resolved
+
+  [ -n "$path" ] || return 0
+  while [ ! -e "$path" ] && [ ! -L "$path" ]; do
+    parent="$(dirname "$path")"
+    if [ "$parent" = "$path" ]; then
+      break
+    fi
+    leaf="$(basename "$path")"
+    suffix="/$leaf$suffix"
+    path="$parent"
+  done
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    # 尽力而为：无法解析时保留原路径，比较仍然要求规范化后的全路径相等。
+    # -P 保证物理解析；解析失败时 resolved 为空，path 原样保留。
+    resolved="$(cd -P -- "$path" 2>/dev/null && pwd -P)" || resolved=""
+    if [ -n "$resolved" ]; then
+      path="$resolved"
+    fi
+  fi
+  if [ "$path" = "/" ]; then
+    printf '%s\n' "/${suffix#/}"
+  else
+    printf '%s\n' "${path%/}$suffix"
+  fi
+}
+
+# 安装唯一性判定使用的注册表视图：Xcode 构建时的 RegisterWithLaunchServices
+# 会把本次构建产物（DerivedData 里的 appex）自己也注册进来，那条记录只是构建
+# 副产物，不代表安装状态，必须从判定中排除；其余记录（含重复项与原始顺序）
+# 原样保留。排除只认物理规范化后的全路径相等，绝不用 basename、后缀或
+# DerivedData 子串匹配。提示写 stderr：本函数的 stdout 在所有调用点都被
+# $(...) 捕获，写 stdout 会被吞掉并被当成注册路径计数。
 registered_widget_paths() {
+  local build_appex=""
+  local registered_path
+  local canonical_registered_path
+
+  if [ -n "${BUILD_APP:-}" ]; then
+    build_appex="$(canonical_filesystem_path "$BUILD_APP/Contents/PlugIns/TinyBuddyWidgetExtension.appex")" || return $?
+  fi
+
   "$PLUGINKIT_BIN" -m -A -D -v -i "$WIDGET_BUNDLE_ID" \
-    | awk -F '\t' 'NF >= 2 { path = $NF; sub(/^[[:space:]]+/, "", path); sub(/[[:space:]]+$/, "", path); if (path ~ /\.appex$/) print path }'
+    | awk -F '\t' 'NF >= 2 { path = $NF; sub(/^[[:space:]]+/, "", path); sub(/[[:space:]]+$/, "", path); if (path ~ /\.appex$/) print path }' \
+    | while IFS= read -r registered_path; do
+        if [ -z "$registered_path" ]; then
+          continue
+        fi
+        if [ -n "$build_appex" ]; then
+          canonical_registered_path="$(canonical_filesystem_path "$registered_path")" \
+            || return $?
+          if [ "$canonical_registered_path" = "$build_appex" ]; then
+            printf '[tb] 忽略本次构建产物的 WidgetKit 注册记录（Xcode 构建副产物，不是安装状态）: %s\n' \
+              "$registered_path" >&2
+            continue
+          fi
+        fi
+        printf '%s\n' "$registered_path"
+      done
 }
 
 verify_widget_registration_preflight() {
@@ -184,7 +258,9 @@ verify_built_widget_extension() {
     || fail "构建产物不是预期的 WidgetKit 扩展"
 }
 
-# 失败的重复注册必须在构建、安装或替换之前明确暴露。
+# 失败的重复注册必须在构建、安装或替换之前明确暴露。判定针对的是已有安装
+# 记录：本次构建产物被 Xcode 自动注册的那条副产物记录不算安装状态，已由
+# registered_widget_paths 排除。
 verify_widget_registration_preflight
 
 # ── 1. 构建 ───────────────────────────────────────────────────

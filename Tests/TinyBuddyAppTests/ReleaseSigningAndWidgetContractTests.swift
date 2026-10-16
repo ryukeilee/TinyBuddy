@@ -259,6 +259,195 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: probe.commandLog.path))
     }
 
+    func testInstallRegistrationIgnoresOnlyTheBuildProductRecordForACleanInstall() throws {
+        let probe = try runInstallRegistrationDecision(
+            initialRecords: [.buildProduct],
+            installedAppExists: false,
+            allowsRegistrationAdd: true
+        )
+        defer { try? FileManager.default.removeItem(at: probe.temporaryDirectory) }
+
+        XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
+        XCTAssertTrue(probe.result.standardOutput.contains("preflight=accepted"))
+        XCTAssertTrue(probe.result.standardOutput.contains("registration=accepted preserved=0 attempted=1"))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "ignoring the build-product Widget registration"
+        ))
+        // The ignored record is left untouched and the clean install adds the target record.
+        XCTAssertEqual(probe.registeredRecords, [probe.buildArtifactRecord, probe.installedAppex.path])
+        XCTAssertTrue(probe.plugInKitCommands.contains("-a \(probe.installedAppex.path)"))
+        XCTAssertFalse(probe.plugInKitCommands.contains("-r "))
+    }
+
+    func testInstallRegistrationFailsClosedWhenAnExistingInstallHasOnlyTheBuildProductRecord() throws {
+        let probe = try runInstallRegistrationDecision(
+            initialRecords: [.buildProduct],
+            installedAppExists: true
+        )
+        defer { try? FileManager.default.removeItem(at: probe.temporaryDirectory) }
+
+        XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
+        XCTAssertTrue(probe.result.standardOutput.contains("preflight=rejected"))
+        XCTAssertTrue(probe.result.standardOutput.contains("registration=rejected preserved=0 attempted=0"))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "existing installation is missing its Widget registration"
+        ))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "automatic registration is allowed only during a clean install"
+        ))
+        XCTAssertEqual(probe.registeredRecords, [probe.buildArtifactRecord])
+        XCTAssertFalse(probe.plugInKitCommands.contains("-a "))
+        XCTAssertFalse(probe.plugInKitCommands.contains("-r "))
+    }
+
+    func testInstallRegistrationPreservesTheUniqueInstalledRecordAlongsideTheBuildProduct() throws {
+        let probe = try runInstallRegistrationDecision(
+            initialRecords: [.buildProduct, .installedTarget],
+            installedAppExists: true
+        )
+        defer { try? FileManager.default.removeItem(at: probe.temporaryDirectory) }
+
+        XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
+        XCTAssertTrue(probe.result.standardOutput.contains("preflight=accepted"))
+        XCTAssertTrue(probe.result.standardOutput.contains("registration=accepted preserved=1 attempted=0"))
+        XCTAssertTrue(probe.result.standardOutput.contains("decided-registrations=\(probe.installedAppex.path),"))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "ignoring the build-product Widget registration"
+        ))
+        XCTAssertEqual(probe.registeredRecords, [probe.buildArtifactRecord, probe.installedAppex.path])
+        XCTAssertFalse(probe.plugInKitCommands.contains("-a "))
+        XCTAssertFalse(probe.plugInKitCommands.contains("-r "))
+    }
+
+    func testInstallRegistrationStillRejectsDuplicateAndStaleRecordsAlongsideTheBuildProduct() throws {
+        let duplicates = try runInstallRegistrationDecision(
+            initialRecords: [.buildProduct, .duplicatedInstalledTarget],
+            installedAppExists: true
+        )
+        defer { try? FileManager.default.removeItem(at: duplicates.temporaryDirectory) }
+
+        XCTAssertEqual(duplicates.result.exitCode, 0, duplicates.result.standardError)
+        XCTAssertTrue(duplicates.result.standardOutput.contains("preflight=rejected"))
+        XCTAssertTrue(duplicates.result.standardOutput.contains("registration=rejected"))
+        XCTAssertTrue(duplicates.result.standardError.contains(
+            "existing Widget registrations cannot be preserved safely"
+        ))
+        XCTAssertTrue(duplicates.result.standardError.contains("registered_count=2"))
+        XCTAssertEqual(
+            duplicates.registeredRecords,
+            [duplicates.buildArtifactRecord, duplicates.installedAppex.path, duplicates.installedAppex.path]
+        )
+        XCTAssertFalse(duplicates.plugInKitCommands.contains("-a "))
+        XCTAssertFalse(duplicates.plugInKitCommands.contains("-r "))
+
+        let stale = try runInstallRegistrationDecision(
+            initialRecords: [.buildProduct, .installedTarget, .stale],
+            installedAppExists: true
+        )
+        defer { try? FileManager.default.removeItem(at: stale.temporaryDirectory) }
+
+        XCTAssertEqual(stale.result.exitCode, 0, stale.result.standardError)
+        XCTAssertTrue(stale.result.standardOutput.contains("preflight=rejected"))
+        XCTAssertTrue(stale.result.standardOutput.contains("registration=rejected"))
+        XCTAssertTrue(stale.result.standardError.contains(
+            "Widget registrations cannot be preserved safely"
+        ))
+        XCTAssertTrue(stale.result.standardError.contains("registered_count=2"))
+        XCTAssertEqual(
+            stale.registeredRecords,
+            [stale.buildArtifactRecord, stale.installedAppex.path, InstallRegistrationProbe.staleRecord]
+        )
+        XCTAssertFalse(stale.plugInKitCommands.contains("-a "))
+        XCTAssertFalse(stale.plugInKitCommands.contains("-r "))
+    }
+
+    func testInstallRegistrationKeepsFailClosedForASymlinkDotDotAliasOfTheBuildProduct() throws {
+        // A stale record can read exactly like the build artifact once `..` is folded
+        // textually through a symlinked alias, while the path it physically denotes does
+        // not exist. Only physical resolution may tell them apart, so this must stay
+        // fail closed instead of being filtered out as this build's own record.
+        let probe = try runInstallRegistrationDecision(
+            initialRecords: [.dotDotAliasOfBuildProduct, .installedTarget],
+            installedAppExists: true
+        )
+        defer { try? FileManager.default.removeItem(at: probe.temporaryDirectory) }
+
+        XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
+        XCTAssertTrue(probe.result.standardOutput.contains("preflight=rejected"))
+        XCTAssertTrue(probe.result.standardOutput.contains("registration=rejected preserved=0 attempted=0"))
+        XCTAssertTrue(probe.result.standardError.contains("registered_count=2"))
+        XCTAssertFalse(probe.result.standardError.contains("ignoring the build-product Widget registration"))
+        XCTAssertEqual(
+            probe.registeredRecords,
+            [probe.dotDotAliasRecord, probe.installedAppex.path]
+        )
+        XCTAssertFalse(probe.plugInKitCommands.contains("-a "))
+        XCTAssertFalse(probe.plugInKitCommands.contains("-r "))
+
+        // The pre-fix helper entered its ancestor with a logical `cd`, so the stale record
+        // was mistaken for the build artifact and the very same registry state was
+        // accepted. Running the reconstructed helper proves the difference is this fix.
+        let beforeFix = try runInstallRegistrationDecision(
+            initialRecords: [.dotDotAliasOfBuildProduct, .installedTarget],
+            installedAppExists: true,
+            simulatePreFixLogicalDirectoryChange: true
+        )
+        defer { try? FileManager.default.removeItem(at: beforeFix.temporaryDirectory) }
+
+        XCTAssertEqual(beforeFix.result.exitCode, 0, beforeFix.result.standardError)
+        XCTAssertTrue(beforeFix.result.standardOutput.contains("preflight=accepted"))
+        XCTAssertTrue(beforeFix.result.standardOutput.contains("registration=accepted preserved=1 attempted=0"))
+        XCTAssertTrue(beforeFix.result.standardError.contains("ignoring the build-product Widget registration"))
+        XCTAssertFalse(beforeFix.plugInKitCommands.contains("-a "))
+        XCTAssertFalse(beforeFix.plugInKitCommands.contains("-r "))
+    }
+
+    func testCleanInstallFailsWhenTheRegistrationCommandSucceedsButTheTargetRecordNeverAppears() throws {
+        // The registration command reports success, yet the query never sees the target
+        // record. The polling validation must fail rather than accept a state it could
+        // not observe.
+        let probe = try runInstallRegistrationDecision(
+            initialRecords: [.buildProduct],
+            installedAppExists: false,
+            allowsRegistrationAdd: true,
+            pluginSwallowsRegistrationAdd: true
+        )
+        defer { try? FileManager.default.removeItem(at: probe.temporaryDirectory) }
+
+        XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
+        XCTAssertTrue(probe.result.standardOutput.contains("preflight=accepted"))
+        XCTAssertTrue(probe.result.standardOutput.contains("registration=rejected preserved=0 attempted=1"))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "registration is not unique or does not point to the installed extension"
+        ))
+        XCTAssertTrue(probe.result.standardError.contains(
+            "expected_widget_path=\(probe.installedAppex.path) registered_count=0"
+        ))
+        // Exactly one registration attempt ran, and no record was created or removed.
+        let mutatingCommands = probe.plugInKitCommands
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { $0.hasPrefix("-a ") || $0.hasPrefix("-r ") }
+        XCTAssertEqual(mutatingCommands, ["-a \(probe.installedAppex.path)"])
+        XCTAssertEqual(probe.registeredRecords, [probe.buildArtifactRecord])
+    }
+
+    func testInstallRegistrationStillConvergesWhenTheBuildProductIsTheRegistrationTarget() throws {
+        let probe = try runInstallRegistrationDecision(
+            initialRecords: [],
+            installedAppExists: false,
+            allowsRegistrationAdd: true,
+            buildArtifactIsRegistrationTarget: true
+        )
+        defer { try? FileManager.default.removeItem(at: probe.temporaryDirectory) }
+
+        XCTAssertEqual(probe.result.exitCode, 0, probe.result.standardError)
+        XCTAssertTrue(probe.result.standardOutput.contains("registration=accepted preserved=0 attempted=1"))
+        XCTAssertEqual(probe.registeredRecords, [probe.buildAppex.path])
+        XCTAssertTrue(probe.plugInKitCommands.contains("-a \(probe.buildAppex.path)"))
+        XCTAssertFalse(probe.result.standardError.contains("ignoring the build-product Widget registration"))
+    }
+
     func testCleanInstallActivationFailureUnregistersCandidateAndRemovesAllTransactionResidue() throws {
         let script = try buildAndRunScript()
         let functions = try [
@@ -357,6 +546,8 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
     func testCleanInstallStaleRegistrationFailureDoesNotMutateExistingRecords() throws {
         let script = try buildAndRunScript()
         let functions = try [
+            "canonical_filesystem_path",
+            "registered_install_widget_paths",
             "verify_widget_registration_preflight",
             "register_widget_extension",
             "unregister_release_candidate_widget_registration",
@@ -572,6 +763,11 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         let registrationFunction = try XCTUnwrap(
             shellFunction(named: "register_widget_extension", in: try buildAndRunScript())
         )
+        let installRegistrationFunctions = try [
+            "canonical_filesystem_path",
+            "registered_install_widget_paths"
+        ].map { try XCTUnwrap(shellFunction(named: $0, in: try buildAndRunScript())) }
+            .joined(separator: "\n")
 
         let result = try runBash("""
         set -euo pipefail
@@ -589,6 +785,7 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
         export FAKE_PLUGIN_IGNORE_REMOVE FAKE_PLUGIN_DUPLICATE_TARGET
         find_widget_extension() { printf '%s\n' "$FAKE_APPEX"; }
         registered_widget_paths() { /bin/cat "$FAKE_PLUGIN_STATE"; }
+        \(installRegistrationFunctions)
         \(registrationFunction)
         register_widget_extension \(shellQuote(app.path)) \(allowsRegistrationAdd ? 1 : 0)
         """)
@@ -597,6 +794,171 @@ final class ReleaseSigningAndWidgetContractTests: XCTestCase {
             result: result,
             temporaryDirectory: temporaryDirectory,
             widget: widget,
+            stateFile: stateFile,
+            commandLog: commandLog
+        )
+    }
+
+    private func writeQueryablePluginKit(to url: URL) throws {
+        try writeExecutable(
+            """
+            #!/bin/bash
+            set -eu
+            printf '%s\n' "$*" >>"$FAKE_PLUGIN_COMMAND_LOG"
+            case "$1" in
+              -m)
+                while IFS= read -r row; do
+                  if [ -z "$row" ]; then
+                    continue
+                  fi
+                  printf 'record-x\\tmetadata-x\\t%s\\n' "$row"
+                done <"$FAKE_PLUGIN_STATE"
+                ;;
+              -a)
+                if [ "${FAKE_PLUGIN_SWALLOW_ADD:-0}" -eq 1 ]; then
+                  exit 0
+                fi
+                if [ "$FAKE_PLUGIN_DUPLICATE_TARGET" -eq 1 ]; then
+                  printf '%s\\n%s\\n' "$2" "$2" >>"$FAKE_PLUGIN_STATE"
+                elif ! /usr/bin/grep -Fqx "$2" "$FAKE_PLUGIN_STATE"; then
+                  printf '%s\\n' "$2" >>"$FAKE_PLUGIN_STATE"
+                fi
+                ;;
+              -r)
+                /usr/bin/awk -v removed="$2" '$0 != removed { print }' \\
+                  "$FAKE_PLUGIN_STATE" >"$FAKE_PLUGIN_STATE.next"
+                /bin/mv "$FAKE_PLUGIN_STATE.next" "$FAKE_PLUGIN_STATE"
+                ;;
+              *) exit 64 ;;
+            esac
+            """,
+            to: url
+        )
+    }
+
+    /// Runs the release-install Widget registration decision against a stateful
+    /// PlugInKit stub: `APP_BUNDLE` is reached through a symlinked alias while the
+    /// recorded registry rows carry the physical path, so the build-product
+    /// exclusion has to normalize both sides before comparing them.
+    private func runInstallRegistrationDecision(
+        initialRecords: [InstallRegistrationRecord],
+        installedAppExists: Bool,
+        allowsRegistrationAdd: Bool = false,
+        buildArtifactIsRegistrationTarget: Bool = false,
+        pluginSwallowsRegistrationAdd: Bool = false,
+        simulatePreFixLogicalDirectoryChange: Bool = false
+    ) throws -> InstallRegistrationProbe {
+        let temporaryDirectory = try makeTemporaryDirectory(
+            named: "TinyBuddyInstallRegistrationDecisionTests"
+        )
+        let physicalRoot = temporaryDirectory.appendingPathComponent("physical")
+        let aliasRoot = temporaryDirectory.appendingPathComponent("alias")
+        let buildApp = aliasRoot.appendingPathComponent("DerivedData/Build/Products/Debug/TinyBuddy.app")
+        let physicalBuildAppex = physicalRoot
+            .appendingPathComponent("DerivedData/Build/Products/Debug/TinyBuddy.app")
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let buildAppex = buildApp.appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let installedApp = physicalRoot.appendingPathComponent("Applications/TinyBuddy.app")
+        let installedAppex = installedApp
+            .appendingPathComponent("Contents/PlugIns/TinyBuddyWidgetExtension.appex")
+        let dotDotAliasTarget = temporaryDirectory.appendingPathComponent("nested/deep")
+        let dotDotAlias = temporaryDirectory.appendingPathComponent("deep-alias")
+        let stateFile = temporaryDirectory.appendingPathComponent("plugin-state.txt")
+        let commandLog = temporaryDirectory.appendingPathComponent("plugin-commands.log")
+        let fakePluginKit = temporaryDirectory.appendingPathComponent("fake-pluginkit.sh")
+
+        try FileManager.default.createDirectory(at: physicalRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: aliasRoot, withDestinationURL: physicalRoot)
+        try FileManager.default.createDirectory(at: physicalBuildAppex, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dotDotAliasTarget, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: dotDotAlias, withDestinationURL: dotDotAliasTarget)
+        if installedAppExists {
+            try FileManager.default.createDirectory(at: installedAppex, withIntermediateDirectories: true)
+        }
+        // `<temp>/deep-alias/..` folds textually to `<temp>` (so the record reads like the
+        // build artifact) but physically resolves to `<temp>/nested`, where nothing exists.
+        let dotDotAliasRecord = "\(dotDotAlias.path)/..\(physicalBuildAppex.path.dropFirst(temporaryDirectory.path.count))"
+        let records = initialRecords.flatMap { record -> [String] in
+            switch record {
+            case .buildProduct:
+                return [physicalBuildAppex.path]
+            case .dotDotAliasOfBuildProduct:
+                return [dotDotAliasRecord]
+            case .installedTarget:
+                return [installedAppex.path]
+            case .duplicatedInstalledTarget:
+                return [installedAppex.path, installedAppex.path]
+            case .stale:
+                return [InstallRegistrationProbe.staleRecord]
+            }
+        }
+        try Data(records.map { "\($0)\n" }.joined().utf8).write(to: stateFile)
+        try writeQueryablePluginKit(to: fakePluginKit)
+
+        let functions = try [
+            "canonical_filesystem_path",
+            "registered_widget_paths",
+            "registered_install_widget_paths",
+            "verify_widget_registration_preflight",
+            "register_widget_extension"
+        ].map { try XCTUnwrap(shellFunction(named: $0, in: try buildAndRunScript())) }
+            .joined(separator: "\n")
+        // Reconstructs the pre-fix helper (logical `cd`, which folds `..` textually) to
+        // demonstrate the counterexample it allowed. The assertion also pins the physical
+        // form, so reverting the script fails here instead of silently passing.
+        let effectiveFunctions: String
+        if simulatePreFixLogicalDirectoryChange {
+            let reverted = functions.replacingOccurrences(of: "cd -P -- \"$path\"", with: "cd \"$path\"")
+            XCTAssertNotEqual(
+                reverted,
+                functions,
+                "canonical_filesystem_path must resolve its ancestor with `cd -P --`"
+            )
+            effectiveFunctions = reverted
+        } else {
+            effectiveFunctions = functions
+        }
+        let targetAppex = buildArtifactIsRegistrationTarget ? buildAppex : installedAppex
+        let targetApp = buildArtifactIsRegistrationTarget ? buildApp : installedApp
+
+        let result = try runBash("""
+        set -euo pipefail
+        APP_BUNDLE=\(shellQuote(buildApp.path))
+        INSTALLED_APP=\(shellQuote(installedApp.path))
+        WIDGET_EXTENSION_NAME=TinyBuddyWidgetExtension
+        WIDGET_BUNDLE_ID=com.ryukeili.TinyBuddy.TinyBuddyWidgetExtension
+        WIDGET_RUNTIME_TIMEOUT=0
+        PLUGINKIT_BIN=\(shellQuote(fakePluginKit.path))
+        FAKE_PLUGIN_STATE=\(shellQuote(stateFile.path))
+        FAKE_PLUGIN_COMMAND_LOG=\(shellQuote(commandLog.path))
+        FAKE_PLUGIN_DUPLICATE_TARGET=0
+        FAKE_PLUGIN_SWALLOW_ADD=\(pluginSwallowsRegistrationAdd ? 1 : 0)
+        export FAKE_PLUGIN_STATE FAKE_PLUGIN_COMMAND_LOG FAKE_PLUGIN_DUPLICATE_TARGET FAKE_PLUGIN_SWALLOW_ADD
+        RELEASE_WIDGET_REGISTRATION_PRESERVED=0
+        RELEASE_WIDGET_REGISTRATION_ATTEMPTED=0
+        FIND_WIDGET_TARGET=\(shellQuote(targetAppex.path))
+        find_widget_extension() { printf '%s\n' "$FIND_WIDGET_TARGET"; }
+        \(effectiveFunctions)
+        if verify_widget_registration_preflight; then
+          printf 'preflight=accepted\n'
+        else
+          printf 'preflight=rejected\n'
+        fi
+        if register_widget_extension \(shellQuote(targetApp.path)) \(allowsRegistrationAdd ? 1 : 0); then
+          printf 'registration=accepted preserved=%s attempted=%s\n' "$RELEASE_WIDGET_REGISTRATION_PRESERVED" "$RELEASE_WIDGET_REGISTRATION_ATTEMPTED"
+        else
+          printf 'registration=rejected preserved=%s attempted=%s\n' "$RELEASE_WIDGET_REGISTRATION_PRESERVED" "$RELEASE_WIDGET_REGISTRATION_ATTEMPTED"
+        fi
+        printf 'decided-registrations=%s\n' "$(registered_install_widget_paths "$FIND_WIDGET_TARGET" | /usr/bin/tr '\n' ',')"
+        """)
+
+        return InstallRegistrationProbe(
+            result: result,
+            temporaryDirectory: temporaryDirectory,
+            buildAppex: buildAppex,
+            installedAppex: installedAppex,
+            buildArtifactRecord: physicalBuildAppex.path,
+            dotDotAliasRecord: dotDotAliasRecord,
             stateFile: stateFile,
             commandLog: commandLog
         )
@@ -751,6 +1113,40 @@ private struct ShellResult {
     let exitCode: Int32
     let standardOutput: String
     let standardError: String
+}
+
+/// Which raw PlugInKit records the install-registration probe starts from.
+private enum InstallRegistrationRecord {
+    case buildProduct
+    /// A record that reads like the build artifact only after textual `..` folding
+    /// through a symlinked alias; it denotes a path that does not physically exist.
+    case dotDotAliasOfBuildProduct
+    case installedTarget
+    case duplicatedInstalledTarget
+    case stale
+}
+
+private struct InstallRegistrationProbe {
+    static let staleRecord = "/tmp/stale-tinybuddy-widget.appex"
+
+    let result: ShellResult
+    let temporaryDirectory: URL
+    let buildAppex: URL
+    let installedAppex: URL
+    let buildArtifactRecord: String
+    let dotDotAliasRecord: String
+    let stateFile: URL
+    let commandLog: URL
+
+    var registeredRecords: [String] {
+        ((try? String(contentsOf: stateFile, encoding: .utf8)) ?? "")
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+    }
+
+    var plugInKitCommands: String {
+        (try? String(contentsOf: commandLog, encoding: .utf8)) ?? ""
+    }
 }
 
 private final class RegistrationProbe {
