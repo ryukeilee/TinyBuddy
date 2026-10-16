@@ -52,6 +52,21 @@ final class CountingSessionProvider: @unchecked Sendable {
     }
 }
 
+/// Every ordering of `items`, so a test can prove a result does not depend on
+/// provider order. Only used with the small fixtures in this file.
+private func permutations<T>(_ items: [T]) -> [[T]] {
+    guard items.count > 1 else { return [items] }
+    var results: [[T]] = []
+    for index in items.indices {
+        var rest = items
+        let head = rest.remove(at: index)
+        for tail in permutations(rest) {
+            results.append([head] + tail)
+        }
+    }
+    return results
+}
+
 final class FocusSessionQueryTests: XCTestCase {
     private let alpha = FocusProjectContext(key: "repo.alpha", displayName: "Alpha")
     private let beta = FocusProjectContext(key: "repo.beta", displayName: "Beta")
@@ -546,29 +561,32 @@ final class FocusSessionQueryTests: XCTestCase {
         XCTAssertEqual(Set(page.sessions.map(\.project.displayName)), ["Before"])
     }
 
-    /// Project summaries keep the documented newest-name and uuid tie-break rule
-    /// when two historical contexts of one project share a timestamp.
+    /// Project summaries keep the documented newest-name rule, and two
+    /// historical contexts of one project that share a timestamp are named by
+    /// the row the display order considers newest, which for equal timestamps
+    /// is the smallest `id.uuidString` (`testTieBreakerUUID` pins that display
+    /// order). The fixture's ids differ in their last hex digit (`…0009` vs
+    /// `…000a`), so the assertion depends on the tie-break and not on provider
+    /// order.
     func testProjectSummaryTieBreakMatchesPerRowResolution() async throws {
         let shared = Date(timeIntervalSinceReferenceDate: 970_000_000)
-        let older = shared.addingTimeInterval(-3_600)
+        let winningID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000009"))
+        let losingID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-00000000000a"))
+        XCTAssertLessThan(winningID.uuidString, losingID.uuidString)
         let rows: [FocusSession] = [
-            FocusSession(
-                project: FocusProjectContext(key: "repo.alpha", displayName: "Renamed Later"),
-                dayIdentifier: "2026-07-20",
-                startedAt: shared,
-                endedAt: shared,
-                status: .ended,
-                lastUserActivityAt: shared,
-                lastStateChangeAt: shared
+            session(
+                project: FocusProjectContext(key: "repo.alpha", displayName: "Winner By Uuid Order"),
+                day: "2026-07-20",
+                start: shared,
+                end: shared,
+                id: winningID
             ),
-            FocusSession(
-                project: FocusProjectContext(key: "canonical", displayName: "Older Name"),
-                dayIdentifier: "2026-07-19",
-                startedAt: older,
-                endedAt: older,
-                status: .ended,
-                lastUserActivityAt: older,
-                lastStateChangeAt: older
+            session(
+                project: FocusProjectContext(key: "canonical", displayName: "Loser By Uuid Order"),
+                day: "2026-07-19",
+                start: shared,
+                end: shared,
+                id: losingID
             )
         ]
         let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = { context in
@@ -578,12 +596,226 @@ final class FocusSessionQueryTests: XCTestCase {
 
         let projectsResult = await service.projects(version: 0)
         let projects = try XCTUnwrap(projectsResult)
-        // Both contexts resolve to the same canonical key, so the newest row's
-        // name is the only summary.
+        // Both contexts resolve to the same canonical key, so the tied rows
+        // collapse into one summary named by the smallest uuidString.
         XCTAssertEqual(projects.count, 1)
         XCTAssertEqual(projects.first?.key, "project.alpha")
-        XCTAssertEqual(projects.first?.displayName, "Renamed Later")
+        XCTAssertEqual(projects.first?.displayName, "Winner By Uuid Order")
         XCTAssertEqual(counterFreeRowCount(rows, resolver: resolver), projects.count)
+        XCTAssertEqual(
+            projects.sorted { $0.key < $1.key },
+            referenceProjectSummaries(rows, resolver: resolver)
+        )
+
+        // The winner must not be "whichever row came last": the same rows in
+        // the opposite provider order still produce the identical summary.
+        let reversedProvider = Array(rows.reversed())
+        let reversedService = FocusSessionQueryService(
+            sessionProvider: { reversedProvider },
+            projectResolver: resolver
+        )
+        let reversedResult = await reversedService.projects(version: 0)
+        XCTAssertEqual(reversedResult, projects)
+    }
+
+    /// Same-key rows sharing one timestamp must always be summarised by the row
+    /// the display order considers newest, whatever order the provider returns
+    /// them in. The four fixture ids sit on hex-digit boundaries (last byte
+    /// 09/0a and 90/a0) where a byte-wise comparison and a string comparison
+    /// could disagree if either side changed.
+    func testProjectSummaryTieBreakMatchesUUIDStringOrdering() async throws {
+        let shared = Date(timeIntervalSinceReferenceDate: 971_000_000)
+        let uuids = [
+            "00000000-0000-0000-0000-000000000009",
+            "00000000-0000-0000-0000-00000000000a",
+            "00000000-0000-0000-0000-000000000090",
+            "00000000-0000-0000-0000-0000000000a0"
+        ].compactMap { UUID(uuidString: $0) }
+        XCTAssertEqual(uuids.count, 4, "fixture ids must parse")
+        XCTAssertEqual(Set(uuids).count, uuids.count, "fixture ids must be unique")
+
+        let rows = uuids.enumerated().map { index, id in
+            session(
+                project: FocusProjectContext(key: "repo.\(index)", displayName: "Row \(index)"),
+                day: "2026-07-20",
+                start: shared,
+                end: shared,
+                id: id
+            )
+        }
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = { context in
+            FocusProjectContext(key: "project.alpha", displayName: context.displayName)
+        }
+        let expectedNameByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.project.displayName) })
+        // Display order puts the smallest `id.uuidString` first among rows with
+        // equal timestamps, and `projects()` names the project after that row.
+        let winningID = try XCTUnwrap(uuids.min { $0.uuidString < $1.uuidString })
+        let winningName = try XCTUnwrap(expectedNameByID[winningID])
+
+        var testedOrders = 0
+        for order in permutations(Array(rows.indices)) {
+            testedOrders += 1
+            let reordered = order.map { rows[$0] }
+            let service = FocusSessionQueryService(
+                sessionProvider: { reordered },
+                projectResolver: resolver
+            )
+            let projectsResult = await service.projects(version: 0)
+            let projects = try XCTUnwrap(projectsResult)
+            XCTAssertEqual(projects.count, 1, "order \(order) must collapse to one summary")
+            XCTAssertEqual(projects.first?.key, "project.alpha", "order \(order)")
+            XCTAssertEqual(
+                projects.first?.displayName,
+                winningName,
+                "order \(order) must name the row with the smallest uuidString"
+            )
+        }
+        XCTAssertEqual(testedOrders, 24, "every ordering of four rows must be checked")
+    }
+
+    /// `projects(version:)` must agree with the naive per-row reference for
+    /// every grouping and tie-break combination: three legacy contexts per
+    /// project, three rows tied at each project's maximum timestamp, and a
+    /// provider order that is neither chronological nor grouped by project.
+    ///
+    /// The fixture is built so both pinned rules are observable: every
+    /// canonical key is fed by three distinct display names, the tie that
+    /// decides each summary happens at that key's maximum `startedAt`, and at
+    /// least one key is won by a row that is neither the first nor the last row
+    /// the provider returns for it. The self-checks below fail the test if a
+    /// later edit erodes any of those properties.
+    func testProjectSummariesMatchPerRowReference() async throws {
+        let base = Date(timeIntervalSinceReferenceDate: 972_000_000)
+        let rows: [FocusSession] = try (0 ..< 60).map { index in
+            let projectIndex = index % 4
+            // `aliasIndex` varies independently of `projectIndex` (mod 3 vs
+            // mod 4), so each canonical project is fed by three distinct input
+            // contexts. Rows `p`, `p + 4` and `p + 8` of every project share
+            // that project's maximum `startedAt`, so the three names compete on
+            // the uuid tie-break and the winner stays observable in the summary.
+            let aliasIndex = index % 3
+            let startedAt: Date
+            if [0, 4, 8].contains(index - projectIndex) {
+                startedAt = base.addingTimeInterval(100_000 + Double(projectIndex) * 900)
+            } else {
+                startedAt = base.addingTimeInterval(Double(index) * 900)
+            }
+            return session(
+                project: FocusProjectContext(
+                    key: "legacy.\(projectIndex).\(aliasIndex)",
+                    displayName: "Legacy \(projectIndex)-\(aliasIndex)"
+                ),
+                day: "2026-07-20",
+                start: startedAt,
+                end: startedAt,
+                // Deterministic, zero-padded ids so the winner of each tie is
+                // fixed and the order matches `uuidString` ordering.
+                id: try XCTUnwrap(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index)))
+            )
+        }
+        // Interleave newest and oldest, so the provider order is neither
+        // display order nor a single sorted run.
+        var providerRows: [FocusSession] = []
+        providerRows.reserveCapacity(rows.count)
+        var lower = 0
+        var upper = rows.count - 1
+        while lower <= upper {
+            providerRows.append(rows[upper])
+            if lower != upper { providerRows.append(rows[lower]) }
+            lower += 1
+            upper -= 1
+        }
+        XCTAssertEqual(Set(providerRows.map(\.id)).count, rows.count, "fixture rows must be unique")
+
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = { context in
+            let projectIndex = context.key.split(separator: ".")[1]
+            return FocusProjectContext(key: "project.\(projectIndex)", displayName: context.displayName)
+        }
+        let snapshot = providerRows
+        let service = FocusSessionQueryService(sessionProvider: { snapshot }, projectResolver: resolver)
+
+        // Fixture self-checks. They guard the properties the equivalence
+        // assertion below needs: without them an edit that collapsed the aliases
+        // or moved the tied rows off the maximum timestamp would let the test
+        // keep passing while testing nothing about the newest-name or tie-break
+        // rules.
+        let rowsByKey = Dictionary(grouping: snapshot) { resolver($0.project).key }
+        for (key, keyRows) in rowsByKey {
+            let names = Set(keyRows.map { resolver($0.project).displayName })
+            XCTAssertGreaterThanOrEqual(
+                names.count,
+                2,
+                "canonical key \(key) must be fed by at least two input contexts, otherwise the newest-name rule is unobservable"
+            )
+            let maxStartedAt = try XCTUnwrap(keyRows.map(\.startedAt).max())
+            XCTAssertGreaterThanOrEqual(
+                keyRows.filter { $0.startedAt == maxStartedAt }.count,
+                2,
+                "canonical key \(key) must tie on its maximum startedAt, otherwise the id tie-break never decides the summary"
+            )
+        }
+        var firstRowByKey: [String: FocusSession] = [:]
+        var lastRowByKey: [String: FocusSession] = [:]
+        for row in snapshot {
+            let key = resolver(row.project).key
+            if firstRowByKey[key] == nil { firstRowByKey[key] = row }
+            lastRowByKey[key] = row
+        }
+        let referenceWinners = referenceProjectSummaryWinners(snapshot, resolver: resolver)
+        XCTAssertTrue(
+            referenceWinners.contains { entry in
+                firstRowByKey[entry.key].map { $0.id != entry.value.id } ?? false
+            },
+            "at least one key must be won by a row other than its first provider row, otherwise a \"first row wins\" shortcut would still pass"
+        )
+        XCTAssertTrue(
+            referenceWinners.contains { entry in
+                lastRowByKey[entry.key].map { $0.project.displayName != entry.value.project.displayName } ?? false
+            },
+            "at least one key must be won by a name other than its last provider row's, otherwise a \"last row wins\" shortcut would still pass"
+        )
+
+        let projectsResult = await service.projects(version: 0)
+        let projects = try XCTUnwrap(projectsResult)
+        XCTAssertEqual(projects.count, 4)
+        XCTAssertEqual(
+            projects.sorted { $0.key < $1.key },
+            referenceProjectSummaries(snapshot, resolver: resolver)
+        )
+    }
+
+    /// Naive, non-memoised reference for the project-summary rule: group rows by
+    /// their resolved key, keep the newest `startedAt` and, on a tie, the row
+    /// the display order treats as newest — the one with the smallest
+    /// `id.uuidString` (`DisplayOrderKey.precedes` sorts ascending ids first, so
+    /// a smaller id reads as newer). The result is sorted by key so callers can
+    /// compare it with the service's display-name ordering without assuming the
+    /// two orders coincide.
+    private func referenceProjectSummaries(
+        _ rows: [FocusSession],
+        resolver: (FocusProjectContext) -> FocusProjectContext
+    ) -> [FocusProjectContext] {
+        referenceProjectSummaryWinners(rows, resolver: resolver)
+            .values.map(\.project)
+            .sorted { $0.key < $1.key }
+    }
+
+    /// Same rule as `referenceProjectSummaries`, but keeps the winning row's id
+    /// so a caller can assert which row produced each summary.
+    private func referenceProjectSummaryWinners(
+        _ rows: [FocusSession],
+        resolver: (FocusProjectContext) -> FocusProjectContext
+    ) -> [String: (startedAt: Date, id: UUID, project: FocusProjectContext)] {
+        var newest: [String: (startedAt: Date, id: UUID, project: FocusProjectContext)] = [:]
+        for row in rows {
+            let project = resolver(row.project)
+            if let previous = newest[project.key],
+               previous.startedAt > row.startedAt
+                || (previous.startedAt == row.startedAt
+                    && previous.id.uuidString < row.id.uuidString) { continue }
+            newest[project.key] = (row.startedAt, row.id, project)
+        }
+        return newest
     }
 
     /// Number of distinct resolved identities, computed one row at a time.

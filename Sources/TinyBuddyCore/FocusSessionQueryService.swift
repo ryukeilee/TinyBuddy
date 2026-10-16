@@ -58,6 +58,17 @@ private struct ProjectResolutionMemo {
     }
 }
 
+/// One surviving project summary of a `projects(version:)` pass.
+///
+/// The summary keeps only the winner's sort fields and the resolved project,
+/// so the pass can read scalar fields out of a slot instead of copying the
+/// `FocusProjectContext` in and out of a dictionary for every row.
+private struct ProjectSummarySlot {
+    var startedAt: Date
+    var id: UUID
+    var project: FocusProjectContext
+}
+
 /// Display-order key for one row of a query pass.
 ///
 /// The service sorts these 32-byte keys instead of the `FocusSession` rows
@@ -147,18 +158,74 @@ public actor FocusSessionQueryService: FocusSessionQuerying {
         guard version >= currentQueryVersion else { return nil }
         // Select the newest name deterministically if legacy rows disagree.
         // Return only project summaries; never fetch or accumulate extra pages.
-        // Resolution is memoised per distinct project, not per session.
-        var resolution = ProjectResolutionMemo()
-        var newest: [String: (startedAt: Date, id: UUID, project: FocusProjectContext)] = [:]
-        for session in sessionProvider() {
-            let project = resolution.resolve(session.project, using: projectResolver)
-            if let previous = newest[project.key],
-               previous.startedAt > session.startedAt
-                || (previous.startedAt == session.startedAt
-                    && previous.id.uuidString < session.id.uuidString) { continue }
-            newest[project.key] = (session.startedAt, session.id, project)
+        //
+        // Grouping stays keyed by the *resolved* key (two historical contexts
+        // that resolve to one key collapse into a single summary), while
+        // resolution is memoised per exact input context for this pass only,
+        // exactly like `ProjectResolutionMemo`; nothing is cached across calls.
+        // One slot per canonical key, one index lookup per input context, and
+        // no per-row dictionary write or `uuidString` allocation.
+        var slots: [ProjectSummarySlot] = []
+        // canonical key -> slot index; consulted only when a new context appears.
+        var slotByKey: [String: Int] = [:]
+        // input context -> (slot index, resolved context), so the same input
+        // context cannot resolve twice within this pass.
+        var slotByContext: [FocusProjectContext: (slot: Int, project: FocusProjectContext)] = [:]
+
+        let sessions = sessionProvider()
+        // Iterating the rows by value would copy ~177 bytes and retain/release
+        // each row's reference-counted fields per row, which dominates this
+        // pass; read only the fields the summary needs out of the buffer.
+        sessions.withUnsafeBufferPointer { buffer in
+            slots.reserveCapacity(Swift.min(buffer.count, 64))
+            for index in buffer.indices {
+                let context = buffer[index].project
+                let slotIndex: Int
+                let resolved: FocusProjectContext
+                if let cached = slotByContext[context] {
+                    slotIndex = cached.slot
+                    resolved = cached.project
+                } else {
+                    resolved = projectResolver(context)
+                    if let existing = slotByKey[resolved.key] {
+                        // Another input context already represents this key.
+                        slotIndex = existing
+                    } else {
+                        // This key's first row: seed the slot with it directly,
+                        // so no sentinel timestamp is ever needed.
+                        slotIndex = slots.count
+                        slotByKey[resolved.key] = slotIndex
+                        slots.append(ProjectSummarySlot(
+                            startedAt: buffer[index].startedAt,
+                            id: buffer[index].id,
+                            project: resolved
+                        ))
+                        slotByContext[context] = (slotIndex, resolved)
+                        continue
+                    }
+                    slotByContext[context] = (slotIndex, resolved)
+                }
+
+                let startedAt = buffer[index].startedAt
+                let id = buffer[index].id
+                // The newest start wins; on equal starts the winner is the row
+                // the display order considers newest, i.e. the smallest
+                // `id.uuidString` (exactly what the previous
+                // `previous.id.uuidString < session.id.uuidString` keep-the-
+                // earlier-row rule selected). `UUID`'s `<` compares bytes, which
+                // orders exactly like `uuidString` ascending
+                // (`DisplayOrderKey.precedes` documents the same equivalence),
+                // so comparing ids directly replaces two per-comparison string
+                // allocations.
+                if slots[slotIndex].startedAt > startedAt
+                    || (slots[slotIndex].startedAt == startedAt && slots[slotIndex].id < id) { continue }
+                slots[slotIndex].startedAt = startedAt
+                slots[slotIndex].id = id
+                slots[slotIndex].project = resolved
+            }
         }
-        return newest.values.map(\.project).sorted {
+
+        return slots.map(\.project).sorted {
             let comparison = $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
             return comparison == .orderedSame ? $0.key < $1.key : comparison == .orderedAscending
         }

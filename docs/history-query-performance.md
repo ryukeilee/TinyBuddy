@@ -470,3 +470,129 @@ git diff --check
 `release-install`：本轮不涉及 Git 刷新、签名、安装或 Widget，且这些命令会操作外部状态。
 因此证据覆盖查询服务的 CPU 工作量、控制器分页累积与历史列表的功能行为，不代表真实 GUI
 进程的滚动帧率、RSS 或整机能耗。
+
+## 第三轮：项目摘要 slot 累积（每行字典写入 → 每槽一次标量更新）
+
+第二轮的 §残留下界 把 `projects()` 列为下一个已确认热点：16,000 `chronological` 下
+`serviceProjects` 5.323 ms 占 `refreshFirstPage` 6.375 ms 的 83%，而它逐行按值迭代整档、
+对每行的输入上下文与规范 key 各做一次字符串哈希，并对几乎每一行写一次字典元组。
+
+本轮改为单趟 slot 累积：`withUnsafeBufferPointer` 按索引读取所需标量；解析按精确输入
+上下文在一次 pass 内记忆化（与原 `ProjectResolutionMemo` 同一契约，不跨调用缓存）；每个规范
+key 一个 `ProjectSummarySlot`，输入上下文命中后只做一次数组元素更新；时间相等时直接比较
+`UUID`（字节序与 `uuidString` 升序等价，第二轮已由
+`testDisplayOrderTieBreakMatchesUUIDStringOrdering` 固定）而不是构造两个 String。
+分组维度（解析后的 key）、最新 `startedAt` 优先、并列取较小 `id.uuidString`、最终展示
+排序比较器与公开 API 逐字未变。
+
+本轮只测 `chronological`（默认顺序），方法与 §可重复工作负载 相同：Release、
+`TINYBUDDY_HISTORY_BENCHMARK_SAMPLES=5` 的 5 样本中位数、8,000/16,000 两种规模。
+两侧在**同一会话内交替测量**（A/B/A/B，各两次）：基线是把
+`Sources/TinyBuddyCore/FocusSessionQueryService.swift` 换成 HEAD 版本、保留同一份测试文件。
+每格为中位数，单位毫秒：
+
+```sh
+cp Sources/TinyBuddyCore/FocusSessionQueryService.swift /tmp/tb-new-service.swift
+run() { TINYBUDDY_HISTORY_BENCHMARK=1 TINYBUDDY_HISTORY_BENCHMARK_SIZES=8000,16000 \
+  TINYBUDDY_HISTORY_BENCHMARK_SAMPLES=5 \
+  ./script/swiftpm.sh test -c release --filter HistoryQueryPerformanceTests; }
+run                       # A1 本轮
+git checkout HEAD -- Sources/TinyBuddyCore/FocusSessionQueryService.swift
+run                       # B1 基线
+cp /tmp/tb-new-service.swift Sources/TinyBuddyCore/FocusSessionQueryService.swift
+run                       # A2 本轮
+git checkout HEAD -- Sources/TinyBuddyCore/FocusSessionQueryService.swift
+run                       # B2 基线
+cp /tmp/tb-new-service.swift Sources/TinyBuddyCore/FocusSessionQueryService.swift
+```
+
+| 场景 | 8,000 基线 B1/B2 | 8,000 本轮 A1/A2 | 倍率 | 16,000 基线 B1/B2 | 16,000 本轮 A1/A2 | 倍率 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `serviceProjects` | 2.947 / 2.925 | 1.890 / 1.883 | 1.56× | 5.470 / 5.348 | 3.427 / 3.450 | 1.57× |
+| `refreshFirstPage` | 3.498 / 3.464 | 2.441 / 2.450 | 1.42× | 6.538 / 6.341 | 4.453 / 4.486 | 1.44× |
+| `keywordFilterSwitch` | 7.521 / 7.390 | 5.298 / 5.319 | 1.40× | 13.773 / 13.336 | 9.628 / 9.643 | 1.41× |
+| `dayRangeFilterSwitch` | 6.863 / 6.585 | 4.535 / 4.559 | 1.48× | 12.566 / 12.083 | 8.347 / 8.367 | 1.47× |
+| `projectFilterSwitch` | 7.397 / 7.209 | 5.121 / 5.146 | 1.42× | 13.260 / 13.071 | 9.336 / 9.370 | 1.41× |
+| `statusFilterSwitch` | 7.077 / 6.807 | 4.808 / 4.817 | 1.44× | 12.958 / 12.592 | 8.917 / 8.767 | 1.46× |
+| `reviewViewLoad` | 3.551 / 3.459 | 2.402 / 2.410 | 1.46× | 6.589 / 6.320 | 4.440 / 4.364 | 1.48× |
+| `serviceFirstPage` | 0.507 / 0.513 | 0.532 / 0.533 | 0.96× | 0.972 / 0.982 | 1.024 / 1.031 | 0.95× |
+| `serviceFullPagination` | 84.222 / 84.122 | 87.477 / 87.348 | 0.96× | 306.472 / 310.128 | 321.400 / 323.712 | 0.96× |
+| `fullPagination` | 163.119 / 164.614 | 167.501 / 167.238 | 0.98× | 607.505 / 615.225 | 628.844 / 628.328 | 0.97× |
+| `lastPage` | 0.501 / 0.497 | 0.516 / 0.514 | 0.97× | 0.926 / 0.939 | 0.978 / 0.982 | 0.95× |
+| `serviceFilterOnly` | 0.154 / 0.155 | 0.165 / 0.167 | 0.93× | 0.288 / 0.287 | 0.300 / 0.300 | 0.96× |
+
+按用户可见操作看：首屏、复核视图入口与四种筛选切换（都走 `refresh()`）快 29–32%。
+`serviceProjects` 自身的倍率（1.56–1.57×）大于 `refreshFirstPage` 的 1.42–1.44×，差值是同一
+刷新里 `execute()` 那一半的回退（16,000：`serviceProjects` 5.409 → 3.439，
+`serviceFirstPage` 0.977 → 1.028，净 −1.93 ms 与 `refreshFirstPage` 的 −1.97 ms 相符）。
+
+### 未定位机制的回退：`execute()`/翻页路径慢 4–5%
+
+上表里的 `serviceFirstPage` / `lastPage` / `serviceFullPagination` / `fullPagination` 都只走
+`execute()`，其实现逐字未改，却一致慢 4–5%（`fullPagination` 含 `refresh()`，净差被摊薄到
+2–3%）。同一会话内两次 A 态（1.024 / 1.031 ms）与两次 B 态（0.972 / 0.982 ms）互相一致，
+且该差值大于同一份 HEAD 源码在不同会话间的差异（0.957–0.961 vs 0.972–0.982，≤2.6%），
+另有一轮独立复核在同一对构建上测得同向的 +2.9–4.0%，因此在本构建对上它是真实的；但它是
+否复现于其他构建配置未知，**具体机理未定位**（没有做汇编或符号级对比），也没有尝试更小的
+替代改动来规避它，因此不声称存在或不存在这样的改动。如实记录的代价：每页约 +50 µs
+（`serviceFirstPage` 16,000 行 0.977 → 1.028 ms），滚完整档 16,000 行多约 17 ms（+2.8%）。
+
+### 测试覆盖（修正与新增）
+
+原 `testProjectSummaryTieBreakMatchesPerRowResolution` 实际上没有执行目标分支：两行的
+`startedAt` 相差 1 小时，第二行在「更旧则跳过」处直接 `continue`；两个 id 还是默认随机
+`UUID()`；断言不依赖 tie-break，因此删掉并列分支测试仍会通过。本轮：
+
+1. 该测试改为两行**同一 `startedAt`**、固定 id（末字节 `…09` / `…0a`）、断言 summary 取
+   较小 `id.uuidString` 的那一行，并对同一批行的**反转 provider 顺序**断言结果相同。
+2. 新增 `testProjectSummaryTieBreakMatchesUUIDStringOrdering`：4 个十六进制边界 id
+   （末字节 09 / 0a / 90 / a0）、同一时间戳，遍历全部 24 种输入排列，断言胜者恒为
+   `id.uuidString` 最小者。
+3. 新增 `testProjectSummariesMatchPerRowReference`：60 行、4 个规范项目、每个项目由 3 个
+   可区分历史 context 供给、并列竞争发生在每个项目的最大 `startedAt` 处、provider 顺序
+   交错，与逐行（不记忆化）参考实现比较。**独立复核发现该 fixture 初版仍然无效**
+   （`index % 2` 被 `index % 4` 唯一决定 → 每个 key 只有一个 context；并列行又都早于最终
+   最新行），因此重做 fixture，并加入四条自检断言（每个 key ≥ 2 个显示名、并列发生在最大
+   `startedAt`、至少一个 key 的胜者不是 provider 首行、至少一个 key 的胜者名字不是
+   provider 末行）：fixture 退化时测试会直接失败，而不是继续通过却什么都没测。
+
+变异验证（临时改实现后立即还原）：删除并列分支 → 上述测试失败；把方向反转为较大
+`id.uuidString` 胜 → 同样失败。还原后 `FocusSessionQueryTests` 41 项 0 失败。
+
+### 验证范围与独立复核（本轮）
+
+选择 **Module/contract**：改动在一个 `TinyBuddyCore` actor 的一个方法内，公开 API、持久化、
+schema、并发边界均未变，唯一生产消费者是 `HistoryQueryController` 与共享该服务的复核视图。
+执行了：
+
+```sh
+./script/swiftpm.sh test --filter 'FocusSessionQueryTests'
+./script/swiftpm.sh test --filter 'HistoryQueryControllerTests'
+TINYBUDDY_HISTORY_BENCHMARK=1 TINYBUDDY_HISTORY_BENCHMARK_SAMPLES=5 \
+  ./script/swiftpm.sh test -c release --filter HistoryQueryPerformanceTests
+./script/swiftpm.sh test
+git diff --check
+```
+
+完整回归在最终修订上执行：`TinyBuddyCoreTests` 1,053 项（1 项默认跳过的 opt-in 性能测试）、
+`TinyBuddyAppTests` 729 项（2 项默认跳过），均 0 失败，退出码 0。本改动经一轮跨模型独立
+只读复核（Codex `gpt-6.1-sol`）：复核确认生产实现语义等价（分组维度、记忆化契约、胜出规则
+的全部判定用例、最终排序比较器、空输入与版本过期路径、无跨调用缓存、无残留死代码），确认
+`referenceProjectSummaries` 用的是改动前的逐行算法而不是新实现的复制，并用 4,608 个 UUID
+独立复现了 `UUID` 字节序与 `uuidString` 升序的等价性；阻塞项（第 3 条测试的 fixture 无效）
+与文档缺陷已按上节修正。没有运行 GUI 回归、`script/regression_gate.sh`、
+`benchmark_git_refresh.sh` 或 `release-install`：本轮不涉及 Git 刷新、签名、安装或 Widget，
+且这些命令会操作外部状态。证据覆盖查询服务的 CPU 工作量与历史列表的功能行为，不代表真实
+GUI 进程的滚动帧率、RSS 或整机能耗。
+
+### 残留下界（本轮结束时）
+
+- **一次刷新仍读取 provider 两次**（`projects()` 与 `execute()` 各一次），`refreshFirstPage`
+  因此仍是「摘要 + 首屏」两段成本之和。合并为一次读取需要让项目选项独立于当前筛选条件，
+  并处理两次读取之间数据变化的情形，本轮未做。
+- **`projects()` 仍对整档做一趟 O(N) 累积**：16,000 行 3.44 ms，主要成本已是每个精确输入
+  上下文的哈希查找与每个规范 key 的槽写入，不再有每行的字典写入与 `uuidString` 分配。
+- **`execute()` 每页仍是 O(N) 建键 + O(N log N) 键排序**，且本轮实测该类路径有 4–5% 的
+  未定位布局回退（见上）。
+- **`shuffled` 顺序本轮未重测**：它只是不可达的乱序代理，第二轮的 5.1–5.2× 结论不受本轮
+  影响（本轮改动不含逐页路径）。
