@@ -153,6 +153,125 @@ public final class TinyBuddyCombinedSnapshotStore {
         let snapshot: TinyBuddyCombinedSnapshot?
     }
 
+    /// Per-read memo for the pure parsers used by `readStateLocked`.
+    ///
+    /// The same raw value appears in several slots and sources of a single read,
+    /// and the diagnostics probes, candidate selection, legacy-skip check, and
+    /// revision floor each parse it again. Keying on the raw value content keeps
+    /// exactly one parse per distinct value per read for each of these parsers,
+    /// so identical content in two slots or sources shares a single decode.
+    /// `nil` and `false` results are memoized too, so a value that is not a
+    /// V3/V2/legacy payload, or that is not a usable marker, is never
+    /// re-probed.
+    ///
+    /// Every entry is filled lazily: nothing is decoded until a caller actually
+    /// asks, because `diagnosticReason` may still return `.versionIncompatible`
+    /// before any payload is touched.
+    ///
+    /// The memo is created inside `readStateLocked` and is never retained on the
+    /// store: a later read must observe newly committed revisions, and a
+    /// `.snapshotCorrupt` reread must genuinely reload and re-decode its sources.
+    private final class SnapshotDecodeMemo {
+        private var v3Results: [String: TinyBuddyCombinedSnapshot?] = [:]
+        private var v2Results: [String: TinyBuddyCombinedSnapshot?] = [:]
+        private var legacyResults: [String: TinyBuddyCombinedSnapshot?] = [:]
+        private var unknownEnvelopeVersions: [String: Bool] = [:]
+        private var revisionMarkers: [String: Int64?] = [:]
+        private var v3ClaimedRevisions: [String: Int64?] = [:]
+        private var v2ClaimedRevisions: [String: Int64?] = [:]
+        private var legacyClaimedRevisions: [String: Int64?] = [:]
+
+        func v3Snapshot(_ value: String) -> TinyBuddyCombinedSnapshot? {
+            if let cached = v3Results[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.decodeV3(value)
+            v3Results[value] = decoded
+            return decoded
+        }
+
+        func v2Snapshot(_ value: String) -> TinyBuddyCombinedSnapshot? {
+            if let cached = v2Results[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.decodeV2(value)
+            v2Results[value] = decoded
+            return decoded
+        }
+
+        func legacySnapshot(_ value: String) -> TinyBuddyCombinedSnapshot? {
+            if let cached = legacyResults[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.decode(value)
+            legacyResults[value] = decoded
+            return decoded
+        }
+
+        func revisionMarker(_ value: String) -> Int64? {
+            if let cached = revisionMarkers[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.decodeRevisionMarker(value)
+            revisionMarkers[value] = decoded
+            return decoded
+        }
+
+        func v3ClaimedRevision(_ value: String) -> Int64? {
+            if let cached = v3ClaimedRevisions[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.verifiedV3ClaimedRevision(value)
+            v3ClaimedRevisions[value] = decoded
+            return decoded
+        }
+
+        func v2ClaimedRevision(_ value: String) -> Int64? {
+            if let cached = v2ClaimedRevisions[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.verifiedV2ClaimedRevision(value)
+            v2ClaimedRevisions[value] = decoded
+            return decoded
+        }
+
+        func legacyClaimedRevision(_ value: String) -> Int64? {
+            if let cached = legacyClaimedRevisions[value] {
+                return cached
+            }
+            let decoded = TinyBuddyCombinedSnapshotStore.legacyClaimedRevision(value)
+            legacyClaimedRevisions[value] = decoded
+            return decoded
+        }
+
+        /// The version gate runs before any payload decode and still scans the
+        /// whole raw value. It is pure, so the same content can be answered
+        /// from the memo instead of rescanning a large envelope twice.
+        func isUnknownEnvelopeVersion(_ value: String) -> Bool {
+            if let cached = unknownEnvelopeVersions[value] {
+                return cached
+            }
+            let isUnknown = TinyBuddyCombinedSnapshotStore.isUnknownEnvelopeVersion(value)
+            unknownEnvelopeVersions[value] = isUnknown
+            return isUnknown
+        }
+
+        /// The malformed probe keeps the original decoder order and semantics:
+        /// a non-empty value is corrupt only when V3, V2, and V1 all reject it.
+        func isMalformedSnapshotValue(_ value: String) -> Bool {
+            guard value.isEmpty == false else {
+                return false
+            }
+            return v3Snapshot(value) == nil
+                && v2Snapshot(value) == nil
+                && legacySnapshot(value) == nil
+        }
+
+        func isMalformedRevisionMarker(_ value: String) -> Bool {
+            value.isEmpty == false && revisionMarker(value) == nil
+        }
+    }
+
     private final class AppGroupReadTracker {
         private(set) var failure: TinyBuddySharedSnapshotReason?
 
@@ -1067,12 +1186,13 @@ public final class TinyBuddyCombinedSnapshotStore {
         fallbackDefaults?.synchronize()
 
         let sources = sourceValues()
-        var diagnosticReason = Self.diagnosticReason(in: sources)
+        let memo = SnapshotDecodeMemo()
+        var diagnosticReason = Self.diagnosticReason(in: sources, memo: memo)
         if diagnosticReason == .versionIncompatible {
             return ReadState(snapshot: nil, revisionFloor: 0, diagnosticReason: diagnosticReason)
         }
         let committedMarkerRevision = sources.compactMap { source in
-            source.committedRevisionMarker.flatMap(Self.decodeRevisionMarker)
+            source.committedRevisionMarker.flatMap(memo.revisionMarker)
         }.max()
         var committedCandidates: [TinyBuddyCombinedSnapshot] = []
         var stagedCandidates: [TinyBuddyCombinedSnapshot] = []
@@ -1083,20 +1203,20 @@ public final class TinyBuddyCombinedSnapshotStore {
         // cache and explicit fallback.
         for source in sources {
             let sourceCommittedRevision = source.committedRevisionMarker
-                .flatMap(Self.decodeRevisionMarker)
-            if source.revisionMarker.flatMap(Self.decodeRevisionMarker) != nil {
+                .flatMap(memo.revisionMarker)
+            if source.revisionMarker.flatMap(memo.revisionMarker) != nil {
                 hasV2Evidence = true
             }
             for value in [source.v2SlotA, source.v2SlotB, source.legacySnapshot] {
                 guard let value else {
                     continue
                 }
-                if Self.verifiedV3ClaimedRevision(value) != nil
-                    || Self.verifiedV2ClaimedRevision(value) != nil {
+                if memo.v3ClaimedRevision(value) != nil
+                    || memo.v2ClaimedRevision(value) != nil {
                     hasV2Evidence = true
                 }
-                guard let snapshot = Self.decodeV3(value)
-                    ?? Self.decodeV2(value) else {
+                guard let snapshot = memo.v3Snapshot(value)
+                    ?? memo.v2Snapshot(value) else {
                     continue
                 }
                 if sourceCommittedRevision.map({ snapshot.revision <= $0 }) == true {
@@ -1110,15 +1230,15 @@ public final class TinyBuddyCombinedSnapshotStore {
         var legacyCandidates: [TinyBuddyCombinedSnapshot] = []
         for source in sources {
             for value in [source.legacySnapshot, source.migrationBackupV1].compactMap({ $0 }) {
-                guard Self.decodeV3(value) == nil,
-                      Self.decodeV2(value) == nil,
-                      let snapshot = Self.decode(value) else {
+                guard memo.v3Snapshot(value) == nil,
+                      memo.v2Snapshot(value) == nil,
+                      let snapshot = memo.legacySnapshot(value) else {
                     continue
                 }
                 let sourceCommittedRevision = source.committedRevisionMarker
-                    .flatMap(Self.decodeRevisionMarker)
+                    .flatMap(memo.revisionMarker)
                 let sourceReservedRevision = source.revisionMarker
-                    .flatMap(Self.decodeRevisionMarker)
+                    .flatMap(memo.revisionMarker)
                 if !hasV2Evidence
                     || source.legacyHighestRevision == snapshot.revision
                     || sourceReservedRevision.map({ snapshot.revision <= $0 }) == true
@@ -1152,22 +1272,22 @@ public final class TinyBuddyCombinedSnapshotStore {
         var revisionFloor = durableRevisionFloor
         for source in sources {
             if let marker = source.revisionMarker,
-               let markedRevision = Self.decodeRevisionMarker(marker) {
+               let markedRevision = memo.revisionMarker(marker) {
                 revisionFloor = max(revisionFloor, markedRevision)
             }
             for value in [source.v2SlotA, source.v2SlotB] {
-                if let claimedRevision = value.flatMap(Self.verifiedV3ClaimedRevision)
-                    ?? value.flatMap(Self.verifiedV2ClaimedRevision) {
+                if let claimedRevision = value.flatMap(memo.v3ClaimedRevision)
+                    ?? value.flatMap(memo.v2ClaimedRevision) {
                     revisionFloor = max(revisionFloor, claimedRevision)
                 }
             }
             if let value = source.legacySnapshot,
-               let claimedRevision = Self.verifiedV3ClaimedRevision(value)
-                ?? Self.verifiedV2ClaimedRevision(value) {
+               let claimedRevision = memo.v3ClaimedRevision(value)
+                ?? memo.v2ClaimedRevision(value) {
                 revisionFloor = max(revisionFloor, claimedRevision)
             } else if let legacyHighestRevision = source.legacyHighestRevision,
                       let legacyValue = source.legacySnapshot,
-                      Self.legacyClaimedRevision(legacyValue) == legacyHighestRevision {
+                      memo.legacyClaimedRevision(legacyValue) == legacyHighestRevision {
                 revisionFloor = max(revisionFloor, legacyHighestRevision)
             }
         }
@@ -1262,7 +1382,8 @@ public final class TinyBuddyCombinedSnapshotStore {
     }
 
     private static func diagnosticReason(
-        in sources: [SourceValues]
+        in sources: [SourceValues],
+        memo: SnapshotDecodeMemo
     ) -> TinyBuddySharedSnapshotReason? {
         let snapshotValues = sources.flatMap { source in
             [source.v2SlotA, source.v2SlotB, source.legacySnapshot].compactMap { $0 }
@@ -1271,24 +1392,17 @@ public final class TinyBuddyCombinedSnapshotStore {
             [source.revisionMarker, source.committedRevisionMarker].compactMap { $0 }
         }
         let schemaMarkers = sources.compactMap(\.schemaVersionMarker)
-        if snapshotValues.contains(where: isUnknownEnvelopeVersion)
+        if snapshotValues.contains(where: memo.isUnknownEnvelopeVersion)
             || markers.contains(where: isUnknownMarkerVersion)
             || schemaMarkers.contains(where: isFutureSchemaVersion) {
             return .versionIncompatible
         }
-        if snapshotValues.contains(where: isMalformedSnapshotValue)
-            || markers.contains(where: isMalformedRevisionMarker)
+        if snapshotValues.contains(where: memo.isMalformedSnapshotValue)
+            || markers.contains(where: memo.isMalformedRevisionMarker)
             || schemaMarkers.contains(where: isMalformedSchemaVersion) {
             return .snapshotCorrupt
         }
         return nil
-    }
-
-    private static func isMalformedSnapshotValue(_ value: String) -> Bool {
-        guard value.isEmpty == false else {
-            return false
-        }
-        return decodeV3(value) == nil && decodeV2(value) == nil && decode(value) == nil
     }
 
     private static func isUnknownEnvelopeVersion(_ value: String) -> Bool {
@@ -1314,10 +1428,6 @@ public final class TinyBuddyCombinedSnapshotStore {
             return false
         }
         return version != 2
-    }
-
-    private static func isMalformedRevisionMarker(_ value: String) -> Bool {
-        value.isEmpty == false && decodeRevisionMarker(value) == nil
     }
 
     private static func isFutureSchemaVersion(_ value: String) -> Bool {

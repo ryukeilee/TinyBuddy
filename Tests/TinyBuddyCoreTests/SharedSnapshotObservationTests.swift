@@ -444,6 +444,303 @@ final class SharedSnapshotObservationTests: XCTestCase {
         XCTAssertEqual(read.failure, .snapshotCorrupt)
     }
 
+    // MARK: - Snapshot read payload-decode cost
+
+    /// Redundant-copies upper bound: both transactional slots hold the exact
+    /// same current-revision V3 raw value.
+    ///
+    /// This is an upper bound, not the production steady state.
+    /// `transactionalTargetKey(for:)` always overwrites the older-or-empty
+    /// slot, so once a second revision is committed the two slots carry
+    /// different revisions, and
+    /// `repairAncillaryCopiesLocked` only mirrors into a slot that is nil or
+    /// same-revision-but-different-content. Byte-identical slot contents only
+    /// happen when a duplicate copy exists, so this variant measures the most
+    /// any same-content sharing could ever save: the payload appears twice
+    /// verbatim in one read.
+    ///
+    /// Measures the read-only entry point over a V3 payload whose `fh`
+    /// focus-history publication is large enough that envelope and payload
+    /// decoding dominate a read. Every measured iteration reloads the same raw
+    /// values from scratch, so the numbers track per-read decode work rather
+    /// than any cross-read cache.
+    func testLoadReadOnlyDecodeCostWithRedundantSlotCopies() throws {
+        let dayIdentifier = "2026-07-16"
+        let snapshot = makeDecodeHeavySnapshot(
+            dayIdentifier: dayIdentifier,
+            revision: 7,
+            historyDayCount: 300,
+            projectCount: 60
+        )
+        let encoded = try XCTUnwrap(TinyBuddyCombinedSnapshotStore.encodeV3(snapshot))
+        let counter = ReadCounter()
+        let store = makeCountingStore(
+            values: redundantCopyValues(encodedV3: encoded, snapshot: snapshot),
+            counter: counter
+        )
+
+        // Self-verification: the measured path must really decode the payload
+        // instead of settling for an empty or stale candidate set, and one
+        // read must still load the source exactly once.
+        let readOnly = store.loadReadOnly()
+        XCTAssertEqual(readOnly, snapshot)
+        XCTAssertEqual(readOnly?.revision, snapshot.revision)
+        XCTAssertEqual(readOnly?.dayIdentifier, dayIdentifier)
+        XCTAssertEqual(readOnly?.focusHistoryPublication, snapshot.focusHistoryPublication)
+        XCTAssertEqual(counter.value, 1)
+
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        measure(metrics: [XCTClockMetric(), XCTMemoryMetric()], options: options) {
+            XCTAssertEqual(store.loadReadOnly(), snapshot)
+        }
+    }
+
+    /// Measures the validated read path over the same redundant-copies
+    /// large-focus-history V3 payload used by
+    /// `testLoadReadOnlyDecodeCostWithRedundantSlotCopies`.
+    func testReadValidatedDecodeCostWithRedundantSlotCopies() throws {
+        let dayIdentifier = "2026-07-16"
+        let snapshot = makeDecodeHeavySnapshot(
+            dayIdentifier: dayIdentifier,
+            revision: 7,
+            historyDayCount: 300,
+            projectCount: 60
+        )
+        let encoded = try XCTUnwrap(TinyBuddyCombinedSnapshotStore.encodeV3(snapshot))
+        let counter = ReadCounter()
+        let store = makeCountingStore(
+            values: redundantCopyValues(encodedV3: encoded, snapshot: snapshot),
+            counter: counter
+        )
+
+        let validated = store.readValidated(expectedDayIdentifier: dayIdentifier)
+        XCTAssertEqual(validated.snapshot, snapshot)
+        XCTAssertEqual(validated.snapshot?.revision, snapshot.revision)
+        XCTAssertEqual(validated.snapshot?.dayIdentifier, dayIdentifier)
+        XCTAssertEqual(
+            validated.snapshot?.focusHistoryPublication,
+            snapshot.focusHistoryPublication
+        )
+        XCTAssertNil(validated.observation)
+        XCTAssertEqual(counter.value, 1)
+
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        measure(metrics: [XCTClockMetric(), XCTMemoryMetric()], options: options) {
+            XCTAssertEqual(
+                store.readValidated(expectedDayIdentifier: dayIdentifier).snapshot,
+                snapshot
+            )
+        }
+    }
+
+    /// Production steady state after a commit: slot A keeps the previous
+    /// revision's V3 payload and slot B the current one, which is what
+    /// `transactionalTargetKey(for:)` leaves behind. The two slots therefore
+    /// hold different content and both must be decoded before the newer
+    /// revision can be selected.
+    func testLoadReadOnlyDecodeCostWithPreviousRevisionSlotCopies() throws {
+        let dayIdentifier = "2026-07-16"
+        let current = makeDecodeHeavySnapshot(
+            dayIdentifier: dayIdentifier,
+            revision: 8,
+            historyDayCount: 300,
+            projectCount: 60
+        )
+        let previous = makeDecodeHeavySnapshot(
+            dayIdentifier: dayIdentifier,
+            revision: 7,
+            historyDayCount: 299,
+            projectCount: 60
+        )
+        let encodedPrevious = try XCTUnwrap(
+            TinyBuddyCombinedSnapshotStore.encodeV3(previous)
+        )
+        let encodedCurrent = try XCTUnwrap(
+            TinyBuddyCombinedSnapshotStore.encodeV3(current)
+        )
+        let counter = ReadCounter()
+        let store = makeCountingStore(
+            values: steadyStateValues(
+                current: current,
+                encodedPrevious: encodedPrevious,
+                encodedCurrent: encodedCurrent
+            ),
+            counter: counter
+        )
+
+        // Self-verification: the measured path must decode both slot payloads
+        // and select the newer revision rather than the first slot visited,
+        // and one read must still load the source exactly once.
+        let readOnly = store.loadReadOnly()
+        XCTAssertEqual(readOnly, current)
+        XCTAssertEqual(readOnly?.revision, current.revision)
+        XCTAssertEqual(readOnly?.revision, 8)
+        XCTAssertEqual(readOnly?.dayIdentifier, dayIdentifier)
+        XCTAssertEqual(readOnly?.focusHistoryPublication, current.focusHistoryPublication)
+        XCTAssertNotEqual(readOnly, previous)
+        XCTAssertEqual(counter.value, 1)
+
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        measure(metrics: [XCTClockMetric(), XCTMemoryMetric()], options: options) {
+            XCTAssertEqual(store.loadReadOnly(), current)
+        }
+    }
+
+    /// Redundant-copies upper bound: the current-revision V3 envelope appears
+    /// verbatim in both transactional slots, while the V1 key still carries the
+    /// legacy mirror and the ancillary markers are present.
+    private func redundantCopyValues(
+        encodedV3: String,
+        snapshot: TinyBuddyCombinedSnapshot
+    ) -> [String: Any] {
+        [
+            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA: encodedV3,
+            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB: encodedV3,
+            TinyBuddyCombinedSnapshotStore.Key.snapshot:
+                TinyBuddyCombinedSnapshotStore.encode(snapshot),
+            TinyBuddyCombinedSnapshotStore.Key.highestRevision: snapshot.revision,
+            TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2:
+                TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(snapshot.revision) as Any,
+            TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2:
+                TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(snapshot.revision) as Any,
+            TinyBuddyCombinedSnapshotStore.Key.schemaVersion:
+                TinyBuddyCombinedSnapshotStore.encodeSchemaVersion() as Any
+        ]
+    }
+
+    /// Production steady state: slot A keeps the previous revision's V3 payload
+    /// and slot B the current revision's, with the V1 key mirroring the
+    /// committed current snapshot and the committed markers at its revision.
+    private func steadyStateValues(
+        current: TinyBuddyCombinedSnapshot,
+        encodedPrevious: String,
+        encodedCurrent: String
+    ) -> [String: Any] {
+        [
+            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotA: encodedPrevious,
+            TinyBuddyCombinedSnapshotStore.Key.snapshotV2SlotB: encodedCurrent,
+            TinyBuddyCombinedSnapshotStore.Key.snapshot:
+                TinyBuddyCombinedSnapshotStore.encode(current),
+            TinyBuddyCombinedSnapshotStore.Key.highestRevision: current.revision,
+            TinyBuddyCombinedSnapshotStore.Key.highestRevisionV2:
+                TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(current.revision) as Any,
+            TinyBuddyCombinedSnapshotStore.Key.committedRevisionV2:
+                TinyBuddyCombinedSnapshotStore.encodeRevisionMarker(current.revision) as Any,
+            TinyBuddyCombinedSnapshotStore.Key.schemaVersion:
+                TinyBuddyCombinedSnapshotStore.encodeSchemaVersion() as Any
+        ]
+    }
+
+    private func makeDecodeHeavySnapshot(
+        dayIdentifier: String,
+        revision: Int64,
+        historyDayCount: Int,
+        projectCount: Int
+    ) -> TinyBuddyCombinedSnapshot {
+        let days = makeHistoryDays(endingAt: dayIdentifier, count: historyDayCount)
+        let projects = (0 ..< projectCount).map { index in
+            FocusHistoryProject(
+                displayName: "Project \(index)",
+                isHistoricalArchive: index.isMultiple(of: 2),
+                focusDuration: Double(index * 60),
+                completedSessionCount: index,
+                focusShare: 1 / Double(projectCount)
+            )
+        }
+        let publication = FocusHistoryPublication(
+            revision: revision,
+            snapshot: FocusHistorySnapshot(
+                state: .available,
+                sourceHealth: .available,
+                recentDays: days,
+                currentWeek: FocusHistoryWeek(
+                    startDayIdentifier: days.first?.dayIdentifier ?? dayIdentifier,
+                    endDayIdentifier: dayIdentifier,
+                    state: .available,
+                    focusDuration: 12_345,
+                    completedSessionCount: historyDayCount,
+                    goalCompletionRate: 0.75,
+                    goalMetDayCount: 3,
+                    configuredGoalDayCount: 4,
+                    projectDistribution: projects
+                ),
+                currentGoalStreakDays: 2
+            )
+        )
+        return TinyBuddyCombinedSnapshot(
+            revision: revision,
+            dayIdentifier: dayIdentifier,
+            snapshot: TinyBuddySnapshot(
+                status: .completedOnce,
+                stats: DailyStats(dayIdentifier: dayIdentifier, focusCount: 2, completionCount: 1)
+            ),
+            activitySnapshot: GitTodayActivitySnapshot(
+                focusBlockCount: 3,
+                commitCount: 5,
+                recentProjectName: "Decode benchmark repository"
+            ),
+            activityRevision: 8,
+            focusHistoryPublication: publication
+        )
+    }
+
+    private func makeHistoryDays(
+        endingAt dayIdentifier: String,
+        count: Int
+    ) -> [FocusHistoryDay] {
+        historyDayIdentifiers(endingAt: dayIdentifier, count: count)
+            .enumerated()
+            .map { index, identifier in
+                FocusHistoryDay(
+                    dayIdentifier: identifier,
+                    state: .sessions,
+                    focusDuration: Double(index * 30),
+                    completedSessionCount: 1,
+                    goalMinutes: 60,
+                    goalCompletionRate: 0.5,
+                    isGoalMet: false,
+                    contributingSessionIDs: [
+                        UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!
+                    ]
+                )
+            }
+    }
+
+    private func historyDayIdentifiers(
+        endingAt dayIdentifier: String,
+        count: Int
+    ) -> [String] {
+        let parts = dayIdentifier.split(separator: "-").compactMap { Int($0) }
+        var calendar = Calendar(identifier: .gregorian)
+        guard parts.count == 3, let timeZone = TimeZone(secondsFromGMT: 0) else {
+            return []
+        }
+        calendar.timeZone = timeZone
+        guard let end = calendar.date(from: DateComponents(
+            year: parts[0],
+            month: parts[1],
+            day: parts[2],
+            hour: 12
+        )) else {
+            return []
+        }
+        return (0 ..< count).reversed().compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: end) else {
+                return nil
+            }
+            let components = calendar.dateComponents([.year, .month, .day], from: date)
+            guard let year = components.year,
+                  let month = components.month,
+                  let day = components.day else {
+                return nil
+            }
+            return String(format: "%04d-%02d-%02d", year, month, day)
+        }
+    }
+
     private func makeCountingStore(
         values: [String: Any],
         counter: ReadCounter
