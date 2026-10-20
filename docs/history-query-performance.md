@@ -813,3 +813,257 @@ git diff --check
 
 复测命令与两侧原始输出见 `.build/history-perf-r4/`（`final-chronological-*` 与
 `edited2-*`，未提交到仓库）。
+## 第五轮：每页有界选择（删除每页整档键数组与全量排序）
+
+本轮基线为 `471a7faf7f7a0c791533233a72b578a731adc754`（工作树无未提交改动），即第四轮结束
+状态。数据集、页面大小（50）、三种 provider 顺序、预热与中位数方法与 §可重复工作负载 相同；
+`TINYBUDDY_HISTORY_BENCHMARK_SIZES=2000,8000,16000`、`SAMPLES=5`、Release。
+
+两侧在同一会话内**成对交替**测量并各测两遍（A/B/A/B，A=本轮，B=基线），只把
+`Sources/TinyBuddyCore/FocusSessionQueryService.swift` 换成 HEAD 版本，测试文件与数据完全相同。
+每格取两轮最小值，单位毫秒：
+
+```sh
+cp Sources/TinyBuddyCore/FocusSessionQueryService.swift /tmp/cand.swift
+run () { for order in chronological edited shuffled; do
+  TINYBUDDY_HISTORY_BENCHMARK=1 TINYBUDDY_HISTORY_BENCHMARK_SIZES=2000,8000,16000 \
+  TINYBUDDY_HISTORY_BENCHMARK_SAMPLES=5 TINYBUDDY_HISTORY_BENCHMARK_ORDER=$order \
+    ./script/swiftpm.sh test -c release --filter HistoryQueryPerformanceTests/testHistoryQueryScenarioBaseline
+done }
+run; git checkout HEAD -- Sources/TinyBuddyCore/FocusSessionQueryService.swift; run
+cp /tmp/cand.swift Sources/TinyBuddyCore/FocusSessionQueryService.swift; run
+git checkout HEAD -- Sources/TinyBuddyCore/FocusSessionQueryService.swift; run
+```
+
+原始输出（每行一条场景中位数）在 `.build/history-query-perf/r5c-{cand1,base1,cand2,base2}-<order>.txt`，
+未提交到仓库。仍是合成 fixture + 真实注册表解析器 + 真实控制器接线，不是真实用户档案的测量。
+
+### `chronological`（从未重写过，生产可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 2.088 | 1.819 | 1.15× | 3.663 | 3.193 | 1.15× |
+| `serviceProjects` | 1.560 | 1.608 | 0.97× | 2.830 | 2.790 | 1.01× |
+| `serviceFilterOnly` | 0.171 | 0.159 | 1.08× | 0.316 | 0.300 | 1.05× |
+| `serviceFirstPage` | 0.473 | 0.210 | 2.25× | 0.919 | 0.376 | 2.44× |
+| `serviceFullPagination` | 77.676 | 44.950 | 1.73× | 287.283 | 151.867 | 1.89× |
+| `fullPagination` | 85.995 | 52.703 | 1.63× | 303.011 | 168.046 | 1.80× |
+| `renderedListPagination` | 86.363 | 52.310 | 1.65× | 303.020 | 166.553 | 1.82× |
+| `lastPage` | 0.463 | 0.251 | 1.84× | 0.864 | 0.442 | 1.95× |
+| `keywordFilterSwitch` | 4.633 | 4.348 | 1.07× | 8.239 | 7.712 | 1.07× |
+| `dayRangeFilterSwitch` | 3.843 | 3.674 | 1.05× | 7.005 | 6.548 | 1.07× |
+| `projectFilterSwitch` | 4.462 | 4.138 | 1.08× | 8.073 | 7.533 | 1.07× |
+| `statusFilterSwitch` | 4.124 | 3.639 | 1.13× | 7.582 | 6.370 | 1.19× |
+| `reviewViewLoad` | 2.060 | 1.817 | 1.13× | 3.687 | 3.277 | 1.13× |
+### `edited`（被重写过的档案，生产可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 2.439 | 1.937 | 1.26× | 4.462 | 3.399 | 1.31× |
+| `serviceProjects` | 1.605 | 1.581 | 1.02× | 2.812 | 2.980 | 0.94× |
+| `serviceFilterOnly` | 0.167 | 0.159 | 1.05× | 0.316 | 0.300 | 1.05× |
+| `serviceFirstPage` | 0.827 | 0.306 | 2.70× | 1.628 | 0.480 | 3.39× |
+| `serviceFullPagination` | 134.549 | 59.142 | 2.28× | 513.562 | 180.502 | 2.85× |
+| `fullPagination` | 142.556 | 65.489 | 2.18× | 529.872 | 197.150 | 2.69× |
+| `renderedListPagination` | 142.952 | 66.033 | 2.16× | 529.690 | 197.104 | 2.69× |
+| `lastPage` | 0.815 | 0.254 | 3.21× | 1.561 | 0.462 | 3.38× |
+| `keywordFilterSwitch` | 5.074 | 4.585 | 1.11× | 9.148 | 8.004 | 1.14× |
+| `dayRangeFilterSwitch` | 4.209 | 3.822 | 1.10× | 7.715 | 6.735 | 1.15× |
+| `projectFilterSwitch` | 4.832 | 4.437 | 1.09× | 8.635 | 7.736 | 1.12× |
+| `statusFilterSwitch` | 4.813 | 3.968 | 1.21× | 8.846 | 6.737 | 1.31× |
+| `reviewViewLoad` | 2.400 | 1.991 | 1.21× | 4.424 | 3.369 | 1.31× |
+### `shuffled`（固定种子乱序代理，不可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 11.228 | 1.705 | 6.59× | 22.947 | 2.746 | 8.36× |
+| `serviceProjects` | 1.333 | 1.366 | 0.98× | 2.265 | 2.242 | 1.01× |
+| `serviceFilterOnly` | 0.168 | 0.159 | 1.06× | 0.311 | 0.299 | 1.04× |
+| `serviceFirstPage` | 9.937 | 0.319 | 31.15× | 20.674 | 0.496 | 41.68× |
+| `serviceFullPagination` | 1,586.892 | 63.312 | 25.06× | 6,594.847 | 197.554 | 33.38× |
+| `fullPagination` | 1,593.628 | 70.052 | 22.75× | 6,614.686 | 213.075 | 31.04× |
+| `renderedListPagination` | 1,596.317 | 70.338 | 22.69× | 6,609.058 | 213.743 | 30.92× |
+| `lastPage` | 9.834 | 0.295 | 33.34× | 20.656 | 0.484 | 42.68× |
+| `keywordFilterSwitch` | 14.935 | 4.079 | 3.66× | 29.093 | 6.838 | 4.25× |
+| `dayRangeFilterSwitch` | 12.894 | 3.281 | 3.93× | 25.718 | 5.556 | 4.63× |
+| `projectFilterSwitch` | 13.571 | 3.901 | 3.48× | 26.381 | 6.566 | 4.02× |
+| `statusFilterSwitch` | 22.515 | 3.350 | 6.72× | 45.369 | 5.505 | 8.24× |
+| `reviewViewLoad` | 11.240 | 1.673 | 6.72× | 22.811 | 2.763 | 8.26× |
+### 小历史（2,000 条，默认规模）
+
+| 场景 | chronological 加速 | edited 加速 | shuffled 加速 |
+| --- | ---: | ---: | ---: |
+| `refreshFirstPage` | 1.07× | 1.10× | 0.98× |
+| `serviceFirstPage` | 1.54× | 1.49× | 0.95× |
+| `serviceFullPagination` | 1.34× | 1.71× | 2.08× |
+| `fullPagination` | 1.29× | 1.65× | 2.04× |
+| `lastPage` | 1.43× | 2.56× | 16.42× |
+| 四种筛选切换 | 1.04–1.07× | 1.00–1.12× | 0.94–1.03× |
+### 收益来源与量级
+
+按用户可见操作看：16,000 条时打开历史与复核视图入口快 1.15×（chronological）/
+1.31×（edited），四种筛选切换 1.07–1.19× / 1.12–1.31×，
+滚动到历史末尾 1.80× / 2.69×；首屏查询本体
+2.44× / 3.39×。2,000 条时幅度更小
+（1.00–2.56×）：小档案里 `projects()` 与控制器开销占主要部分。
+
+chronological 与 edited 两个可达顺序、三种规模下，除下面单独讨论的 `serviceProjects` 外没有任何
+场景慢于基线：最小一项是 edited 2,000 的 `keywordFilterSwitch` 1.00×（噪声内），最大
+3.39×。`serviceProjects` 的实现本轮**逐字未改**，取值在 0.94–1.03× 之间双向摆动，
+可见该列只是构建间漂移，不能当作收益或回退。
+
+`shuffled` 在 16,000 / 8,000 条上仍在快路径，但 **2,000 条的 `shuffled` 会触发回退**：该布局整档
+约需 9,200 次替换比较而预算是 `4 × 2,000 = 8,000`，于是每页先付一趟被放弃的扫描再走键数组路径，
+实测 0.98× / 0.95× / 四种筛选
+0.94–1.03×
+（`lastPage` 仍 16.42×）。`shuffled` 是不可达的乱序代理，这是有意的上界保护。
+
+`serviceProjects` 现在是 `refreshFirstPage` 的主导项：16,000 chronological 下
+2.790 / 3.193 = 87%，
+edited 下 88%（两个实测值之比，不是独立测量）。
+
+### 为什么不是「有界最大堆」：被本轮否掉的第一个实现
+
+第一次实现把候选键放进有界最大堆（根为最差键），每页仍只保留 `limit` 个键。它在功能上正确
+（当时 1,060 / 733 项测试全绿），但 A/B 基准显示**首屏变慢**：16,000 chronological
+`serviceFirstPage` 0.902 → 1.008 ms（0.90×）、`refreshFirstPage` 3.691 → 3.849 ms，
+只有 `edited` 分页（501 → 283 ms）与 `lastPage`（0.855 → 0.525）变快，因此按「不为低频场景
+牺牲首屏」的约定重新设计。回退到堆同样不行：微基准里它在最坏序列上比数组更差（见下表）。
+
+机制用独立 Release 微基准（16,000 行、9 次取最优、同机、单个 `.swift` 直接 `swiftc -O`，
+不提交，只是方向性证据）定位到「每行一次比较」的常数：
+
+| 每页做法 | chronological | shuffled | newest-first（病态） |
+| --- | ---: | ---: | ---: |
+| 建全部键 + 全量排序（基线） | 0.56–0.76 ms | 19.3–24.3 ms | 0.69–0.93 ms |
+| 有界最大堆（快速拒绝在前） | 0.10 ms | 0.21 ms | 6.9–9.3 ms |
+| 有界数组，拒绝路径先调 `DisplayOrderKey.precedes` | 0.41–0.43 ms | — | — |
+| **有界数组，拒绝路径先比较原始 `Double`**（本轮采用） | **0.043–0.049 ms** | **0.16–0.21 ms** | 4.7–6.1 ms（由回退阀兜住） |
+
+原因：`Date` 的 `<`/`!=` 是 Foundation 跨模块调用（本轮微基准约 6 ns/次），`precedes` 一次约
+23 ns/行，而「已经有序的扫描」里绝大多数行只需要被拒绝一次。改用键里已有的
+`startedAt.timeIntervalSinceReferenceDate` 与最差键的同一值比较（约 2.7 ns/行）后，整趟扫描的
+常数降到基线的约 1/12；堆带来的「替换更便宜」不再重要，于是删除堆，改为「有界数组 + 记住最差键」。
+
+### 实现与一致性边界（第五轮）
+
+1. **每页一趟 O(N) 扫描，不再为整档建键、不再全量排序。** `selectPage` 在同一次反向遍历里完成：
+   行本地谓词（day 区间、status）→ 需要时解析并匹配项目谓词 → 游标判定 → 有界选择。只保留
+   `limit` 个键（32 字节 × 50，替代原来按 provider 行数预留的键数组，16,000 行约 512 KB），
+   最后只对这 ≤ `limit` 个键排序并物化返回行。`limit >= sessions.count / 2` 的调用仍走原
+   「整档建键 + 排序」路径，`estimatedCount(query:)` 也仍然如此——因此「512 KB 键数组消失」
+   只对每页选择路径成立，不是全服务的普遍结论。
+2. **快速拒绝。** 页未满时无比较；页满后先比较原始 `Double`（`timeIntervalSinceReferenceDate`）：
+   严格更旧的候选立即跳过，不构造键、不调 `precedes`。判据的等价性前提是**有限时间戳**：
+   此时 `a < b` ⟹ `Date(a) != Date(b)` 且 `Date(a) > Date(b)` 为假，即该行确实排在当前最差键
+   之后。不成立时一律回落到完整 `precedes`，所以时间相等、`UUID` 相等、行下标 tie-break 都与
+   改动前一致。该前提依赖 `Date` 以单个 `Double` 存储时刻并按其比较（当前 Foundation 实现，
+   不是文档化保证）；表示若改变而排序关系不变则只影响速度，若排序关系改变才可能影响正确性——
+   这正是把非有限输入排除在外、而不是对它推理的原因。
+3. **非有限时间戳与游标走回退。** `NaN` 使比较器失去严格全序（旧实现的结果本身就不确定），
+   `±infinity` 虽可推理，但为把前提写成「只对有限值成立」，扫描在**行匹配之后、游标判定之前**
+   遇到 `!interval.isFinite` 立即回退；非有限游标在扫描前回退。守卫必须早于游标判定：`NaN` 行的
+   游标比较全为假，若先做游标测试，这类行会被当作「游标之前」直接跳过而不触发回退（第二轮复核
+   给出的 `[NaN, 1, 2, 3, 4, 5]` + 游标时间 1 的反例：旧实现返回页面，错误顺序下返回 `nil`）。
+   旧实现在 `NaN` 游标下按首页处理，回退路径逐字复现该行为，
+   不会变成 `nil`。
+4. **回退阀（工作量预算）。** 一次替换要付 O(limit) 的最差键重扫，所以预算按**比较次数**而不是
+   替换次数计：`replacementWork += kept.count`，超过 `4 × 快照行数`（有溢出保护）即回退。
+   于是选择阶段的总工作量上界是 `O(行数)` 而不是 `O(行数 × limit)`——后者在
+   `行数 = 3 × limit` 这类参数下可达 Θ(limit²)，本轮 review 的第一版预算（`16 × limit` 次替换）
+   正是漏了这一点。回退复用同一个已热的 `ProjectResolutionMemo`，因此不产生额外 resolver 调用，
+   页面、计数、游标与不回退时完全相同；`.fallbackToKeyArray` 与「游标之后没有行」
+   （`.cursorMiss` → `nil`，让上层从首页重启）是两种不同类型的结果，不会混用。
+5. **保持不变的语义**：版本过期先返回 `nil`；`limit <= 0` 返回 `.empty`；无游标且无匹配返回
+   `.empty`（总数为 `nil`）；带游标且游标之后没有匹配行返回 `nil`；游标谓词仍只用
+   `(startedAt, id)` 两个分量，因此共享同一 `(startedAt, id)` 的行依旧无法通过自己的游标续取；
+   `hasMore` = 「游标之后的匹配行数 > 本页行数」；`totalEstimatedCount` = 全匹配行数；
+   `nextCursor` 取本页最后一行；排序键与 tie-break 逐字未变。
+6. **项目解析调用契约不变**：带 `projectKey`/关键词时，对通过行本地谓词的每个精确输入 context
+   在该趟内解析一次，顺序与原来相同（反向遍历），游标之前的匹配行同样解析（回退时首遍的解析
+   已被 memo 记住，不重复调用）；无项目谓词的查询不为任何非返回行解析；返回页行走同一个 memo。
+   行本地谓词与页面行物化（`rowMatches`、`appendResolved`）由两条路径共用，避免两套实现漂移。
+7. **内存**：只测耗时。结构上每页选择路径不再分配按行数预留的键数组（16,000 行约 512 KB），
+   只保留 ≤ `limit` 个键与返回页的行；没有测分配量或 RSS，因此不声称整体内存占用下降。
+
+### 残留下界（本轮结束时）
+
+- **`serviceProjects` 是 `refreshFirstPage` 的主导项**（16,000 行占 85–88%，见 §收益来源与量级），
+  本轮按范围约定没有改它。
+- **每页仍是 O(N) 谓词扫描**：16,000 行 0.376 ms/页 chronological，其中选择与比较约 0.05 ms，
+  其余是一次 177 字节/行的快照遍历、谓词判断与 actor/物化开销。形状已从
+  `O(N log N) + 512 KB 分配` 变成 `O(N)`（外加 ≤ `4 × 行数` 次替换比较的上界）。
+- **没有引入跨页缓存**：理由与第二轮相同——生产没有覆盖所有会话变化的缓存失效版本，缓存会让
+  翻页读到陈旧行。每页仍重读 provider，`execute` 仍只调用一次 provider。
+- **`estimatedCount(query:)` 仍走完整键数组路径**（本轮未改；生产无调用者）。
+- **回退侧成本未单独实测**：触发时是「一趟被放弃的扫描 + 一趟完整键数组路径」，按微基准推算
+  约为基线单页的 1.1–2×，无界性已消除、结果不变。2,000 行 `shuffled` 是唯一在基准里观察到该
+  代价的场景（见 §收益来源与量级）。
+- **`shuffled` 仍只是不可达的乱序代理**，其 30–42×（8k/16k）不代表任何真实档案。
+- **非有限时间戳仍可写入存储**：本轮只保证查询路径不误判，没有加写入侧校验（不在本轮范围）。
+
+### 测试覆盖（本轮）
+
+`FocusSessionQueryTests` 52 项（第四轮 47 项）。新增/改写：
+
+- `assertPaginationMatchesReference`：把「逐页与朴素逐行参考实现比较」抽成共享 walk（页对象
+  逐字段比较、`estimatedCount` 交叉校验、每条匹配行恰好访问一次、遍历自行终止）。
+- `testSelectionPathMatchesPerRowReferenceImplementation`：480 行、limit 25（`25 < 480/2`，
+  确实走选择路径），13 种查询形状各走完整分页；同一批查询在 40 行 fixture 上走键数组路径。
+- `testBoundedSelectionAgreesWithKeyArrayPath`：400 行上「limit 50 连续翻页」与「一次取 400 行」
+  的行、顺序、总数、解析后身份相同——两条内部路径互为对照。
+- `testSelectionPathCursorBoundaries`、`testSelectionPathDuplicateSortKeysAreUnreachableThroughTheCursor`：
+  末页/越界游标、以及 10 行重复 `(startedAt, id)` 组跨页时续取返回 `nil`（固定既有怪癖）。
+- `testSelectionPathFallsBackToTheKeyArrayPathOnAdversarialOrder`：600 行 newest-first、limit 25/25/50，
+  三种查询各走完整分页并与逐行参考比较；自检断言改成工作量口径
+  （`(matching - limit) × limit > 4 × 行数`），确保 fixture 真的超过预算而不是恒真。
+- `testNonFiniteRowBeforeFiniteCursorFallsBack`：第二轮复核给出的反例本身（provider 顺序
+  `[NaN, 1, 2, 3, 4, 5]`、limit 1、游标为时间 1 的行）：断言结果**不是** `nil`、总匹配数 6、
+  且 `limit = 6` 时不重复地取回全部 6 行。刻意不断言胜出行与 `hasMore`——`NaN` 下比较器没有
+  严格全序，旧实现的胜出者本身也不确定；这里固定的是「是页面而不是游标丢失」。
+- `testNonFiniteTimestampsFallBackToTheKeyArrayPath`：快照含 `+infinity` / `-infinity` / `NaN`
+  时间戳；断言返回页是期望行的排列、计数正确、`limit = 行数` 时每行恰好取回一次、且 `NaN`
+  游标返回与无游标相同的页（复现旧二分行为）。不检查 `NaN` 行的相对顺序——那时比较器没有
+  全序，旧实现同样不确定。
+- `testSelectionFallbackKeepsResolverCallsPerContext`：回退路径下 resolver 仍按精确输入 context
+  记忆化（每个 context 至多一次）。
+- `testSelectionPathSentinelAndFastRejectKeepKeyArrayResults`：空 provider、匹配集为空、快照小于
+  页大小、`limit == 1`、同一 `startedAt` 的 `UUID` tie-break。
+
+变异验证：把快速拒绝从 `interval < worstInterval` 改成 `<=`，focused 套件两轮各出现 25 / 27 处
+失败（选择路径差分、既有差分、哨兵、append/展示顺序等价、跨页同时间戳、UUID 序），随后立即
+还原并校验 `shasum` 与原文件一致。临时探针（已删除、校验字节相同）确认：对抗顺序用例命中
+`.fallbackToKeyArray` 39 次（全部由工作量预算触发）、非有限用例命中 5 次（扫描 4 + 游标 1）
+另加 1 次预算回退、resolver 用例命中 1 次。
+
+### 验证范围与独立复核（本轮）
+
+选择 **Module/contract**：改动集中在 `TinyBuddyCore` 的查询服务，公开 API 与协议签名未变，
+唯一生产消费者仍是 `HistoryQueryController`。
+
+```sh
+./script/swiftpm.sh build
+./script/swiftpm.sh test --filter FocusSessionQueryTests      # 52 项
+./script/swiftpm.sh test                                      # 全量
+git diff --check
+```
+
+全量（最终修订上执行，退出码 0）：`TinyBuddyCoreTests` 1,064 项（1 项默认跳过的 opt-in
+性能测试）、`TinyBuddyAppTests` 733 项（2 项默认跳过），均 0 失败。
+
+表格中的数值来自定稿前的同一次三规模 A/B（`r5c`）。此后为修掉「有限游标 + `NaN` 行」的反例，
+把 `isFinite` 守卫移到了游标判定之前，并另跑一次 16,000 条的 A/B 复核（`r5d`，两轮最小值）：
+`serviceFirstPage` 2.42× / 3.36×、`serviceFullPagination` 1.73× / 2.64×、`fullPagination`
+1.66× / 2.51×、`refreshFirstPage` 1.23× / 1.43×（chronological / edited），方向与量级一致；
+该次候选侧两轮自身相差 5–10%，因此它只作为「守卫顺序调整没有引入回退」的复核，不替换上表。
+
+独立只读复核（跨模型）两轮：第 1 轮否掉了首版有界最大堆（首屏 0.90×，见 §为什么不是「有界最大堆」）
+并指出两项阻塞——`NaN` 游标下新旧实现返回不同结果、工作量预算按 `limit` 而非行数计仍可到
+`O(行数 × limit)`；两项均已修正（§实现与一致性边界 第 3、4 条）并补充了对应测试。第 2 轮针对
+修正后的定稿复核。
+
+没有运行 GUI 回归、`script/regression_gate.sh`、`benchmark_git_refresh.sh` 或 `release-install`：
+本轮不涉及 Git 刷新、签名、安装、Widget 数据或发布行为，且这些命令会操作外部状态。因此证据
+覆盖查询服务的 CPU 工作量与历史列表分页的功能行为，不代表真实 GUI 进程的滚动帧率、RSS 或整机
+能耗，也不代表真实档案中重写行的实际占比（`edited` 的 2% 仍是代表性假设）。微基准是单文件、
+未提交的方向性证据；正式证据是上面三张基准表，两者口径不同，不可混用。

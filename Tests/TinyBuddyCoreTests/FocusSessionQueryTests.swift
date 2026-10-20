@@ -318,10 +318,90 @@ final class FocusSessionQueryTests: XCTestCase {
         )
     }
 
+    /// Walks one query to exhaustion through the optimised service and the naive
+    /// per-row reference, asserting page by page: same rows, same order, same
+    /// resolved project identity, same cursor, same counts. Also asserts the walk
+    /// visits every matching row exactly once and terminates by exhausting the
+    /// result set, so a page path that skips, repeats or never ends fails here.
+    ///
+    /// The reference re-derives each page from the whole fixture, and
+    /// `estimatedCount` still counts through the key-array pass, so the same call
+    /// cross-checks each internal page path against the other definition of the
+    /// result set. Returns the visited row ids so a caller can assert a property
+    /// of the traversal itself.
+    @discardableResult
+    private func assertPaginationMatchesReference(
+        service: FocusSessionQueryService,
+        sessions: [FocusSession],
+        query: FocusSessionQuery,
+        limit: Int,
+        resolver: (FocusProjectContext) -> FocusProjectContext,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> [UUID] {
+        // A walk needs at most one page per row; the slack absorbs a page that
+        // is not full before the cap trips, which is what makes a walk that never
+        // exhausts the result set fail rather than hang.
+        let pageCap = sessions.count / limit + 3
+        var cursor: FocusSessionCursor?
+        var pages = 0
+        var visited: [UUID] = []
+        var reportedTotal: Int?
+        while pages < pageCap {
+            let expected = referencePage(
+                sessions: sessions,
+                query: query,
+                cursor: cursor,
+                limit: limit,
+                resolver: resolver
+            )
+            let actual = await service.execute(
+                query: query,
+                cursor: cursor,
+                limit: limit,
+                version: 0
+            )
+            XCTAssertEqual(
+                actual,
+                expected,
+                "page \(pages) diverged for query \(query) with cursor \(String(describing: cursor))",
+                file: file,
+                line: line
+            )
+            let estimatedCount = await service.estimatedCount(query: query)
+            XCTAssertEqual(
+                estimatedCount,
+                expected?.totalEstimatedCount ?? 0,
+                "estimated count diverged for query \(query)",
+                file: file,
+                line: line
+            )
+            guard let page = actual else {
+                // Continuity break: pagination must restart, so the walk ends.
+                XCTFail("pagination lost continuity for query \(query) at page \(pages)", file: file, line: line)
+                break
+            }
+            reportedTotal = reportedTotal ?? page.totalEstimatedCount
+            visited.append(contentsOf: page.sessions.map(\.id))
+            guard page.hasMore, let next = page.nextCursor else { break }
+            cursor = next
+            pages += 1
+        }
+        XCTAssertEqual(visited.count, reportedTotal ?? 0, "pagination must visit every matching row", file: file, line: line)
+        XCTAssertEqual(Set(visited).count, visited.count, "pagination must not repeat a row", file: file, line: line)
+        XCTAssertLessThan(pages, pageCap, "pagination must terminate by exhausting the result set", file: file, line: line)
+        return visited
+    }
+
     /// Every page the optimised service returns must equal the naive per-row
     /// reference: same rows, same order, same resolved project identity, same
     /// cursor and counts. Rows are emitted newest first with legacy alias keys
     /// so resolution is observable in the returned page.
+    ///
+    /// This fixture holds 240 rows and pages at 25, and `25 < 240 / 2`, so after
+    /// the bounded selection landed this walk routes to the selection path.
+    /// `testSelectionPathMatchesPerRowReferenceImplementation` keeps a larger
+    /// fixture on that path and also holds the key-array path to the reference.
     func testMemoisedQueryMatchesPerRowReferenceImplementation() async throws {
         let sessions: [FocusSession] = (0 ..< 240).map { index in
             let day = String(format: "2026-07-%02d", 1 + index / 20)
@@ -390,55 +470,800 @@ final class FocusSessionQueryTests: XCTestCase {
             )
         ]
 
+        // 25-row pages over 240 rows route to the bounded selection path; the
+        // key-array path is covered below on a fixture whose page is at least
+        // half of the snapshot.
+        XCTAssertLessThan(25, providerRows.count / 2, "25 < 240 / 2 takes the selection path")
         for query in queries {
-            var cursor: FocusSessionCursor?
-            var pages = 0
-            var visited: [UUID] = []
-            var reportedTotal: Int?
-            // The fixture holds 240 rows, so an unbounded walk must end because
-            // `hasMore` became false, not because a page cap was hit.
-            while pages < 40 {
-                let expected = referencePage(
-                    sessions: providerRows,
-                    query: query,
-                    cursor: cursor,
-                    limit: 25,
-                    resolver: resolver
-                )
-                let actual = await service.execute(
-                    query: query,
-                    cursor: cursor,
-                    limit: 25,
-                    version: 0
-                )
-                XCTAssertEqual(
-                    actual,
-                    expected,
-                    "page \(pages) diverged for query \(query) with cursor \(String(describing: cursor))"
-                )
-                let estimatedCount = await service.estimatedCount(query: query)
-                XCTAssertEqual(
-                    estimatedCount,
-                    expected?.totalEstimatedCount ?? 0,
-                    "estimated count diverged for query \(query)"
-                )
-                guard let page = actual else {
-                    // Continuity break: pagination must restart, so the walk ends.
-                    XCTFail("pagination lost continuity for query \(query) at page \(pages)")
-                    break
-                }
-                reportedTotal = reportedTotal ?? page.totalEstimatedCount
-                visited.append(contentsOf: page.sessions.map(\.id))
-                guard page.hasMore, let next = page.nextCursor else { break }
-                cursor = next
-                pages += 1
-            }
-            // Walking every page visits each matching row exactly once and stops
-            // on its own, independent of the shared cursor search shape.
-            XCTAssertEqual(visited.count, reportedTotal ?? 0, "pagination must visit every matching row")
-            XCTAssertEqual(Set(visited).count, visited.count, "pagination must not repeat a row")
-            XCTAssertLessThan(pages, 40, "pagination must terminate by exhausting the result set")
+            await assertPaginationMatchesReference(
+                service: service,
+                sessions: providerRows,
+                query: query,
+                limit: 25,
+                resolver: resolver
+            )
         }
+    }
+
+    /// A history big enough for a page to take the bounded selection path:
+    /// `limit` must stay below `count / 2`, which is the split `execute` uses.
+    ///
+    /// Rows are interleaved newest/oldest so the provider order is neither
+    /// display order nor one descending run; each project is fed by three
+    /// distinct display names, so a returned page has to carry the resolved
+    /// identity; `count / 10` rows share one timestamp, so a uuid tie group
+    /// straddles whole pages; and the local days spread over twelve days for the
+    /// range filters.
+    private func selectionFixtureRows(count: Int) -> [FocusSession] {
+        let base = Date(timeIntervalSinceReferenceDate: 990_000_000)
+        let tieBlock = (count / 2) ..< (count / 2 + count / 10)
+        let chronological: [FocusSession] = (0 ..< count).map { index in
+            let startedAt = tieBlock.contains(index)
+                ? base.addingTimeInterval(500_000)
+                : base.addingTimeInterval(Double(index) * 900)
+            let status: FocusSessionStatus = index % 17 == 0
+                ? .active
+                : (index % 23 == 0 ? .paused : .ended)
+            return FocusSession(
+                id: UUID(),
+                project: FocusProjectContext(
+                    key: "repo.\(index % 6)",
+                    displayName: "Legacy \(index % 6)-\(index % 3)"
+                ),
+                dayIdentifier: String(format: "2026-07-%02d", 1 + (index * 12) / count),
+                startedAt: startedAt,
+                endedAt: status == .ended ? startedAt.addingTimeInterval(600) : nil,
+                status: status,
+                lastUserActivityAt: startedAt,
+                lastStateChangeAt: startedAt
+            )
+        }
+        var providerRows: [FocusSession] = []
+        providerRows.reserveCapacity(chronological.count)
+        var lower = 0
+        var upper = chronological.count - 1
+        while lower <= upper {
+            providerRows.append(chronological[upper])
+            if lower != upper { providerRows.append(chronological[lower]) }
+            lower += 1
+            upper -= 1
+        }
+        return providerRows
+    }
+
+    /// The legacy `repo.N` fixture contexts resolve onto `project.N`, so a page
+    /// has to carry the resolved identity instead of the stored one.
+    private static func selectionFixtureResolver(_ context: FocusProjectContext) -> FocusProjectContext {
+        guard let index = Int(context.key.dropFirst("repo.".count)) else { return context }
+        return FocusProjectContext(key: "project.\(index)", displayName: "Project \(index)")
+    }
+
+    /// A snapshot in newest-first order: the adversarial layout for the bounded
+    /// selection, whose pass walks the snapshot backwards and therefore walks this
+    /// one oldest first. Once the page is full, every further matching row sorts
+    /// before the current worst kept key and replaces it.
+    ///
+    /// Timestamps decrease strictly with the row index, so no tie can soften
+    /// that; the local days cover 50 consecutive rows each (`1 + index / 50`), so
+    /// a day-range filter still leaves most of a 600-row history; the six
+    /// `repo.N` projects cycle per row, so a project-key filter is a sixth of it;
+    /// and the statuses vary so a status filter is a subset as well.
+    private func adversarialSelectionRows(count: Int) -> [FocusSession] {
+        let base = Date(timeIntervalSinceReferenceDate: 1_000_000_000)
+        return (0 ..< count).map { index in
+            let startedAt = base.addingTimeInterval(Double(count - index) * 900)
+            let status: FocusSessionStatus = index % 17 == 0
+                ? .active
+                : (index % 23 == 0 ? .paused : .ended)
+            return FocusSession(
+                id: UUID(),
+                project: FocusProjectContext(key: "repo.\(index % 6)", displayName: "Legacy \(index % 6)"),
+                dayIdentifier: String(format: "2026-07-%02d", 1 + index / 50),
+                startedAt: startedAt,
+                endedAt: status == .ended ? startedAt.addingTimeInterval(600) : nil,
+                status: status,
+                lastUserActivityAt: startedAt,
+                lastStateChangeAt: startedAt
+            )
+        }
+    }
+
+    /// A snapshot with non-finite `startedAt` values among finite rows:
+    /// `+infinity`, `-infinity` and `NaN` each get their own local day, so a
+    /// one-day query isolates exactly one of them, and all three plus seven
+    /// finite rows share the `2026-07-20 … 2026-07-23` window the combined query
+    /// below selects.
+    ///
+    /// The finite timestamps decrease with the row index, so the reversed scan
+    /// walks them oldest first; the non-finite rows sit in the middle of the
+    /// snapshot, so a pass that never guarded them would compare them against
+    /// finite kept keys. Every row is `.ended` and unfiltered queries match the
+    /// whole snapshot.
+    private func nonFiniteTimestampRows() -> [FocusSession] {
+        let base = Date(timeIntervalSinceReferenceDate: 1_000_000_000)
+        let nonFinite: [(interval: TimeInterval, day: String)] = [
+            (.infinity, "2026-07-20"),
+            (-.infinity, "2026-07-21"),
+            (.nan, "2026-07-22")
+        ]
+        return (0 ..< 40).map { index in
+            // Indices 0, 4, 8, … 36 are the special rows; the first three of
+            // them carry the non-finite timestamps.
+            let specialIndex = index / 4
+            let isSpecial = index % 4 == 0
+            let startedAt: Date
+            let day: String
+            if isSpecial, specialIndex < nonFinite.count {
+                startedAt = Date(timeIntervalSinceReferenceDate: nonFinite[specialIndex].interval)
+                day = nonFinite[specialIndex].day
+            } else {
+                startedAt = base.addingTimeInterval(-Double(index) * 600)
+                day = isSpecial ? "2026-07-23" : "2026-08-01"
+            }
+            return FocusSession(
+                id: UUID(),
+                project: alpha,
+                dayIdentifier: day,
+                startedAt: startedAt,
+                endedAt: base,
+                status: .ended,
+                lastUserActivityAt: base,
+                lastStateChangeAt: base
+            )
+        }
+    }
+
+    /// The bounded selection path against the naive per-row reference.
+    func testSelectionPathMatchesPerRowReferenceImplementation() async throws {
+        let providerRows = selectionFixtureRows(count: 480)
+        XCTAssertEqual(Set(providerRows.map(\.id)).count, providerRows.count, "fixture rows must be unique")
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = FocusSessionQueryTests.selectionFixtureResolver
+        let service = FocusSessionQueryService(
+            sessionProvider: { providerRows },
+            projectResolver: resolver
+        )
+
+        let limit = 25
+        XCTAssertLessThan(limit, providerRows.count / 2, "the fixture must take the selection path")
+        let queries: [FocusSessionQuery] = [
+            FocusSessionQuery(),
+            FocusSessionQuery(dayStart: "2026-07-03", dayEnd: "2026-07-07"),
+            FocusSessionQuery(dayStart: "2026-07-09"),
+            FocusSessionQuery(dayEnd: "2026-07-02"),
+            FocusSessionQuery(status: .ended),
+            FocusSessionQuery(status: .paused),
+            FocusSessionQuery(projectKey: "project.3"),
+            FocusSessionQuery(keyword: "PROJECT 4"),
+            FocusSessionQuery(keyword: "Project 2"),
+            FocusSessionQuery(keyword: ""),
+            FocusSessionQuery(
+                dayStart: "2026-07-02",
+                dayEnd: "2026-07-10",
+                projectKey: "project.1",
+                status: .ended,
+                keyword: "project"
+            ),
+            FocusSessionQuery(projectKey: "project.missing"),
+            FocusSessionQuery(keyword: "no-such-project")
+        ]
+
+        for query in queries {
+            await assertPaginationMatchesReference(
+                service: service,
+                sessions: providerRows,
+                query: query,
+                limit: limit,
+                resolver: resolver
+            )
+        }
+
+        // The same reference over the key-array path: a 25-row page over 40 rows
+        // is at least half of the snapshot, so both this walk's pages take the
+        // full key-array path and its cursor search.
+        let fallbackRows = selectionFixtureRows(count: 40)
+        let fallbackService = FocusSessionQueryService(
+            sessionProvider: { fallbackRows },
+            projectResolver: resolver
+        )
+        XCTAssertGreaterThanOrEqual(limit, fallbackRows.count / 2, "25 >= 40 / 2 takes the key-array path")
+        for query in queries {
+            await assertPaginationMatchesReference(
+                service: fallbackService,
+                sessions: fallbackRows,
+                query: query,
+                limit: limit,
+                resolver: resolver
+            )
+        }
+    }
+
+    /// The two internal page paths must agree on the same fixture: paging the
+    /// selection path at 50 rows and taking the whole result set in one key-array
+    /// page yield the same rows in the same order, with the same total.
+    func testBoundedSelectionAgreesWithKeyArrayPath() async throws {
+        let rows = selectionFixtureRows(count: 400)
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext = FocusSessionQueryTests.selectionFixtureResolver
+        let service = FocusSessionQueryService(
+            sessionProvider: { rows },
+            projectResolver: resolver
+        )
+        let pageSize = 50
+        let wholeResultLimit = rows.count
+        XCTAssertLessThan(pageSize, wholeResultLimit / 2, "the paged walk must take the selection path")
+        XCTAssertGreaterThanOrEqual(wholeResultLimit, wholeResultLimit / 2, "one page must take the key-array path")
+
+        var pagedRows: [FocusSession] = []
+        var pagedTotal: Int?
+        var cursor: FocusSessionCursor?
+        var pages = 0
+        while pages <= wholeResultLimit / pageSize {
+            let pageResult = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: cursor,
+                limit: pageSize,
+                version: 0
+            )
+            let page = try XCTUnwrap(pageResult)
+            pagedTotal = pagedTotal ?? page.totalEstimatedCount
+            pagedRows.append(contentsOf: page.sessions)
+            guard page.hasMore, let next = page.nextCursor else { break }
+            cursor = next
+            pages += 1
+        }
+
+        let wholePageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: wholeResultLimit,
+            version: 0
+        )
+        let wholePage = try XCTUnwrap(wholePageResult)
+        XCTAssertEqual(wholePage.sessions.count, rows.count)
+        XCTAssertEqual(pagedRows.count, wholePage.sessions.count, "both paths must return every row")
+        XCTAssertEqual(
+            pagedRows.map(\.id),
+            wholePage.sessions.map(\.id),
+            "both paths must return the rows in the same order"
+        )
+        XCTAssertEqual(pagedRows, wholePage.sessions, "both paths must return the same rows")
+        XCTAssertEqual(pagedTotal, wholePage.totalEstimatedCount)
+        XCTAssertFalse(wholePage.hasMore)
+        XCTAssertNil(wholePage.nextCursor)
+        // The concatenation is display order: newest first, then uuid ascending.
+        // The rows themselves resolve their project, so ids pin the order and the
+        // comparison above pins the content.
+        let displayOrdered = rows.sorted { a, b in
+            if a.startedAt != b.startedAt { return a.startedAt > b.startedAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+        XCTAssertEqual(pagedRows.map(\.id), displayOrdered.map(\.id), "the pages must be display order")
+        XCTAssertEqual(
+            pagedRows.map(\.project),
+            displayOrdered.map { FocusSessionQueryTests.selectionFixtureResolver($0.project) },
+            "every page row must carry the resolved project identity"
+        )
+    }
+
+    /// Cursor boundaries on the selection path: `hasMore` follows the rows that
+    /// remain after the cursor, the last page carries neither a cursor nor
+    /// `hasMore`, and a cursor at or past the last sort key has no continuation.
+    func testSelectionPathCursorBoundaries() async throws {
+        let base = try date("2026-07-20T00:00:00Z")
+        let rows = makeOrderedSessions(count: 60, project: alpha, base: base)
+        let service = makeService(sessions: rows)
+        let limit = 10
+        XCTAssertLessThan(limit, rows.count / 2, "the walk must take the selection path")
+
+        var pages: [FocusSessionQueryPage] = []
+        var cursor: FocusSessionCursor?
+        while true {
+            let result = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: cursor,
+                limit: limit,
+                version: 0
+            )
+            let page = try XCTUnwrap(result)
+            pages.append(page)
+            guard page.hasMore, let next = page.nextCursor else { break }
+            cursor = next
+        }
+        XCTAssertEqual(pages.count, rows.count / limit)
+        XCTAssertEqual(pages.last?.sessions.count, limit)
+        XCTAssertFalse(try XCTUnwrap(pages.last).hasMore, "the final page must not report more rows")
+        XCTAssertNil(pages.last?.nextCursor, "the final page must not hand out a cursor")
+        XCTAssertTrue(pages.dropLast().allSatisfy { $0.hasMore && $0.nextCursor != nil })
+        XCTAssertEqual(pages.flatMap(\.sessions), Array(rows.reversed()), "every row once, newest first")
+        XCTAssertEqual(pages.first?.totalEstimatedCount, rows.count)
+
+        // A cursor on the last row's sort key has nothing strictly after it.
+        let oldest = try XCTUnwrap(rows.first)
+        let atLastRow = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: FocusSessionCursor(lastStartedAt: oldest.startedAt, lastID: oldest.id),
+            limit: limit,
+            version: 0
+        )
+        XCTAssertNil(atLastRow, "a cursor on the last sort key has no continuation")
+
+        // A cursor past the end of the result set restarts pagination instead of
+        // returning an empty page that would truncate the remaining rows.
+        let pastEnd = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: FocusSessionCursor(
+                lastStartedAt: base.addingTimeInterval(-3_600),
+                lastID: try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000000"))
+            ),
+            limit: limit,
+            version: 0
+        )
+        XCTAssertNil(pastEnd, "no row sorts strictly after a cursor past the end")
+    }
+
+    /// A duplicate `(startedAt, id)` group that straddles a page boundary: the
+    /// page holding the first duplicate reports `hasMore`, and the next request
+    /// returns `nil` instead of handing out the remaining duplicates, because no
+    /// row sorts strictly after a key it shares. The group is larger than a page
+    /// so the split really lands inside it.
+    func testSelectionPathDuplicateSortKeysAreUnreachableThroughTheCursor() async throws {
+        let base = try date("2026-07-20T00:00:00Z")
+        let shared = try date("2026-07-19T00:00:00Z")
+        let sharedID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-0000000000ab"))
+        var rows = makeOrderedSessions(count: 20, project: alpha, base: base)
+        for index in 0 ..< 10 {
+            rows.append(session(
+                project: FocusProjectContext(key: "repo.duplicate", displayName: "Duplicate \(index)"),
+                day: "2026-07-20",
+                start: shared,
+                id: sharedID
+            ))
+        }
+        let service = makeService(sessions: rows)
+        let limit = 5
+        XCTAssertLessThan(limit, rows.count / 2, "the walk must take the selection path")
+
+        // The 20 distinct rows paginate normally, each page continuing from the
+        // cursor of the previous one.
+        var cursor: FocusSessionCursor?
+        var visited: [UUID] = []
+        for page in 0 ..< 4 {
+            let result = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: cursor,
+                limit: limit,
+                version: 0
+            )
+            let pageResult = try XCTUnwrap(result, "page \(page) must continue")
+            XCTAssertTrue(pageResult.hasMore)
+            XCTAssertEqual(pageResult.sessions.count, limit)
+            visited.append(contentsOf: pageResult.sessions.map(\.id))
+            cursor = try XCTUnwrap(pageResult.nextCursor)
+        }
+        XCTAssertEqual(visited, rows.prefix(20).reversed().map(\.id), "the distinct rows, newest first")
+        XCTAssertEqual(Set(visited).count, 20)
+
+        // The next page is the first half of the duplicate group: the rows are
+        // indistinguishable, but the page boundary is inside the group.
+        let duplicatePageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: cursor,
+            limit: limit,
+            version: 0
+        )
+        let duplicatePage = try XCTUnwrap(duplicatePageResult)
+        XCTAssertEqual(duplicatePage.sessions.count, limit)
+        XCTAssertEqual(Set(duplicatePage.sessions.map(\.id)), [sharedID])
+        XCTAssertEqual(duplicatePage.totalEstimatedCount, rows.count)
+        XCTAssertTrue(duplicatePage.hasMore, "the remaining duplicates count as more rows")
+        let duplicateCursor = try XCTUnwrap(duplicatePage.nextCursor)
+        XCTAssertEqual(duplicateCursor.lastStartedAt, shared)
+        XCTAssertEqual(duplicateCursor.lastID, sharedID)
+
+        // No row sorts strictly after the shared key, so the continuation is a
+        // restart signal, not the rest of the group.
+        let afterDuplicates = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: duplicateCursor,
+            limit: limit,
+            version: 0
+        )
+        XCTAssertNil(afterDuplicates, "rows sharing the cursor's sort key stay unreachable")
+    }
+
+    /// The bounded selection must hand the page to the key-array path once a scan
+    /// keeps beating its worst kept key, and falling back must not change a
+    /// single observable result.
+    ///
+    /// The fixture is a newest-first snapshot, so the reversed scan walks it
+    /// oldest first: after the first `limit` rows fill the page, every remaining
+    /// matching row sorts before the current worst kept key and replaces it. A
+    /// query over `matching` such rows therefore implies `matching - limit`
+    /// replacements, each paying for one `limit`-sized rescan of the kept keys,
+    /// so it implies `(matching - limit) × limit` comparisons. Each case below
+    /// asserts that work against the valve's budget (`4 × rows`) before it walks:
+    /// that self-check is what keeps this test exercising the fallback instead of
+    /// quietly paging a result set too small to trip it. The walks then compare
+    /// every page of the fallback pass with the per-row reference implementation,
+    /// page metadata included.
+    ///
+    /// The project-key case narrows the result set to a sixth of the history, so
+    /// it pages at a larger limit to keep its replacement work above the budget;
+    /// `limit` must still stay below half of the snapshot for `execute` to take
+    /// the selection path at all.
+    func testSelectionPathFallsBackToTheKeyArrayPathOnAdversarialOrder() async throws {
+        let rows = adversarialSelectionRows(count: 600)
+        XCTAssertEqual(Set(rows.map(\.id)).count, rows.count, "fixture rows must be unique")
+        XCTAssertTrue(
+            zip(rows, rows.dropFirst()).allSatisfy { $0.startedAt > $1.startedAt },
+            "the fixture must be newest first, so the reversed scan walks oldest first"
+        )
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext =
+            FocusSessionQueryTests.selectionFixtureResolver
+        let service = FocusSessionQueryService(sessionProvider: { rows }, projectResolver: resolver)
+
+        let projectKey = "project.3"
+        let cases: [(query: FocusSessionQuery, limit: Int, matching: Int)] = [
+            (FocusSessionQuery(), 25, rows.count),
+            (
+                FocusSessionQuery(dayStart: "2026-07-02"),
+                25,
+                rows.filter { $0.dayIdentifier >= "2026-07-02" }.count
+            ),
+            (
+                FocusSessionQuery(projectKey: projectKey),
+                50,
+                rows.filter { resolver($0.project).key == projectKey }.count
+            )
+        ]
+        for (query, limit, matching) in cases {
+            XCTAssertLessThan(limit, rows.count / 2, "the walk must take the selection path")
+            XCTAssertGreaterThan(
+                (matching - limit) * limit,
+                4 * rows.count,
+                "\(matching) matching rows at limit \(limit) must exceed the \(4 * rows.count)-comparison work budget"
+            )
+            await assertPaginationMatchesReference(
+                service: service,
+                sessions: rows,
+                query: query,
+                limit: limit,
+                resolver: resolver
+            )
+        }
+    }
+
+    /// A non-finite `startedAt` must be answered by the previous key-array path:
+    /// the fast reject and the bounded selection are only defined for finite
+    /// intervals, and `NaN` in particular leaves the keys without a strict total
+    /// order.
+    ///
+    /// Ordering involving a `NaN` timestamp is unspecified, so the page is
+    /// asserted as a permutation of the expected rows rather than in an exact
+    /// order: the previous implementation was equally arbitrary there, and this
+    /// test pins the property that actually changed — which rows come back, how
+    /// many the result set claims, and that no row is lost or duplicated.
+    func testNonFiniteTimestampsFallBackToTheKeyArrayPath() async throws {
+        let rows = nonFiniteTimestampRows()
+        XCTAssertEqual(rows.count, 40)
+        XCTAssertEqual(Set(rows.map(\.id)).count, rows.count, "fixture rows must be unique")
+        XCTAssertEqual(rows.filter { !$0.startedAt.timeIntervalSinceReferenceDate.isFinite }.count, 3)
+        let service = makeService(sessions: rows)
+
+        // (a) A page request over the rows of the three non-finite days plus the
+        // finite rows of `2026-07-23`: ten matching rows, so the page is a
+        // permutation of them and the walk takes the selection path.
+        let combined = FocusSessionQuery(dayStart: "2026-07-20", dayEnd: "2026-07-23")
+        let expectedIDs = Set(
+            rows.filter { $0.dayIdentifier >= "2026-07-20" && $0.dayIdentifier <= "2026-07-23" }
+                .map(\.id)
+        )
+        XCTAssertEqual(expectedIDs.count, 10)
+        let pageLimit = 10
+        XCTAssertLessThan(pageLimit, rows.count / 2, "the request must take the selection path")
+        let pageResult = await service.execute(query: combined, cursor: nil, limit: pageLimit, version: 0)
+        let page = try XCTUnwrap(pageResult)
+        XCTAssertEqual(page.sessions.count, expectedIDs.count)
+        XCTAssertEqual(Set(page.sessions.map(\.id)), expectedIDs, "the page must be a permutation of the matching rows")
+        XCTAssertEqual(page.totalEstimatedCount, expectedIDs.count)
+        XCTAssertFalse(page.hasMore)
+        XCTAssertNil(page.nextCursor)
+
+        // Each non-finite value on its own: a query for its day reaches that row
+        // before the page fills, so the guard in the scan is what answers it.
+        for row in rows where !row.startedAt.timeIntervalSinceReferenceDate.isFinite {
+            let singleResult = await service.execute(
+                query: FocusSessionQuery(dayStart: row.dayIdentifier, dayEnd: row.dayIdentifier),
+                cursor: nil,
+                limit: pageLimit,
+                version: 0
+            )
+            let single = try XCTUnwrap(singleResult)
+            XCTAssertEqual(single.sessions.map(\.id), [row.id], "a non-finite row must still be returned")
+            XCTAssertEqual(single.totalEstimatedCount, 1)
+            XCTAssertFalse(single.hasMore)
+        }
+
+        // (b) A whole-history request returns every row exactly once, non-finite
+        // rows included. Paging through them is not asserted: a cursor taken from
+        // a `NaN` row cannot continue the order at all, which is true of the
+        // previous implementation too (see (c)).
+        let wholePageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: rows.count,
+            version: 0
+        )
+        let wholeResult = try XCTUnwrap(wholePageResult)
+        XCTAssertEqual(wholeResult.sessions.count, rows.count)
+        XCTAssertEqual(Set(wholeResult.sessions.map(\.id)), Set(rows.map(\.id)))
+        XCTAssertEqual(wholeResult.totalEstimatedCount, rows.count)
+        XCTAssertFalse(wholeResult.hasMore)
+
+        // (c) A `NaN` cursor keeps the previous binary-search outcome: no row
+        // sorts after it, so it is treated as the first page. The fallback has to
+        // reproduce that instead of reporting `.cursorMiss` (`nil`), which would
+        // silently restart pagination.
+        let nanCursorResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: FocusSessionCursor(
+                lastStartedAt: Date(timeIntervalSinceReferenceDate: .nan),
+                lastID: UUID()
+            ),
+            limit: pageLimit,
+            version: 0
+        )
+        let nanCursorPage = try XCTUnwrap(nanCursorResult)
+        let firstPageResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: pageLimit,
+            version: 0
+        )
+        let firstPage = try XCTUnwrap(firstPageResult)
+        XCTAssertEqual(nanCursorPage, firstPage, "a NaN cursor must behave exactly like no cursor")
+    }
+
+    /// A non-finite row that sits *before* a finite cursor must still route the
+    /// request to the previous key-array path.
+    ///
+    /// The provider order below is the confirmed counterexample. Every
+    /// `startedAt` comparison involving a `NaN` row is false, so a pass that
+    /// tested the cursor before deciding the fallback would `continue` past that
+    /// row and never fall back at all, leaving a finite row to be selected and
+    /// the request then reported as `.cursorMiss` (`nil`). The guard therefore
+    /// has to run on every matching row, ahead of the cursor test.
+    ///
+    /// Neither the winning row nor `hasMore` is asserted: a `NaN` timestamp
+    /// leaves the comparator without a strict total order, so the previous
+    /// implementation's winner was itself arbitrary. The contract pinned here is
+    /// narrower and stable — a page rather than a cursor miss, carrying the full
+    /// match count, with no row lost or duplicated.
+    func testNonFiniteRowBeforeFiniteCursorFallsBack() async throws {
+        // `NaN` first in provider order, then the finite intervals 1 ... 5.
+        let intervals: [TimeInterval] = [.nan, 1, 2, 3, 4, 5]
+        let rows = intervals.map { interval in
+            session(
+                project: alpha,
+                day: "2026-07-20",
+                start: Date(timeIntervalSinceReferenceDate: interval)
+            )
+        }
+        XCTAssertEqual(Set(rows.map(\.id)).count, rows.count, "fixture rows must be unique")
+        let cursorRow = try XCTUnwrap(
+            rows.first { $0.startedAt.timeIntervalSinceReferenceDate == 1 },
+            "the fixture must contain the cursor row"
+        )
+        let service = makeService(sessions: rows)
+        let limit = 1
+        XCTAssertLessThan(limit, rows.count / 2, "the request must take the selection path")
+
+        let result = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: FocusSessionCursor(lastStartedAt: cursorRow.startedAt, lastID: cursorRow.id),
+            limit: limit,
+            version: 0
+        )
+        let page = try XCTUnwrap(
+            result,
+            "a non-finite row before a finite cursor must fall back to the key-array path; "
+                + "a cursor miss here would be the regression"
+        )
+        XCTAssertEqual(page.totalEstimatedCount, rows.count)
+        XCTAssertEqual(page.sessions.count, limit)
+        let rowIDs = Set(rows.map(\.id))
+        XCTAssertTrue(
+            page.sessions.allSatisfy { rowIDs.contains($0.id) },
+            "the page must return a fixture row"
+        )
+
+        // No row is lost: the whole set comes back exactly once, which also
+        // covers the cursor-free `NaN` fallback for this fixture.
+        let wholeResult = await service.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: rows.count,
+            version: 0
+        )
+        let whole = try XCTUnwrap(wholeResult)
+        XCTAssertEqual(whole.sessions.count, rows.count)
+        XCTAssertEqual(Set(whole.sessions.map(\.id)), rowIDs)
+        XCTAssertEqual(whole.totalEstimatedCount, rows.count)
+    }
+
+    /// The fallback re-runs the key-array path with the memo the aborted pass
+    /// already warmed, so a query that has to resolve project identity keeps its
+    /// one-resolution-per-input-context guarantee across both passes.
+    func testSelectionFallbackKeepsResolverCallsPerContext() async throws {
+        let counter = ResolverCallCounter()
+        let projectCount = 4
+        let base = Date(timeIntervalSinceReferenceDate: 1_000_000_000)
+        // One `NaN` row in the middle of the snapshot: the scan reaches it after
+        // resolving a good share of the contexts, so the fallback has to reuse
+        // those resolutions instead of resolving them again.
+        let rows: [FocusSession] = (0 ..< 40).map { index in
+            let offset = Double(index) * 60
+            return FocusSession(
+                id: UUID(),
+                project: FocusProjectContext(
+                    key: "repo.\(index % projectCount)",
+                    displayName: "Project \(index % projectCount)"
+                ),
+                dayIdentifier: "2026-07-20",
+                startedAt: index == 20
+                    ? Date(timeIntervalSinceReferenceDate: .nan)
+                    : base.addingTimeInterval(-offset),
+                endedAt: base,
+                status: .ended,
+                lastUserActivityAt: base,
+                lastStateChangeAt: base
+            )
+        }
+        let service = FocusSessionQueryService(
+            sessionProvider: { rows },
+            projectResolver: { context in
+                counter.record()
+                return FocusProjectContext(
+                    key: "canonical.\(context.key)",
+                    displayName: context.displayName
+                )
+            }
+        )
+
+        let limit = 10
+        XCTAssertLessThan(limit, rows.count / 2, "the request must take the selection path")
+        let pageResult = await service.execute(
+            query: FocusSessionQuery(keyword: "project"),
+            cursor: nil,
+            limit: limit,
+            version: 0
+        )
+        let page = try XCTUnwrap(pageResult)
+        XCTAssertEqual(page.sessions.count, limit)
+        XCTAssertEqual(page.totalEstimatedCount, rows.count)
+        XCTAssertTrue(
+            page.sessions.allSatisfy { $0.project.key.hasPrefix("canonical.repo.") },
+            "the fallback's rows must carry the resolved identity"
+        )
+        XCTAssertEqual(
+            counter.count,
+            projectCount,
+            "one resolution per distinct input context, reused by the fallback"
+        )
+    }
+
+    /// The `-infinity` "page not full" sentinel and the raw-interval fast reject
+    /// must not change any result at the boundaries where they could fire: an
+    /// empty result set, a matching set smaller than the page, a one-row page, and
+    /// a timestamp tie that only the uuid tie-break can order.
+    ///
+    /// The sentinel is what keeps a partially filled page offering every row — no
+    /// interval is strictly older than `-infinity` — so the reject cannot run
+    /// before `kept` holds `limit` keys. Each case is compared with the per-row
+    /// reference page by page, so ordering, counts and cursor are all checked and
+    /// not only the last page.
+    func testSelectionPathSentinelAndFastRejectKeepKeyArrayResults() async throws {
+        // An empty provider never reaches the selection path (`10 >= 0 / 2`), so
+        // the empty selection is covered below by a filter that matches nothing on
+        // a history large enough to page through the bounded pass.
+        let emptyService = makeService(sessions: [])
+        let emptyResult = await emptyService.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: 10,
+            version: 0
+        )
+        XCTAssertEqual(try XCTUnwrap(emptyResult), .empty)
+
+        let resolver: @Sendable (FocusProjectContext) -> FocusProjectContext =
+            FocusSessionQueryTests.selectionFixtureResolver
+        let rows = selectionFixtureRows(count: 60)
+        let service = FocusSessionQueryService(sessionProvider: { rows }, projectResolver: resolver)
+        let noMatchLimit = 10
+        XCTAssertLessThan(noMatchLimit, rows.count / 2, "the walk must take the selection path")
+        let noMatchResult = await service.execute(
+            query: FocusSessionQuery(projectKey: "project.missing"),
+            cursor: nil,
+            limit: noMatchLimit,
+            version: 0
+        )
+        let noMatchPage = try XCTUnwrap(noMatchResult)
+        XCTAssertEqual(noMatchPage, .empty, "a selection whose page never fills is the empty page")
+        await assertPaginationMatchesReference(
+            service: service,
+            sessions: rows,
+            query: FocusSessionQuery(projectKey: "project.missing"),
+            limit: noMatchLimit,
+            resolver: resolver
+        )
+
+        // A snapshot smaller than the page keeps the key-array path; the same
+        // history paged below half its size takes the selection path, and its
+        // pages must match the key-array result.
+        let shortRows = selectionFixtureRows(count: 10)
+        let shortService = FocusSessionQueryService(sessionProvider: { shortRows }, projectResolver: resolver)
+        let wholeHistoryLimit = 40
+        XCTAssertGreaterThanOrEqual(wholeHistoryLimit, shortRows.count / 2, "a whole-history page keeps the key-array path")
+        let wholeHistoryResult = await shortService.execute(
+            query: FocusSessionQuery(),
+            cursor: nil,
+            limit: wholeHistoryLimit,
+            version: 0
+        )
+        let wholeHistoryPage = try XCTUnwrap(wholeHistoryResult)
+        XCTAssertEqual(wholeHistoryPage.sessions.count, shortRows.count)
+        XCTAssertFalse(wholeHistoryPage.hasMore)
+        let shortLimit = 4
+        XCTAssertLessThan(shortLimit, shortRows.count / 2, "the walk must take the selection path")
+        let walkedIDs = await assertPaginationMatchesReference(
+            service: shortService,
+            sessions: shortRows,
+            query: FocusSessionQuery(),
+            limit: shortLimit,
+            resolver: resolver
+        )
+        XCTAssertEqual(walkedIDs, wholeHistoryPage.sessions.map(\.id), "both paths must return the same rows")
+
+        // A one-row page: the smallest replacement budget there is, on a snapshot
+        // already in scan order, so every row but the first is rejected by the
+        // fast path alone.
+        let orderedRows = makeOrderedSessions(
+            count: 12,
+            project: alpha,
+            base: try date("2026-07-20T00:00:00Z")
+        )
+        let orderedService = makeService(sessions: orderedRows)
+        let oneRowLimit = 1
+        XCTAssertLessThan(oneRowLimit, orderedRows.count / 2, "the walk must take the selection path")
+        let visitedIDs = await assertPaginationMatchesReference(
+            service: orderedService,
+            sessions: orderedRows,
+            query: FocusSessionQuery(),
+            limit: oneRowLimit,
+            resolver: { $0 }
+        )
+        XCTAssertEqual(visitedIDs, orderedRows.reversed().map(\.id), "newest first, one row per page")
+
+        // Rows sharing one `startedAt`: every interval equals the worst kept
+        // key's, so the reject never fires and the uuid tie-break alone decides.
+        let shared = try date("2026-07-19T00:00:00Z")
+        let tiedRows = (0 ..< 12).map { _ in
+            session(project: alpha, day: "2026-07-19", start: shared)
+        }
+        let tiedService = makeService(sessions: tiedRows)
+        let tieLimit = 5
+        XCTAssertLessThan(tieLimit, tiedRows.count / 2, "the walk must take the selection path")
+        let tiedIDs = await assertPaginationMatchesReference(
+            service: tiedService,
+            sessions: tiedRows,
+            query: FocusSessionQuery(),
+            limit: tieLimit,
+            resolver: { $0 }
+        )
+        XCTAssertEqual(
+            tiedIDs,
+            tiedRows.map(\.id).sorted { $0.uuidString < $1.uuidString },
+            "equal timestamps must still be ordered by the uuid tie-break"
+        )
     }
 
     /// Rows sharing a timestamp across a page boundary must still be visited
