@@ -256,6 +256,14 @@ private struct HistoryBenchmarkFixture {
 /// have no separate user-visible operation: one page near the end of the
 /// result set, and the aggregate cost of every page without the controller's
 /// accumulation.
+///
+/// `renderedListPagination` is the scroll-to-end path with the page storage held
+/// across every append — the closest single-value stand-in for a rendered list,
+/// which holds the page list and each page's rows while the next page is
+/// appended. It is the scenario that detects a per-append copy of the whole
+/// accumulated history, so `fullPagination` (which only binds the returned page)
+/// and `serviceFullPagination` (which does not touch the controller) cannot
+/// replace it.
 final class HistoryQueryPerformanceTests: XCTestCase {
     private static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["TINYBUDDY_HISTORY_BENCHMARK"] == "1"
@@ -333,6 +341,33 @@ final class HistoryQueryPerformanceTests: XCTestCase {
                 while case .loaded(let page) = controller.loadState, page.hasMore {
                     await controller.loadMore()
                 }
+            }
+
+            // Scrolling to the end with the page storage held across every
+            // append. A rendered list holds the page list (its outer `ForEach`)
+            // and each page's rows (the inner one) while the next page is
+            // appended, so this value model — one retained page list, kept alive
+            // through the mutation — is the closest single-value stand-in for it.
+            // It is a stress model of the reader, not a measurement of SwiftUI's
+            // row lifetimes, and it is the scenario that detects a per-append
+            // copy of the whole accumulation: with a flat accumulated array the
+            // reader's copy is every loaded row, with the chunked accumulation it
+            // is one reference per page.
+            let renderedListPagination = await medianMilliseconds {
+                let controller = fixture.makeController()
+                await controller.refresh()
+                var rendered: [[FocusSession]] = []
+                while controller.loadState.currentPage?.hasMore == true {
+                    rendered = controller.sessionPages
+                    await controller.loadMore()
+                    // Keep the reader's copy alive across the append explicitly;
+                    // the optimizer is otherwise free to end its lifetime at the
+                    // call.
+                    withExtendedLifetime(rendered) {}
+                }
+                // The value the reader held is the page list from before the last
+                // append: it must not have been extended or mutated in place.
+                XCTAssertLessThan(rendered.count, controller.sessionPages.count)
             }
 
             let keywordFilterSwitch = await medianMilliseconds {
@@ -423,19 +458,9 @@ final class HistoryQueryPerformanceTests: XCTestCase {
 
             // Service-only traversal: the query service's aggregate cost over
             // every page, without the controller's accumulation and without
-            // this harness's own loop state.
-            //
-            // `fullPagination` binds the requested page for the length of its
-            // loop body, so that page stays alive across `loadMore()` and
-            // shares the accumulated array with it: every append then copies
-            // the whole accumulation. The total elapsed difference between the
-            // two scenarios is about 0.5 ms per page at 8_000 rows and 0.9 ms
-            // per page at 16_000, with the same magnitude on both sides of
-            // this change; that difference is not a pure copy-on-write
-            // measurement, it also contains `projects()`, the controller's
-            // bookkeeping and scheduling. This scenario has no such holder, so
-            // it isolates the service's per-page cost from a caller that
-            // retains a page across an append.
+            // this harness's own loop state. The difference from
+            // `renderedListPagination` is the controller's pagination
+            // bookkeeping and scheduling plus `refresh()`.
             let serviceFullPagination = await medianMilliseconds {
                 var cursor: FocusSessionCursor?
                 var visited = 0
@@ -465,6 +490,7 @@ final class HistoryQueryPerformanceTests: XCTestCase {
                 ("projectFilterSwitch", projectFilterSwitch),
                 ("statusFilterSwitch", statusFilterSwitch),
                 ("reviewViewLoad", reviewViewLoad),
+                ("renderedListPagination", renderedListPagination),
                 ("lastPage", lastPage)
             ]
             for (scenario, value) in report {

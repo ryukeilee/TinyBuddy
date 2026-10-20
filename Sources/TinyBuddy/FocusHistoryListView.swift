@@ -298,14 +298,14 @@ struct FocusHistoryListView: View {
         case .idle:
             Color.clear
 
-        case .loading where controller.allSessions.isEmpty:
+        case .loading where controller.loadedSessionCount == 0:
             loadingView
 
         case .loading:
             // Loading more — show indicator at bottom of existing content
             sessionList
 
-        case .loaded(let page) where page.sessions.isEmpty:
+        case .loaded where controller.loadedSessionCount == 0:
             emptyView
 
         case .loaded:
@@ -372,19 +372,28 @@ struct FocusHistoryListView: View {
     // MARK: - Session List
 
     private var sessionList: some View {
-        List {
-            ForEach(controller.allSessions) { session in
-                SessionRowView(session: session)
-                    .onAppear {
-                        // Trigger load-more when approaching the end
-                        if session.id == controller.allSessions.last?.id {
-                            Task { await controller.loadMore() }
+        // One snapshot of the page list per body evaluation, so the outer
+        // indices and the rows rendered from them always come from the same
+        // value. It also keeps the list from holding the accumulated rows: a
+        // rendered `ForEach` keeps its own copy of its data, so a flat
+        // accumulation would make every append copy the whole history, while
+        // one group per page only copies page references.
+        let pages = controller.sessionPages
+        return List {
+            ForEach(pages.indices, id: \.self) { pageIndex in
+                ForEach(pages[pageIndex]) { session in
+                    SessionRowView(session: session)
+                        .onAppear {
+                            // Trigger load-more when the last loaded row appears.
+                            if session.id == controller.lastLoadedSessionID {
+                                Task { await controller.loadMore() }
+                            }
                         }
-                    }
+                }
             }
 
             // Loading indicator at bottom during pagination
-            if controller.loadState.isLoading && !controller.allSessions.isEmpty {
+            if controller.loadState.isLoading && controller.loadedSessionCount > 0 {
                 HStack {
                     Spacer()
                     ProgressView()
@@ -415,7 +424,7 @@ struct FocusHistoryListView: View {
     // MARK: - Helpers
 
     private func summaryText(page: FocusSessionQueryPage) -> String {
-        let shown = controller.allSessions.count
+        let shown = controller.loadedSessionCount
         if let total = page.totalEstimatedCount, total > shown {
             return "显示 \(shown) / 共 \(total) 条记录"
         }

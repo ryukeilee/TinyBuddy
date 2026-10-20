@@ -82,3 +82,14 @@ rtk proxy env TINYBUDDY_SIGNING_MODE=signed ./script/build_and_run.sh release-in
 
 此结果是本机安装运行证据，不是 `release-acceptance` 全量验收。
 
+
+## 后续：长期持有累积数组的写时复制已消除
+
+本文「实现与一致性边界」最后一节记录的残留成本——「外部消费者若长时间保存旧数组快照，
+仍可能触发 Swift 写时复制」，而渲染中的 `List { ForEach(controller.allSessions) }` 正是这样的
+消费者——已在 `docs/history-query-performance.md` §第四轮 处理：控制器改为按页分块累积
+（`sessionPages`），列表按页嵌套 `ForEach`，于是每页 append 只复制几百个 chunk 引用而不是
+整档行。16,000 条时滚动到底从 603.2 ms 降到 294.6 ms（2.05×），8,000 条 160.7 → 83.5
+（1.92×），控制器分页开销（`fullPagination` − `serviceFullPagination`）从 283.4 ms 降到
+12.6 ms（8,000 条 74.0 → 6.3）。本文上表「优化完整追加」的数值（16,000 条 15.0 ms）是在**没有**持有者的注入
+fixture 下测得的，因此不受影响。该轮的视图结构改动没有 GUI 验证，见那一节的残留风险。

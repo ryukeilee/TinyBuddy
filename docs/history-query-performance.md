@@ -596,3 +596,220 @@ GUI 进程的滚动帧率、RSS 或整机能耗。
   未定位布局回退（见上）。
 - **`shuffled` 顺序本轮未重测**：它只是不可达的乱序代理，第二轮的 5.1–5.2× 结论不受本轮
   影响（本轮改动不含逐页路径）。
+
+## 第四轮：分页累积改分块（消除每页整档复制）+ 反向遍历建键
+
+本轮基线为 `258c29e98531cf522d8fc50ca15257d8e4e314e9`（工作树无未提交改动）。
+数据集、页面大小（50）、provider 顺序、预热与中位数方法与 §可重复工作负载 相同；
+Release、`TINYBUDDY_HISTORY_BENCHMARK_SAMPLES=5`。
+
+两侧在同一会话内**成对交替**测量并各测两遍：`chronological` 用 B,A,B,A，
+`edited` 用 B,A,A,B（首轮 `edited` 用 B,A,B,A 时机器在第二对中途变慢，
+B1 2.762 → B2 3.356，A 侧两轮 3.385/3.417，说明那是漂移而不是 A 的回归；改为对调顺序后
+两侧两轮都稳定在 B 4.48/4.46、A 4.39/4.41）。每格取两轮最小值。仍是合成 fixture，
+不是真实用户档案。
+
+### 定位：瓶颈是每页一次整档复制，不是排序
+
+先加两个临时诊断场景（未保留在最终文件里；A 态一列的原始输出在
+`.build/history-perf-r4/cand1-chronological.txt` 的 `DIAG` 行，B 态一列未落盘）：
+同一控制器、同一 `loadMore()` 循环，唯一差别是调用方是否把上一页的存储跨 append 保留
+（渲染中的 `ForEach` 就是这样的长期持有者）。
+
+| 16,000 条，chronological | 耗时 | 每页 |
+| --- | ---: | ---: |
+| 只走服务（`serviceFullPagination`） | 318.1 | 0.99 ms |
+| 经控制器、调用方不保留页存储 | 333.0 | 1.04 ms |
+| 经控制器、调用方保留页存储（旧 `ForEach(allSessions)` 的形态） | 611.8 | 1.91 ms |
+
+即控制器自身分页记账只有 (333.0 − 318.1) / 320 ≈ 0.047 ms/页，而「读者持有累积数组」
+在此基础上再增加 (611.8 − 333.0) / 320 ≈ 0.871 ms/页——这个增量就是保留存储造成的成本
+（不是单独测得的纯复制耗时），它占滚动到底总耗时的 46%，并且 8,000 → 16,000 时该项为
+4.0×（行数翻倍、页数也翻倍），是二次项。旧实现里这个持有者有两个：
+`loadState = .loaded(FocusSessionQueryPage(sessions: allSessions, ...))` 和
+`List { ForEach(controller.allSessions) }`。`docs/history-pagination-performance.md` 已经处理了
+「跨 await 保留旧页」那种，但明确留了「外部消费者若长时间保存旧数组快照，仍可能触发
+Swift 写时复制」——`ForEach` 正是这种消费者。**注意**：这是合成工作负载上「读者持有存储」
+模型的成本，真实 SwiftUI 列表是否也长期持有到这些行没有测量（见 §残留风险）。
+
+### 改动一：控制器按页分块累积
+
+`HistoryQueryController` 不再维护扁平累积数组，而是
+`private(set) var sessionPages: [[FocusSession]]`（每次 append 一个新 chunk），
+并提供 `loadedSessionCount`（`reduce` 求和，O(块数)）与 `lastLoadedSessionID`。
+`allSessions` 变成计算属性（`flatMap`），只服务诊断与测试的整体断言；列表与复核视图
+改为按页嵌套 `ForEach`（外层 `indices`、内层行），并在每次 body 求值时把 `sessionPages`
+取一次做快照，保证外层下标与由此渲染的行来自同一个值。于是追加只改外层小数组：
+8,000 行 160 页 / 16,000 行 320 页时每页复制量从 1.4 MB / 2.8 MB 降到约 1.3 KB / 2.6 KB。
+
+逐条保持不变的旧行为：`refresh()` 原样发布首屏并在首屏异常时置 `needsInitialNormalization`；
+首次追加时的整档去重+排序；稳定页只检查新增行与页边界；检测到顺序跳变时整档重排；
+重复 ID 首现优先；只有重复行的页仍推进游标但不追加空 chunk；过期（superseded）结果不触碰
+任何累积状态；`totalEstimatedCount` 仍取首屏值。随之改变并已在测试中固定的两点：
+
+1. `loadState.loaded(page).sessions` 现在只装**刚取回的那一页**，不再装整档累积。
+   生产代码只用到它的「结果集是否为空」与摘要用的 `totalEstimatedCount`；空态判断改为
+   `loadedSessionCount == 0`，与「首屏为空 ⟺ 结果集为空」等价。测试里两处
+   `page.sessions == 累积结果` 断言编码的是旧内部表示，已改为分别断言分页载荷
+   （`page.sessions == sessions.suffix(50)`）与 chunk 拼接结果。
+2. 规范化与顺序修复都替换每行位置，因此把累积折叠成单个 chunk 并重建 UUID 索引；
+   chunk 边界不是承诺，行的位置才是。
+
+### 改动二：服务反向遍历建键
+
+`matchingKeys` 从 `buffer.indices` 改为 `buffer.indices.reversed()`。生产会话数组是
+append 顺序（最旧在前），反向遍历正好按展示顺序（`startedAt` 降序）产出键，于是排序
+拿到「已经是一个降序 run」的输入。排序仍**无条件**执行：没有缓存、没有跨请求状态、
+没有需要失效的东西，改变的只是排序的输入顺序。
+
+排序键新增第三级比较 `index`：行可能共享两个排序分量（同一 `startedAt` 与同一 `id`、
+其余字段不同）。这类行本身无序，旧实现把这个顺序交给排序，而本机 Swift 的 `sort(by:)`
+是稳定的（实测 8 个全等价元素保持输入顺序），因此旧结果是「provider 快照里更靠前的那行」
+胜出。反向遍历会把它反过来（实测同一 fixture 旧实现返回 Alpha、只改反向遍历后返回 Beta），
+所以用原始行下标做最后一级 tie-break，把结果恢复到与旧实现逐字段相同，并且不再依赖
+排序是否稳定。时间与 id 都相等时才会比较下标，真实数据上不产生额外成本。
+
+### 测量结果（两轮最小值，单位毫秒）
+
+#### `chronological`（从未重写过，生产可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 2.113 | 2.072 | 1.02× | 3.795 | 3.713 | 1.02× |
+| `serviceProjects` | 1.568 | 1.590 | 0.99× | 2.779 | 2.812 | 0.99× |
+| `serviceFilterOnly` | 0.159 | 0.163 | 0.98× | 0.290 | 0.302 | 0.96× |
+| `serviceFirstPage` | 0.526 | 0.467 | 1.13× | 1.016 | 0.897 | 1.13× |
+| `serviceFullPagination` | 86.740 | 77.184 | 1.12× | 319.717 | 281.906 | 1.13× |
+| `fullPagination` | 160.695 | 83.516 | 1.92× | 603.159 | 294.573 | 2.05× |
+| `lastPage` | 0.510 | 0.455 | 1.12× | 0.971 | 0.849 | 1.14× |
+| `keywordFilterSwitch` | 4.613 | 4.611 | 1.00× | 8.257 | 8.295 | 1.00× |
+| `dayRangeFilterSwitch` | 3.883 | 3.873 | 1.00× | 7.042 | 7.108 | 0.99× |
+| `projectFilterSwitch` | 4.456 | 4.454 | 1.00× | 7.957 | 8.002 | 0.99× |
+| `statusFilterSwitch` | 4.167 | 4.078 | 1.02× | 7.601 | 7.521 | 1.01× |
+| `reviewViewLoad` | 2.080 | 2.041 | 1.02× | 3.802 | 3.759 | 1.01× |
+
+#### `edited`（被重写过的档案，生产可达）
+
+| 场景 | 8,000 基线 | 8,000 本轮 | 加速 | 16,000 基线 | 16,000 本轮 | 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `refreshFirstPage` | 2.440 | 2.427 | 1.01× | 4.457 | 4.388 | 1.02× |
+| `serviceProjects` | 1.536 | 1.588 | 0.97× | 2.724 | 2.797 | 0.97× |
+| `serviceFilterOnly` | 0.160 | 0.166 | 0.96× | 0.287 | 0.308 | 0.93× |
+| `serviceFirstPage` | 0.876 | 0.816 | 1.07× | 1.708 | 1.590 | 1.07× |
+| `serviceFullPagination` | 142.269 | 132.356 | 1.07× | 541.524 | 502.870 | 1.08× |
+| `fullPagination` | 220.548 | 138.679 | 1.59× | 839.876 | 515.490 | 1.63× |
+| `lastPage` | 0.857 | 0.803 | 1.07× | 1.659 | 1.535 | 1.08× |
+| `keywordFilterSwitch` | 5.020 | 5.033 | 1.00× | 9.019 | 8.916 | 1.01× |
+| `dayRangeFilterSwitch` | 4.210 | 4.192 | 1.00× | 7.665 | 7.565 | 1.01× |
+| `projectFilterSwitch` | 4.751 | 4.760 | 1.00× | 8.589 | 8.520 | 1.01× |
+| `statusFilterSwitch` | 4.813 | 4.756 | 1.01× | 8.879 | 8.705 | 1.02× |
+| `reviewViewLoad` | 2.395 | 2.368 | 1.01× | 4.439 | 4.345 | 1.02× |
+
+按用户可见操作看：滚动到历史末尾快 2.05×（16,000）/ 1.92×（8,000），重写档案 1.63× /
+1.59×；首屏、复核视图入口与四种筛选切换为 0.99–1.02×（没有可测量的退化）。服务级每页
+成本快 1.07–1.13×。
+
+整档复制消失的直接对照（同一场景、两侧同样的调用方代码，只是实现不同）：
+
+每格为「先在同一轮里相减、再取两轮最小值」，与主表取最小值的口径一致。
+
+| `fullPagination` − `serviceFullPagination` | 8,000 基线 | 8,000 本轮 | 16,000 基线 | 16,000 本轮 |
+| --- | ---: | ---: | ---: | ---: |
+| `chronological` | 74.0 | 6.3 | 283.4 | 12.6 |
+| `edited` | 78.2 | 6.3 | 298.4 | 12.3 |
+
+与诊断测量（保留页存储 539.2 vs 不保留 255.1，差 284.1）一致。
+
+### 三个被否掉的方案（都有实测，不重复尝试）
+
+1. **排序键改存 `Double`**（`Date.timeIntervalSinceReferenceDate`）。`Date` 的比较运算符是
+   Foundation 跨模块调用，实测每次比较约 6 ns，而 `Double` 约 0.4 ns；但每行多一次
+   `timeIntervalSinceReferenceDate` getter 调用把建键成本抬高（`serviceFilterOnly`
+   0.287 → 约 0.46–0.51），净效果为负。
+2. **把「是否已有序」的判断融合进建键循环**。实测严重恶化（`serviceFilterOnly`
+   0.29 → 1.26–1.45、`serviceFirstPage` 1.02 → 1.32–1.50），机理未定位
+   （推测是该循环内的可选 `Date` 与 `UUID` 局部量破坏寄存器分配）。
+3. **独立一趟「已有序则跳过排序」**。跳过后 `serviceFullPagination` 244.2 vs 275.2、
+   `serviceFirstPage` 0.782 vs 0.873，但同一构建里 `serviceProjects` 由 2.75–2.85 升到
+   3.42（0.81×，两次运行一致），连带 `refreshFirstPage` 3.79 → 4.21、四种筛选切换约 0.90×。
+   `projects()` 逐字未改，这是编译单元内代码布局/内联的副作用（与 §第三轮 记录的未定位
+   4–5% 回退同类）。用更高频的首屏与筛选切换去换 11% 的滚动收益为负，因此删除。
+
+### 残留下界（本轮结束时）
+
+- **每页仍是 O(N) 建键 + O(N log N) 键排序**：16,000 行 0.88 ms/页，其中建键约 0.3、
+  排序约 0.3（反向输入）、页物化约 0.1，其余是每页 512 KB 键数组的分配/释放与 actor 调用。
+  没有引入跨页缓存（理由见 §实现与一致性边界）。
+- **反向遍历让纯建键路径慢 4–7%**：`serviceFilterOnly`（`estimatedCount`，只建键不排序）
+  16,000 chronological 0.290 → 0.302、edited 0.287 → 0.308。生产代码目前没有
+  `estimatedCount` 的调用者，因此不影响用户路径；若将来接入，需要重新权衡这个方向。
+- **`refreshFirstPage` 现在几乎完全是 `projects()`**：16,000 行 3.713 ms 中 2.812 ms（76%）
+  是 `serviceProjects`，本轮按约定没有改动它。
+- **`shuffled` 顺序本轮未重测**：它仍只是不可达的乱序代理。
+- **每页一次 512 KB 键数组分配未优化**：跨调用复用工作缓冲可以省掉它，但那要求 actor
+  保证「计算期间不 await」，收益未测量，本轮未做。
+
+### 残留风险
+
+- **真实 GUI 未验证**。上表与诊断里的「读者持有存储」都是值语义模型：真实 SwiftUI 列表
+  是否同样长期持有这些行没有测过，因此「每页约 0.87 ms 的保留成本在真实 GUI 中同样存在」
+  是模型假设，不是 GUI 测量。`List` 内嵌套 `ForEach` 的分组/行身份、`onAppear` 分页触发位置、
+  复核视图的 `List(selection:)` + `.tag()` 都只有编译期与单元测试覆盖。尤其：只有重复行的页
+  没有新尾行，旧末行不会重新 `onAppear`（旧实现同样如此）；修序折叠会改变部分行的外层
+  页身份。真实滚动帧率、RSS、整机能耗同样未测，因此「每页 ~0.82 ms 的复制在真实 GUI
+  中同样存在」是诊断模型的结论，不是 GUI 测量。
+- 未测真实档案中重写行的占比（`edited` 的 2% 仍是代表性假设）。
+- 无 `release-install`/`release-acceptance`：本轮不涉及签名、安装、Widget 数据或
+  Git 刷新路径，且安装会写入外部状态。
+
+### 验证范围与独立复核（本轮）
+
+选择 **Module/contract**：改动跨 Core 查询服务与 App 控制器/视图。Core 公开 API 与
+`FocusSessionQuerying` 协议签名未变，但 App 内部表示（`allSessions` 由存储属性变为计算属性、
+新增 `sessionPages`/`loadedSessionCount`/`lastLoadedSessionID`）、`loadState` 载荷语义与
+视图结构（嵌套 `ForEach`）改变。
+
+```sh
+./script/swiftpm.sh build
+./script/swiftpm.sh test --filter 'FocusSessionQueryTests'
+./script/swiftpm.sh test --filter 'HistoryQueryControllerTests'
+./script/swiftpm.sh test            # 全量
+git diff --check
+```
+
+全量（在最终修订上执行）：`TinyBuddyCoreTests` 1,055 项（1 项默认跳过的 opt-in 性能
+测试）、`TinyBuddyAppTests` 733 项（2 项默认跳过），均 0 失败，退出码 0；
+`git diff --check` 通过。
+
+新增/改写的覆盖与变异验证：
+
+- `FocusSessionQueryTests.testAppendAndDisplayOrderProviderInputProduceIdenticalPages`（新增）：
+  同一批行分别以 append 顺序与展示顺序交给服务，比较 **`FocusSessionQueryPage` 对象本身**
+  （行内容、顺序、`hasMore`、`nextCursor`、总数），并额外断言页大小 `[5, 5, 2]`、
+  `hasMore == [true, true, false]`、末页无游标；两种 fixture（tie 组已按 id 排序 / 逆序）。
+  变异验证：去掉排序后该测试失败。
+- `FocusSessionQueryTests.testDuplicateSortKeysKeepProviderOrder`（新增）+ 既有
+  `testDuplicateSortKeysFollowTheStrictlyAfterCursorRule` 增加一条首行断言：
+  固定「两个排序分量都相同的行按 provider 顺序返回」。变异验证：删掉 `index` 这级
+  tie-break 后两个测试都失败（复现了复核指出的那处可观察差异）。
+- `HistoryQueryControllerTests` 新增四项：`testRenderedPageStorageIsUnaffectedByLaterAppends`、
+  `testChunkLayoutAcrossStablePagesAndDuplicateOnlyPage`、
+  `testMalformedFirstPageNormalizationCollapsesTheAccumulation`、
+  `testOrderJumpRepairCollapsesTheAccumulation`，共用 `assertAccumulationMatchesChunks`
+  （对**独立期望数组**断言 chunk 拼接、行数、尾行 ID，并断言不存在空 chunk）。
+  变异验证：删掉 `guard !additions.isEmpty else { return }` 后重复页测试失败。
+- 两处旧断言由「`page.sessions` 即整档累积」改为分页载荷断言（见 §改动一）。
+- 性能测试新增 `renderedListPagination`：把页存储跨 append 保留（并 `withExtendedLifetime`
+  固定生命周期），断言保留的值没有被后续 append 改动。它是**读者持有存储的压力模型**，
+  不是 SwiftUI 行生命周期的测量；基线侧没有这个场景，因此基线对比一律用
+  `fullPagination`（两侧调用方代码对等）。
+
+跨模型独立只读复核（Codex `gpt-6.1-sol`，`delegate_task`，两轮）。第 1 轮判定「同排序键行的
+顺序」是可观察差异（上面那条 BLOCKING，已按上述方式修正并加测试），并要求补强新测试的断言、
+修正注释里超出证据的表述。第 2 轮确认该阻塞项已解决（tie-break 方向正确、三级比较仍是严格
+弱序、游标谓词保持单调），另指出两处需要修正的表述：复制成本被重复扣除了一次控制器开销
+（现改为「保留存储的增量成本 0.871 ms/页」，不再声称单独测得纯复制耗时），以及新核心测试
+尚未比较页面元数据（现已整体比较 `FocusSessionQueryPage`）。两处均已修正并重测。
+
+复测命令与两侧原始输出见 `.build/history-perf-r4/`（`final-chronological-*` 与
+`edited2-*`，未提交到仓库）。

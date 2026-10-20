@@ -818,6 +818,93 @@ final class FocusSessionQueryTests: XCTestCase {
         return newest
     }
 
+    /// Walking the snapshot backwards must not change what a query returns:
+    /// the same rows supplied in append order (oldest first, which is how
+    /// `FocusSessionEngine` stores them) and in display order (newest first)
+    /// must produce the same pages, row contents, page sizes, `hasMore` flags,
+    /// cursors and counts.
+    ///
+    /// Two fixtures: one whose tie groups are already in id order (so the
+    /// backwards walk emits an almost fully sorted run) and one whose tie groups
+    /// are in reverse id order (so the sort has to move rows). Both must page
+    /// identically, which is what makes the reversed walk a pure cost change.
+    func testAppendAndDisplayOrderProviderInputProduceIdenticalPages() async throws {
+        let base = Date(timeIntervalSinceReferenceDate: 973_000_000)
+        // Three tie groups of four rows; `reverseTies` flips the id order inside
+        // the newer two groups.
+        func fixture(reverseTies: Bool) -> [FocusSession] {
+            var rows: [FocusSession] = []
+            for group in 0 ..< 3 {
+                let startedAt = base.addingTimeInterval(Double(group) * 1_800)
+                for slot in 0 ..< 4 {
+                    let id = UUID(uuidString: String(
+                        format: "00000000-0000-0000-0000-%012d",
+                        group * 10 + (reverseTies && group > 0 ? 3 - slot : slot)
+                    ))!
+                    rows.append(session(
+                        project: FocusProjectContext(key: "repo.alpha", displayName: "Alpha"),
+                        day: "2026-07-20",
+                        start: startedAt,
+                        end: startedAt.addingTimeInterval(60),
+                        id: id
+                    ))
+                }
+            }
+            return rows
+        }
+
+        /// Pages the fixture at a page size below the row count, so every tie
+        /// group must also be split across a page boundary. Whole pages are
+        /// returned, so page metadata is compared too.
+        func traverse(_ rows: [FocusSession]) async throws -> [FocusSessionQueryPage] {
+            let service = FocusSessionQueryService(sessionProvider: { rows })
+            var pages: [FocusSessionQueryPage] = []
+            var cursor: FocusSessionCursor?
+            // Bounded: 12 rows at 5 per page is at most 3 pages. The bound stops
+            // the loop even if the service never reports exhaustion, so a broken
+            // cursor fails the assertions below instead of hanging the suite.
+            for _ in 0 ..< 4 {
+                let result = await service.execute(
+                    query: FocusSessionQuery(),
+                    cursor: cursor,
+                    limit: 5,
+                    version: 0
+                )
+                let page = try XCTUnwrap(result)
+                pages.append(page)
+                XCTAssertEqual(page.totalEstimatedCount, rows.count)
+                guard page.hasMore else { return pages }
+                let next = try XCTUnwrap(page.nextCursor, "hasMore must carry a cursor")
+                cursor = next
+            }
+            return pages
+        }
+
+        for reverseTies in [false, true] {
+            let appendOrdered = fixture(reverseTies: reverseTies)
+            let displayOrdered = appendOrdered.sorted { a, b in
+                a.startedAt != b.startedAt
+                    ? a.startedAt > b.startedAt
+                    : a.id.uuidString < b.id.uuidString
+            }
+            XCTAssertEqual(Set(appendOrdered.map(\.id)).count, appendOrdered.count, "fixture ids must be unique")
+
+            let fromAppendOrder = try await traverse(appendOrdered)
+            let fromDisplayOrder = try await traverse(displayOrdered)
+            // Whole pages: rows, order, `hasMore`, `nextCursor` and the total.
+            XCTAssertEqual(
+                fromAppendOrder,
+                fromDisplayOrder,
+                "append-order input (reverseTies: \(reverseTies)) must page identically to display-order input"
+            )
+            XCTAssertEqual(fromAppendOrder.map { $0.sessions.count }, [5, 5, 2], "page sizes")
+            XCTAssertEqual(fromAppendOrder.map(\.hasMore), [true, true, false], "hasMore flags")
+            XCTAssertNil(fromAppendOrder.last?.nextCursor, "the last page carries no cursor")
+            XCTAssertTrue(fromAppendOrder.dropLast().allSatisfy { $0.nextCursor != nil })
+            XCTAssertEqual(fromDisplayOrder.flatMap(\.sessions), displayOrdered, "every row, once, in display order")
+        }
+    }
+
     /// Number of distinct resolved identities, computed one row at a time.
     private func counterFreeRowCount(
         _ rows: [FocusSession],
@@ -1559,6 +1646,47 @@ final class FocusSessionQueryTests: XCTestCase {
         XCTAssertTrue(page.hasMore)
     }
 
+    /// Rows may share both sort components (startedAt and id) while differing in
+    /// every other field. They have no order of their own, so the frozen rule is
+    /// the one the previous implementation produced: the row that comes first in
+    /// the provider snapshot wins, whatever order the provider is in. The
+    /// service reads the snapshot backwards, so this is what the row index in the
+    /// sort key is for.
+    func testDuplicateSortKeysKeepProviderOrder() async throws {
+        let start = try date("2026-07-20T10:00:00Z")
+        let sharedID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-0000000000ac"))
+        let names = ["Alpha", "Beta", "Gamma", "Delta"]
+        let rows = names.map { name in
+            session(
+                project: FocusProjectContext(key: "repo.\(name)", displayName: name),
+                day: "2026-07-20",
+                start: start,
+                end: start,
+                id: sharedID
+            )
+        }
+        // Same provider order and its reverse, so a rule that depended on the
+        // walk direction instead of the snapshot would disagree with itself.
+        // Both directions are listed explicitly, so the two iterations cannot
+        // collapse to the same sequence through type inference.
+        for snapshot in [rows, Array(rows.reversed())] {
+            let service = makeService(sessions: snapshot)
+            let pageResult = await service.execute(
+                query: FocusSessionQuery(),
+                cursor: nil,
+                limit: snapshot.count,
+                version: 0
+            )
+            let page = try XCTUnwrap(pageResult)
+            XCTAssertEqual(
+                page.sessions.map(\.project.displayName),
+                snapshot.map(\.project.displayName),
+                "rows with identical sort keys must keep provider order"
+            )
+            XCTAssertFalse(page.hasMore)
+        }
+    }
+
     /// Two rows may share the exact same sort key (startedAt and id). The cursor
     /// rule is "strictly after the cursor key", so the page holding one of them
     /// reports `hasMore`, and the next request returns `nil`: pagination does
@@ -1580,6 +1708,7 @@ final class FocusSessionQueryTests: XCTestCase {
         )
         let first = try XCTUnwrap(firstResult)
         XCTAssertEqual(first.sessions.count, 1)
+        XCTAssertEqual(first.sessions.first?.project, alpha, "the earlier row wins when both sort components match")
         XCTAssertTrue(first.hasMore)
         let next = try XCTUnwrap(first.nextCursor)
         XCTAssertEqual(next.lastStartedAt, start)

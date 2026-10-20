@@ -174,8 +174,44 @@ final class HistoryQueryController {
     /// The current load state visible to the view.
     private(set) var loadState: FocusSessionLoadState = .idle
 
-    /// All sessions accumulated across pages, in display order (newest first).
-    private(set) var allSessions: [FocusSession] = []
+    /// The accumulated result, split into the pages the service returned, in
+    /// display order (newest first).
+    ///
+    /// One flat accumulated array cannot be appended to cheaply. A rendered
+    /// `ForEach` keeps its own copy of its data, and so did the page struct this
+    /// controller published, so every append copy-on-wrote the whole accumulated
+    /// history. Measured on the synthetic benchmark workload with a caller that
+    /// holds the storage across appends: controller bookkeeping alone is
+    /// 0.047 ms/page at both sizes, and holding the history adds 0.87 ms/page at
+    /// 16,000 rows (0.43 at 8,000) on top of it — an increment that grew
+    /// quadratically (2× the rows cost 4.0× the copies). That increment is the
+    /// retention cost, not an isolated copy measurement. Splitting the accumulation into one
+    /// chunk per page makes an append touch only the outer array of chunk
+    /// references, so a reader copies a few hundred references instead of every
+    /// accumulated row. Whether a real SwiftUI list holds the rows for that long
+    /// is not measured (see docs/history-query-performance.md).
+    private(set) var sessionPages: [[FocusSession]] = []
+
+    /// All accumulated sessions in display order (newest first).
+    ///
+    /// Flattens `sessionPages`, so one access costs O(rows). The list and review
+    /// views iterate `sessionPages` instead; this exists for diagnostics and
+    /// tests that assert on the whole accumulation.
+    var allSessions: [FocusSession] {
+        sessionPages.flatMap { $0 }
+    }
+
+    /// Accumulated row count across every page, including the rows a malformed
+    /// first page repeated.
+    var loadedSessionCount: Int {
+        sessionPages.reduce(0) { $0 + $1.count }
+    }
+
+    /// Identity of the last accumulated row: the row whose appearance means the
+    /// visible list reached the end of what has been loaded so far.
+    var lastLoadedSessionID: UUID? {
+        sessionPages.last?.last?.id
+    }
 
     /// Project summaries from the entire history, independent of loaded pages.
     private(set) var projectOptions: [FocusProjectContext] = []
@@ -226,7 +262,7 @@ final class HistoryQueryController {
     /// `.loading`.
     func refresh() async {
         loadState = .loading
-        allSessions.removeAll()
+        sessionPages.removeAll()
         loadedSessionIDs.removeAll()
         needsInitialNormalization = false
 
@@ -251,7 +287,7 @@ final class HistoryQueryController {
 
             if let page {
                 guard isLatest(lastOpID) else { return }
-                allSessions = page.sessions
+                sessionPages = page.sessions.isEmpty ? [] : [page.sessions]
                 loadedSessionIDs = Set(page.sessions.map(\.id))
                 needsInitialNormalization = loadedSessionIDs.count != page.sessions.count
                     || !isCanonicallyOrdered(page.sessions)
@@ -303,9 +339,12 @@ final class HistoryQueryController {
         guard isLatest(opID) else { return }
         appendPage(page.sessions)
 
-        // Preserve original total estimate from first page.
+        // Preserve original total estimate from first page. `sessions` carries
+        // only the page that was just fetched: the views read the accumulated
+        // rows from `sessionPages`, so carrying the whole accumulation here
+        // would rebuild a full-history array on every page.
         let merged = FocusSessionQueryPage(
-            sessions: allSessions,
+            sessions: page.sessions,
             nextCursor: page.nextCursor,
             hasMore: page.hasMore,
             totalEstimatedCount: continuation.totalEstimatedCount
@@ -399,16 +438,14 @@ final class HistoryQueryController {
         // Refresh intentionally exposes the first page unchanged. If that
         // page was malformed, preserve the old normalization-on-append behavior.
         if needsInitialNormalization {
-            allSessions.append(contentsOf: sessions)
-            allSessions = deduplicatedAndSorted(allSessions)
-            loadedSessionIDs = Set(allSessions.map(\.id))
+            replaceAccumulation(with: deduplicatedAndSorted(allSessions + sessions))
             needsInitialNormalization = false
             return
         }
 
         var additions: [FocusSession] = []
         additions.reserveCapacity(sessions.count)
-        var previous = allSessions.last
+        var previous = sessionPages.last?.last
         var ordered = true
         for session in sessions where loadedSessionIDs.insert(session.id).inserted {
             if let previous, isOrderJump(from: previous, to: session) {
@@ -417,12 +454,26 @@ final class HistoryQueryController {
             additions.append(session)
             previous = session
         }
+        // A page made only of already loaded rows still advances the cursor, so
+        // leave the accumulation untouched rather than appending an empty chunk.
+        guard !additions.isEmpty else { return }
         // First occurrence wins, including when a duplicate's fields changed.
         // Stable pages inspect only new UUIDs, adjacent rows and the boundary.
-        allSessions.append(contentsOf: additions)
-        if !ordered {
-            allSessions.sort(by: Self.canonicalOrder)
+        if ordered {
+            sessionPages.append(additions)
+        } else {
+            replaceAccumulation(with: (allSessions + additions).sorted(by: Self.canonicalOrder))
         }
+    }
+
+    /// Installs a normalized accumulation as a single chunk and rebuilds the
+    /// identity index.
+    ///
+    /// Both callers replace every row's position, so the chunk layout carries no
+    /// meaning afterwards; the next appended page starts a new chunk again.
+    private func replaceAccumulation(with sessions: [FocusSession]) {
+        sessionPages = sessions.isEmpty ? [] : [sessions]
+        loadedSessionIDs = Set(sessions.map(\.id))
     }
 
     private static func canonicalOrder(_ a: FocusSession, _ b: FocusSession) -> Bool {

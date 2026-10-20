@@ -94,17 +94,53 @@ struct FocusSessionReviewView: View {
         _ = projectRegistryRefreshID
         return FocusSessionReviewProjectResolver.selectableProjects(registeredProjectsProvider())
     }
-    private var sessions: [FocusSession] {
-        _ = refreshID
-        return historyController.allSessions
+    /// One group per accumulated page, like the history list: a flat array here
+    /// would be copied on every appended page. The page list is snapshotted once
+    /// per body evaluation so the outer indices and the rows rendered from them
+    /// come from the same value.
+    private var paginatedRowsList: some View {
+        let pages = historyController.sessionPages
+        return List(selection: $selected) {
+            ForEach(pages.indices, id: \.self) { pageIndex in
+                ForEach(pages[pageIndex]) { session in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(session.project.displayName)
+                        Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) – \(session.endedAt?.formatted(date: .omitted, time: .shortened) ?? "进行中")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(authorityLabel(session))
+                            .font(.caption2)
+                            .foregroundStyle(authorityColor(session))
+                    }
+                    .tag(session.id)
+                    .onAppear {
+                        if session.id == historyController.lastLoadedSessionID {
+                            Task { await historyController.loadMore() }
+                        }
+                    }
+                }
+            }
+        }
+        .onChange(of: selected) { _, _ in loadSelection() }
     }
+
+    /// Looks a session up in the accumulated pages: the review list iterates
+    /// `sessionPages` directly, so nothing here flattens the whole history.
     private var selectedSession: FocusSession? {
         guard selected.count == 1, let id = selected.first else { return nil }
-        return sessions.first { $0.id == id }
+        for page in historyController.sessionPages {
+            if let session = page.first(where: { $0.id == id }) { return session }
+        }
+        return nil
     }
 
     /// Evidence for the selected session, loaded from the engine.
     private var selectedEvidence: FocusSessionEvidence? {
+        // The engine is not observable, so this documents why an edit or a
+        // finished snapshot synchronization re-runs this engine-derived read.
+        // Every path that sets the token also changes `message`, the selection
+        // or the controller's state, so none of them relied on this read alone.
+        _ = refreshID
         guard let id = selectedSession?.id, let engine else { return nil }
         return engine.evidence(for: id)
     }
@@ -209,14 +245,14 @@ struct FocusSessionReviewView: View {
 
             // Session list with loading states
             Group {
-                if case .loading = historyController.loadState, sessions.isEmpty {
+                if case .loading = historyController.loadState, historyController.loadedSessionCount == 0 {
                     VStack {
                         Spacer()
                         ProgressView()
                             .scaleEffect(0.6)
                         Spacer()
                     }
-                } else if sessions.isEmpty {
+                } else if historyController.loadedSessionCount == 0 {
                     VStack {
                         Spacer()
                         Text("无匹配记录")
@@ -225,24 +261,7 @@ struct FocusSessionReviewView: View {
                         Spacer()
                     }
                 } else {
-                    List(sessions, selection: $selected) { session in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(session.project.displayName)
-                            Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) – \(session.endedAt?.formatted(date: .omitted, time: .shortened) ?? "进行中")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(authorityLabel(session))
-                                .font(.caption2)
-                                .foregroundStyle(authorityColor(session))
-                        }
-                        .tag(session.id)
-                        .onAppear {
-                            if session.id == sessions.last?.id {
-                                Task { await historyController.loadMore() }
-                            }
-                        }
-                    }
-                    .onChange(of: selected) { _, _ in loadSelection() }
+                    paginatedRowsList
                 }
             }
         }

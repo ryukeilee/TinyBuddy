@@ -186,6 +186,156 @@ final class HistoryQueryControllerTests: XCTestCase {
         return HistoryQueryController(queryService: service)
     }
 
+    // MARK: - Chunked accumulation
+
+    /// The accumulated history is stored one chunk per page so that appending a
+    /// page cannot copy the whole history (the rendered `ForEach` holds the page
+    /// list, not the rows). These assertions pin the invariants the chunk layout
+    /// must keep for that trade to be safe: the chunks concatenate to exactly the
+    /// loaded result, the counters agree with them, and no empty chunk ever
+    /// appears.
+    private func assertAccumulationMatchesChunks(
+        _ controller: HistoryQueryController,
+        rows expected: [FocusSession],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(
+            controller.sessionPages.flatMap { $0 },
+            expected,
+            "chunks must concatenate to the independently expected rows",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            controller.loadedSessionCount,
+            expected.count,
+            "loaded row count must equal the expected rows",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            controller.lastLoadedSessionID,
+            expected.last?.id,
+            "the pagination trigger must identify the last loaded row",
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(
+            controller.sessionPages.contains(where: \.isEmpty),
+            "a page that adds no rows must not append an empty chunk",
+            file: file,
+            line: line
+        )
+    }
+
+    /// A rendered list holding the page list across an append must keep the rows
+    /// it was given: the chunks are replaced/extended, never mutated in place.
+    func testRenderedPageStorageIsUnaffectedByLaterAppends() async {
+        let sessions = makeSessions(count: 150)
+        let controller = HistoryQueryController(queryService: HistoryPageFixture(sessions: sessions))
+        await controller.refresh()
+        let renderedAfterFirstPage = controller.sessionPages
+        XCTAssertEqual(renderedAfterFirstPage.flatMap { $0 }, Array(sessions.prefix(50)))
+
+        await controller.loadMore()
+        assertAccumulationMatchesChunks(controller, rows: Array(sessions.prefix(100)))
+        XCTAssertEqual(
+            renderedAfterFirstPage.flatMap { $0 },
+            Array(sessions.prefix(50)),
+            "the value the renderer holds must not absorb the appended page"
+        )
+        XCTAssertLessThan(renderedAfterFirstPage.count, controller.sessionPages.count)
+        XCTAssertEqual(controller.sessionPages.count, 2, "one chunk per appended page")
+    }
+
+    /// Every page of a stable history appends exactly one chunk, and a page made
+    /// only of already loaded rows advances the cursor without appending one.
+    func testChunkLayoutAcrossStablePagesAndDuplicateOnlyPage() async {
+        let source = makeSessions(count: 150)
+        var pages = Array(source.prefix(50))
+        pages.append(contentsOf: source[0 ..< 49]) // entirely already-loaded rows
+        pages.append(source[0])
+        pages.append(contentsOf: source[50 ..< 100])
+        let fixture = HistoryPageFixture(sessions: pages, totals: [150, 999, 888])
+        let controller = HistoryQueryController(queryService: fixture)
+
+        await controller.refresh()
+        XCTAssertEqual(controller.sessionPages.count, 1)
+        XCTAssertEqual(controller.loadedSessionCount, 50)
+        assertAccumulationMatchesChunks(controller, rows: Array(source.prefix(50)))
+
+        await controller.loadMore()
+        XCTAssertEqual(controller.sessionPages.count, 1, "a duplicate-only page adds no chunk")
+        XCTAssertEqual(controller.loadedSessionCount, 50)
+        XCTAssertTrue(controller.loadState.currentPage?.hasMore == true)
+        assertAccumulationMatchesChunks(controller, rows: Array(source.prefix(50)))
+
+        await controller.loadMore()
+        XCTAssertEqual(controller.sessionPages.count, 2)
+        XCTAssertEqual(controller.loadedSessionCount, 100)
+        XCTAssertFalse(controller.loadState.currentPage?.hasMore == true)
+        assertAccumulationMatchesChunks(controller, rows: Array(source.prefix(100)))
+    }
+
+    /// Normalizing a malformed first page replaces every row's position, so it
+    /// collapses the accumulation into one chunk and rebuilds the identity
+    /// index; the next page starts a new chunk again.
+    func testMalformedFirstPageNormalizationCollapsesTheAccumulation() async {
+        var sessions = makeSessions(count: 200)
+        sessions[20] = sessions[0] // duplicate on the unnormalized first page
+        let controller = HistoryQueryController(queryService: HistoryPageFixture(sessions: sessions))
+
+        await controller.refresh()
+        XCTAssertEqual(controller.sessionPages.count, 1)
+        XCTAssertEqual(controller.loadedSessionCount, 50, "refresh publishes the first page unchanged")
+
+        await controller.loadMore() // malformed first page → normalization
+        // First occurrence of the repeated id wins, so the row at index 20 goes.
+        var normalized = Array(sessions.prefix(100))
+        normalized.remove(at: 20)
+        XCTAssertEqual(controller.sessionPages.count, 1, "normalization replaces the accumulation")
+        XCTAssertEqual(controller.loadedSessionCount, 99, "the repeated row is dropped")
+        assertCanonicallyOrdered(controller.allSessions)
+        assertAccumulationMatchesChunks(controller, rows: normalized)
+
+        await controller.loadMore() // stable page → new chunk
+        XCTAssertEqual(controller.sessionPages.count, 2)
+        XCTAssertEqual(controller.loadedSessionCount, 149)
+        assertCanonicallyOrdered(controller.allSessions)
+        assertAccumulationMatchesChunks(controller, rows: normalized + sessions[100 ..< 150])
+    }
+
+    /// A page that arrives out of order forces a full repair, which also
+    /// collapses the accumulation into a single chunk; chunks are not a promise
+    /// that a row stays where it was loaded.
+    func testOrderJumpRepairCollapsesTheAccumulation() async {
+        var sessions = makeSessions(count: 200)
+        sessions[65] = newestSession(olderThan: sessions) // order jump in the second page
+        let controller = HistoryQueryController(queryService: HistoryPageFixture(sessions: sessions))
+
+        await controller.refresh()
+        // The first page carries no duplicate and is in order, so refresh keeps
+        // it verbatim and no normalization latch is armed.
+        XCTAssertEqual(controller.sessionPages.count, 1)
+
+        await controller.loadMore() // order jump → full repair
+        var repaired = Array(sessions.prefix(100))
+        let jumped = repaired.remove(at: 65)
+        repaired.insert(jumped, at: 0)
+        XCTAssertEqual(controller.sessionPages.count, 1, "a repair replaces the accumulation")
+        XCTAssertEqual(controller.loadedSessionCount, 100)
+        XCTAssertEqual(controller.allSessions.first?.id, jumped.id)
+        assertCanonicallyOrdered(controller.allSessions)
+        assertAccumulationMatchesChunks(controller, rows: repaired)
+
+        await controller.loadMore() // stable page → new chunk
+        XCTAssertEqual(controller.sessionPages.count, 2)
+        XCTAssertEqual(controller.loadedSessionCount, 150)
+        assertCanonicallyOrdered(controller.allSessions)
+        assertAccumulationMatchesChunks(controller, rows: repaired + sessions[100 ..< 150])
+    }
+
     private func makeSession(
         id: UUID,
         project: FocusProjectContext,
@@ -267,10 +417,18 @@ final class HistoryQueryControllerTests: XCTestCase {
                         + Double(duration.attoseconds) / 1e18
                 }
                 XCTAssertEqual(controller.allSessions.map(\.id), sessions.map(\.id))
+                // The accumulation is stored one chunk per page, so the whole
+                // history is still reachable in display order from the chunks
+                // the view iterates.
+                XCTAssertEqual(controller.sessionPages.flatMap { $0 }.map(\.id), sessions.map(\.id))
+                XCTAssertEqual(controller.loadedSessionCount, count)
                 guard case .loaded(let page) = controller.loadState else {
                     return XCTFail("expected loaded")
                 }
-                XCTAssertEqual(page.sessions, controller.allSessions)
+                // The loaded page carries exactly the page the service returned;
+                // the accumulated rows live in `sessionPages` and are never
+                // re-flattened into it.
+                XCTAssertEqual(page.sessions, Array(sessions.suffix(50)))
                 XCTAssertEqual(page.totalEstimatedCount, count)
                 XCTAssertFalse(page.hasMore)
                 firstQuarters.append(quarters[0])
@@ -308,8 +466,15 @@ final class HistoryQueryControllerTests: XCTestCase {
             }
             await controller.loadMore()
             XCTAssertEqual(controller.allSessions, expected)
-            XCTAssertEqual(controller.loadState.currentPage?.sessions, expected)
+            // The page payload stays the page the fixture returned; the
+            // accumulation is asserted above and lives in `sessionPages`.
+            XCTAssertEqual(
+                controller.loadState.currentPage?.sessions,
+                Array(original[start ..< min(start + 50, original.count)])
+            )
             XCTAssertEqual(controller.loadState.currentPage?.totalEstimatedCount, original.count)
+            XCTAssertEqual(controller.sessionPages.flatMap { $0 }, expected)
+            XCTAssertEqual(controller.loadedSessionCount, expected.count)
             assertCanonicallyOrdered(controller.allSessions)
         }
         XCTAssertEqual(controller.allSessions.first?.id, sessions[165].id)
