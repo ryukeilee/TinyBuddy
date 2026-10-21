@@ -264,6 +264,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         )
         let content = Self.content(
             for: state,
+            readFailureReason: Self.readFailureReason(from: dataAvailability),
             refreshStatus: refreshStatus,
             onboardingCompleted: onboardingCompleted
         )
@@ -287,11 +288,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         self.title = content.title
         self.message = refreshNotice.map { "\(content.message) \($0)" } ?? content.message
         self.refreshNotice = refreshNotice
-        if case let .failed(reason) = dataAvailability {
-            self.readFailureReason = reason
-        } else {
-            self.readFailureReason = nil
-        }
+        self.readFailureReason = Self.readFailureReason(from: dataAvailability)
         self.systemImage = content.systemImage
         self.accentRole = content.accentRole
         self.action = content.action
@@ -512,7 +509,7 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
     /// Returns the non-blocking refresh notice for a failed Git refresh, so the
     /// failure is never dropped and never reintroduced as a read failure.
     /// `nil` for a real read failure (its copy already states that the last
-    /// trusted result is retained and offers to retry the read) and for
+    /// trusted result is retained and names the cause and recovery) and for
     /// authorization states, which carry their own actionable copy.
     private static func refreshNotice(
         for state: TinyBuddyDisplayState,
@@ -542,8 +539,41 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         }
     }
 
+    /// The snapshot read-failure reason carried by a `.failed` availability.
+    private static func readFailureReason(
+        from dataAvailability: TinyBuddyDisplayDataAvailability
+    ) -> TinyBuddySharedSnapshotReason? {
+        guard case let .failed(reason) = dataAvailability else {
+            return nil
+        }
+        return reason
+    }
+
+    /// Whether a read failure is caused by missing shared-store access rather
+    /// than by the payload itself.
+    ///
+    /// A denied or unavailable App Group is not a transient read failure: the
+    /// same read can never succeed until the app/sandbox access is restored, so
+    /// the copy must name that external cause and its recovery instead of
+    /// promising a retry. The classification lives here, next to the copy that
+    /// depends on it, so the HUD and the Widget never re-derive it separately.
+    static func isSharedAccessDenied(
+        _ reason: TinyBuddySharedSnapshotReason?
+    ) -> Bool {
+        switch reason {
+        case .sandboxReadDenied?, .appGroupUnavailable?:
+            return true
+        case .staleData?, .snapshotCorrupt?, .versionIncompatible?,
+             .invalidActivityRevision?, .persistenceFailed?,
+             .timelineReloadFailed?, .gitScanFailed?, .gitScanPartial?,
+             .gitScanSkipped?, .none:
+            return false
+        }
+    }
+
     private static func content(
         for state: TinyBuddyDisplayState,
+        readFailureReason: TinyBuddySharedSnapshotReason?,
         refreshStatus: GitActivityRefreshStatus?,
         onboardingCompleted: Bool
     ) -> (
@@ -583,6 +613,20 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
                 .warning,
                 .reauthorize,
                 "重新授权"
+            )
+        case .readFailed where isSharedAccessDenied(readFailureReason):
+            // Access to the shared App Group store is denied or unavailable,
+            // which no in-app retry can fix, so no retry action is offered.
+            // The message names the real cause and the only real recoveries,
+            // and keeps stating that the retained result is still what is
+            // shown, so the failure is never softened into a healthy state.
+            return (
+                "数据读取失败",
+                "当前继续保留上次可信结果；共享数据（App Group）访问权限被拒绝，重试读取不会恢复。请重新安装带正确签名和共享授权的版本，或恢复访问授权。",
+                "lock.slash",
+                .error,
+                nil,
+                nil
             )
         case .readFailed:
             return (
