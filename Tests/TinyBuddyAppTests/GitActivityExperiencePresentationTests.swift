@@ -190,13 +190,6 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
                     refreshStatus: status(outcome: .failed, diagnosticReason: .authorizationInvalid)
                 ),
                 .authorizationInvalid
-            ),
-            (
-                makePresentation(
-                    focusHistoryPublication: activePublication,
-                    refreshStatus: status(outcome: .failed, diagnosticReason: .scriptExecutionFailed)
-                ),
-                .readFailed
             )
         ]
 
@@ -208,6 +201,24 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
                 "\(expectedState.rawValue) must not expose a retained live-focus summary"
             )
         }
+
+        // A failed Git refresh with a readable same-day snapshot is a refresh
+        // problem, not a data-read failure: the live focus state stays and the
+        // failure is reported as a non-blocking notice instead.
+        let refreshFailedWithUsableData = makePresentation(
+            focusHistoryPublication: activePublication,
+            refreshStatus: status(outcome: .failed, diagnosticReason: .scriptExecutionFailed)
+        )
+        XCTAssertEqual(refreshFailedWithUsableData.state, .focusing)
+        XCTAssertTrue(refreshFailedWithUsableData.state.isActivityState)
+        XCTAssertTrue(refreshFailedWithUsableData.hasRefreshNotice)
+        XCTAssertEqual(
+            refreshFailedWithUsableData.focusSessionSummary(
+                publication: activePublication,
+                at: Date()
+            ),
+            "正在专注 · 今日累计 0 小时 0 分"
+        )
     }
 
     func testPartialAuthorizationFailureKeepsMetricsAndOffersDirectReauthorization() {
@@ -258,16 +269,6 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
             ),
             (
                 .make(
-                    refreshStatus: status(outcome: .failed, diagnosticReason: .scriptExecutionFailed),
-                    activitySnapshot: emptyActivity,
-                    isRefreshing: false,
-                    onboardingCompleted: true
-                ),
-                "数据读取失败",
-                .rescan
-            ),
-            (
-                .make(
                     refreshStatus: nil,
                     activitySnapshot: emptyActivity,
                     isRefreshing: true,
@@ -284,6 +285,20 @@ final class GitActivityExperiencePresentationTests: XCTestCase {
             XCTAssertEqual(presentation.action == nil, presentation.actionTitle == nil)
             XCTAssertFalse(presentation.state.showsActivityMetrics)
         }
+
+        // A failed refresh with a readable zero-activity snapshot still shows
+        // today's data-driven copy plus the non-blocking refresh notice; it is
+        // no longer reported as a data-read failure.
+        let refreshFailedWithUsableData = GitActivityExperiencePresentation.make(
+            refreshStatus: status(outcome: .failed, diagnosticReason: .scriptExecutionFailed),
+            activitySnapshot: emptyActivity,
+            isRefreshing: false,
+            onboardingCompleted: true
+        )
+        XCTAssertEqual(refreshFailedWithUsableData.state, .noActivity)
+        XCTAssertEqual(refreshFailedWithUsableData.title, "今日无活动")
+        XCTAssertEqual(refreshFailedWithUsableData.action, .rescan)
+        XCTAssertTrue(refreshFailedWithUsableData.message.contains("刷新"))
     }
 
     private func makePresentation(

@@ -36,8 +36,14 @@ struct TinyBuddyProvider: TimelineProvider {
     private let combinedSnapshotStore: TinyBuddyCombinedSnapshotStore
     private let refreshStatusStore: GitActivityRefreshStatusStore
     private let sharedDefaults: UserDefaults
+    /// The Widget extension's own defaults domain. The bounded `.readFailed`
+    /// probe budget lives here (never in the App Group shared domain) so a
+    /// Widget process restart keeps the day's remaining budget.
+    private let widgetDefaults: UserDefaults
     private static let logger = Logger(subsystem: "local.tinybuddy", category: "SharedSnapshot")
     private static let lastSeenCalibrationGenerationKey = "tinybuddy.widget.lastSeenCalibrationGeneration"
+    private static let readFailureProbeDayKey = "tinybuddy.widget.readFailureProbe.day.v1"
+    private static let readFailureProbeCountKey = "tinybuddy.widget.readFailureProbe.count.v1"
 
     private let configStore: TinyBuddyConfigStore
 
@@ -50,6 +56,7 @@ struct TinyBuddyProvider: TimelineProvider {
             timeEnvironment: timeEnvironment
         )
         self.sharedDefaults = TinyBuddySharedData.makeUserDefaults()
+        self.widgetDefaults = UserDefaults.standard
         self.configStore = TinyBuddyConfigStore()
     }
 
@@ -115,21 +122,43 @@ struct TinyBuddyProvider: TimelineProvider {
         // State-aware self-scheduling complements those push reloads: a live
         // focus session advances its whole-minute elapsed metric on the
         // Widget's own cadence, a stale/loading snapshot self-heals toward
-        // the authoritative combined snapshot, and a neutral placeholder
-        // entry (no activity fields, no focus-history publication — the
-        // prebuilt rollover and first-launch fallback) re-reads the snapshot
-        // on the recovery cadence so committed data starts rendering even
-        // when the app-side reload is missing or failed. Stable states with
-        // data stay on `.never` so an unchanged Widget never asks for a
+        // the authoritative combined snapshot, a genuine read failure probes
+        // on a bounded 5/20/80-minute ladder (at most three probes per local
+        // day, persisted in the Widget's own defaults), and a neutral
+        // placeholder entry (no activity fields, no focus-history publication
+        // — the prebuilt rollover and first-launch fallback) re-reads the
+        // snapshot on the recovery cadence so committed data starts rendering
+        // even when the app-side reload is missing or failed. Stable states
+        // with data stay on `.never` so an unchanged Widget never asks for a
         // periodic wakeup.
+        let readFailureProbeState = storedReadFailureProbeState(
+            dayIdentifier: timeContext.dayIdentifier
+        )
+        let readFailureProbeCountUsed = readFailureProbeState.probeCount(
+            on: timeContext.dayIdentifier
+        )
         var nextRefreshDate = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
             state: entry.presentation.state,
             isFocusSessionActive: entry.focusHistoryPublication?.isFocusSessionActive == true,
             isFocusSessionPaused: entry.focusHistoryPublication?.isFocusSessionPaused == true,
             hasRenderableData: entryHasRenderableData(entry),
+            readFailureReason: entry.presentation.readFailureReason,
+            readFailureProbeCountUsed: readFailureProbeCountUsed,
             now: timeContext.now,
             dayBoundary: timeContext.nextDayBoundary
         )
+        if nextRefreshDate != nil,
+           entry.presentation.state == .readFailed,
+           entry.focusHistoryPublication?.isFocusSessionActive != true,
+           entry.focusHistoryPublication?.isFocusSessionPaused != true {
+            // A read failure scheduled one probe from the bounded ladder. The
+            // budget is keyed by the local day, so it resets at the boundary
+            // and a repeated Widget reload with unchanged state can only
+            // consume the remaining probes, never create an endless cadence.
+            saveReadFailureProbeState(
+                readFailureProbeState.recordingProbe(on: timeContext.dayIdentifier)
+            )
+        }
         if nextRefreshDate == nil,
            let rolloverEntry,
            let probe = TinyBuddyWidgetTimelinePolicy.nextRolloverProbeDate(
@@ -143,7 +172,7 @@ struct TinyBuddyProvider: TimelineProvider {
         }
         if let nextRefreshDate {
             Self.logger.notice(
-                "timeline self-scheduled state=\(entry.presentation.state.rawValue, privacy: .public) refresh=\(nextRefreshDate.timeIntervalSince(timeContext.now), privacy: .public)s"
+                "timeline self-scheduled state=\(entry.presentation.state.rawValue, privacy: .public) refresh=\(nextRefreshDate.timeIntervalSince(timeContext.now), privacy: .public)s readFailureProbes=\(readFailureProbeCountUsed, privacy: .public)"
             )
         }
         let timeline: Timeline<TinyBuddyEntry>
@@ -163,6 +192,30 @@ struct TinyBuddyProvider: TimelineProvider {
     private func entryHasRenderableData(_ entry: TinyBuddyEntry) -> Bool {
         entry.presentation.showsActivityMetrics
             || entry.focusHistoryPublication != nil
+    }
+
+    /// Loads the persisted `.readFailed` probe budget for `dayIdentifier` from
+    /// the Widget extension's own defaults domain. A stored budget from an
+    /// earlier local day is ignored by `probeCount(on:)`, which resets the
+    /// ladder for the new day.
+    private func storedReadFailureProbeState(
+        dayIdentifier: String
+    ) -> TinyBuddyWidgetReadFailureProbeState {
+        TinyBuddyWidgetReadFailureProbeState(
+            dayIdentifier: widgetDefaults.string(
+                forKey: Self.readFailureProbeDayKey
+            ) ?? dayIdentifier,
+            probeCount: widgetDefaults.integer(
+                forKey: Self.readFailureProbeCountKey
+            )
+        )
+    }
+
+    private func saveReadFailureProbeState(
+        _ state: TinyBuddyWidgetReadFailureProbeState
+    ) {
+        widgetDefaults.set(state.dayIdentifier, forKey: Self.readFailureProbeDayKey)
+        widgetDefaults.set(state.probeCount, forKey: Self.readFailureProbeCountKey)
     }
 
     /// The prebuilt entry that owns the local-day boundary. It never reads the

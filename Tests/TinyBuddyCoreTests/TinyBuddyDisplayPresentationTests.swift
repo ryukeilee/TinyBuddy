@@ -714,7 +714,6 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
         XCTAssertEqual(partialWithoutTrustedMetrics.state, .partial)
         let unavailableValues = [
             partialWithoutTrustedMetrics,
-            presentation(activity: activity, refreshStatus: status(outcome: .failed)),
             presentation(
                 activity: activity,
                 refreshStatus: status(
@@ -750,6 +749,150 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             XCTAssertFalse(layout.showsDataDate, value.state.rawValue)
             XCTAssertTrue(layout.showsMessage, value.state.rawValue)
         }
+
+        // A failed Git refresh no longer masks usable data, so the trusted
+        // activity layout stays (metrics and project visible) and the
+        // non-blocking refresh notice becomes visible as a message line.
+        let failedRefreshWithTrustedData = presentation(
+            activity: activity,
+            refreshStatus: status(outcome: .failed)
+        )
+        XCTAssertEqual(failedRefreshWithTrustedData.state, .completedToday)
+        let failedRefreshLayout = TinyBuddyDisplayLayout(
+            presentation: failedRefreshWithTrustedData,
+            environment: environment
+        )
+        XCTAssertTrue(failedRefreshLayout.showsMetrics)
+        XCTAssertTrue(failedRefreshLayout.showsProject)
+        XCTAssertTrue(failedRefreshLayout.showsDataDate)
+        XCTAssertTrue(failedRefreshLayout.showsMessage)
+    }
+
+    // MARK: - Git refresh failure vs. snapshot read failure
+
+    func testRealReadFailureKeepsRetryableCopyAndHidesMetrics() {
+        let value = presentation(
+            activity: activity(focus: 3, completion: 4, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .succeeded, repositoryCount: 1),
+            dataAvailability: .failed(.sandboxReadDenied)
+        )
+
+        XCTAssertEqual(value.state, .readFailed)
+        XCTAssertEqual(value.title, "数据读取失败")
+        XCTAssertEqual(value.message, "当前继续保留上次可信结果；可重试读取。")
+        XCTAssertEqual(value.systemImage, "exclamationmark.triangle")
+        XCTAssertEqual(value.accentRole, .error)
+        XCTAssertEqual(value.action, .rescan)
+        XCTAssertEqual(value.actionTitle, "重试读取")
+        // The Widget layout still refuses to render activity metrics for
+        // `.readFailed`; only the state/copy contract is asserted here.
+        let compactLayout = TinyBuddyDisplayLayout(
+            presentation: value,
+            environment: TinyBuddyDisplayEnvironment(size: .compact)
+        )
+        XCTAssertFalse(compactLayout.showsMetrics)
+        XCTAssertNil(value.refreshNotice)
+        XCTAssertEqual(value.readFailureReason, .sandboxReadDenied)
+    }
+
+    func testGitRefreshFailureKeepsValidSameDayDataVisibleWithNotice() {
+        let value = presentation(
+            activity: activity(focus: 3, completion: 4, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .failed, repositoryCount: 1)
+        )
+
+        XCTAssertEqual(value.state, .completedToday)
+        XCTAssertNotEqual(value.state, .readFailed)
+        XCTAssertTrue(value.showsActivityMetrics)
+        XCTAssertEqual(value.focusCount, 3)
+        XCTAssertEqual(value.completionCount, 4)
+        XCTAssertEqual(value.focusCountText, "3")
+        XCTAssertEqual(value.completionCountText, "4")
+        XCTAssertEqual(value.title, "今日完成")
+        XCTAssertEqual(value.recentProjectName, "TinyBuddy")
+        XCTAssertNil(value.action)
+        XCTAssertNil(value.readFailureReason)
+
+        let notice = value.refreshNotice
+        XCTAssertNotNil(notice)
+        XCTAssertTrue(value.hasRefreshNotice)
+        XCTAssertTrue(
+            value.message.hasPrefix("今天已经有完成记录"),
+            "data-driven message must stay authoritative"
+        )
+        XCTAssertTrue(value.message.hasSuffix(notice ?? ""))
+        XCTAssertTrue(notice?.contains("刷新") == true)
+    }
+
+    func testGitRefreshFailureKeepsFocusingAndNoActivityStatesDataDriven() {
+        let focusing = presentation(
+            activity: activity(focus: 2, completion: 0),
+            refreshStatus: status(outcome: .failed, repositoryCount: 1)
+        )
+        XCTAssertEqual(focusing.state, .focusing)
+        XCTAssertTrue(focusing.showsActivityMetrics)
+        XCTAssertTrue(focusing.hasRefreshNotice)
+
+        let noActivity = presentation(
+            activity: activity(focus: 0, completion: 0),
+            refreshStatus: status(outcome: .failed, repositoryCount: 1)
+        )
+        XCTAssertEqual(noActivity.state, .noActivity)
+        XCTAssertTrue(noActivity.showsActivityMetrics)
+        XCTAssertTrue(noActivity.hasRefreshNotice)
+    }
+
+    func testGitRefreshFailureDoesNotManufactureEmptyDirectoryState() {
+        // Repository counts come from the failed refresh itself, so they cannot
+        // prove an empty directory layout while the snapshot is usable.
+        let value = presentation(
+            activity: activity(focus: 3, completion: 4),
+            refreshStatus: status(outcome: .failed, authorizedRootCount: 1, repositoryCount: 0)
+        )
+
+        XCTAssertNotEqual(value.state, .noRepositories)
+        XCTAssertEqual(value.state, .completedToday)
+        XCTAssertTrue(value.showsActivityMetrics)
+        XCTAssertTrue(value.hasRefreshNotice)
+    }
+
+    func testGitRefreshFailureWithUnusableSnapshotStillFailsToRead() {
+        for availability in [
+            TinyBuddyDisplayDataAvailability.stale,
+            .loading,
+            .failed(.snapshotCorrupt)
+        ] {
+            let value = presentation(
+                activity: activity(focus: 3, completion: 4),
+                refreshStatus: status(outcome: .failed, repositoryCount: 1),
+                dataAvailability: availability
+            )
+            XCTAssertEqual(value.state, .readFailed, "\(availability)")
+            XCTAssertEqual(value.message, "当前继续保留上次可信结果；可重试读取。")
+            XCTAssertEqual(value.action, .rescan)
+            XCTAssertNil(value.refreshNotice, "\(availability)")
+            XCTAssertEqual(value.accentRole, .error, "\(availability)")
+        }
+    }
+
+    func testGitRefreshFailureWithoutValidDataHasNoRefreshNotice() {
+        // `nil` activity fields with a failed refresh resolve to `.readFailed`
+        // whenever the snapshot is not `.available`, and to an honest neutral
+        // state (with the notice) when the snapshot itself is valid.
+        let unavailable = presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .failed),
+            dataAvailability: .loading
+        )
+        XCTAssertEqual(unavailable.state, .readFailed)
+        XCTAssertNil(unavailable.refreshNotice)
+
+        let valid = presentation(
+            activity: activity(focus: nil, completion: nil),
+            refreshStatus: status(outcome: .failed)
+        )
+        XCTAssertEqual(valid.state, .idle)
+        XCTAssertTrue(valid.hasRefreshNotice)
     }
 
     // MARK: - Partial availability self-healing & regression tests

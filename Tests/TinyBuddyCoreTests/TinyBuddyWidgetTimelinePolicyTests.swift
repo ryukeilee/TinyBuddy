@@ -78,7 +78,6 @@ final class TinyBuddyWidgetTimelinePolicyTests: XCTestCase {
             .noRepositories,
             .authorizationRequired,
             .authorizationInvalid,
-            .readFailed,
             .partial,
         ]
         for state in stableStates {
@@ -93,18 +92,211 @@ final class TinyBuddyWidgetTimelinePolicyTests: XCTestCase {
         }
     }
 
-    func testNoSelfScheduledRefreshWhenDataIsFailedPersistently() {
-        // `.readFailed` is deliberately excluded from the retry set: a corrupt
-        // or version-incompatible source does not heal from polling, so the
-        // Widget must not burn WidgetKit budget on it.
+    // MARK: - Bounded read-failure self-healing
+
+    func testReadFailureProbeLadderIsBoundedAndDocumented() {
+        XCTAssertEqual(
+            TinyBuddyWidgetTimelinePolicy.readFailureProbeIntervals,
+            [5 * 60, 20 * 60, 80 * 60]
+        )
+        XCTAssertEqual(TinyBuddyWidgetTimelinePolicy.maximumReadFailureProbeCount, 3)
+        for interval in TinyBuddyWidgetTimelinePolicy.readFailureProbeIntervals {
+            XCTAssertGreaterThanOrEqual(
+                interval,
+                TinyBuddyWidgetTimelinePolicy.minimumRefreshInterval
+            )
+        }
+    }
+
+    func testReadFailedStateSchedulesOneProbePerLadderStep() {
+        for (usedProbeCount, expectedInterval) in
+            TinyBuddyWidgetTimelinePolicy.readFailureProbeIntervals.enumerated() {
+            let date = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .readFailed,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                readFailureProbeCountUsed: usedProbeCount,
+                now: now,
+                dayBoundary: dayBoundary
+            )
+            XCTAssertEqual(
+                date,
+                now.addingTimeInterval(expectedInterval),
+                "probe \(usedProbeCount) must use its documented ladder step"
+            )
+        }
+    }
+
+    func testExhaustedReadFailureBudgetStopsInDayProbes() {
+        // The ladder is a budget, not a poll: once all probes are spent the
+        // Widget waits for an app push reload or the midnight rollover probe.
         XCTAssertNil(
             TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
                 state: .readFailed,
                 isFocusSessionActive: false,
                 isFocusSessionPaused: false,
+                readFailureProbeCountUsed: TinyBuddyWidgetTimelinePolicy
+                    .maximumReadFailureProbeCount,
                 now: now,
                 dayBoundary: dayBoundary
             )
+        )
+        XCTAssertNil(
+            TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .readFailed,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                readFailureProbeCountUsed: TinyBuddyWidgetTimelinePolicy
+                    .maximumReadFailureProbeCount + 5,
+                now: now,
+                dayBoundary: dayBoundary
+            )
+        )
+    }
+
+    func testPermanentReadFailureNeverSchedulesProbes() {
+        // A version-incompatible payload cannot heal from re-reading it, so no
+        // step of the ladder is available for it.
+        XCTAssertTrue(
+            TinyBuddyWidgetTimelinePolicy.isPermanentReadFailure(.versionIncompatible)
+        )
+        for usedProbeCount in 0..<TinyBuddyWidgetTimelinePolicy.maximumReadFailureProbeCount {
+            XCTAssertNil(
+                TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                    state: .readFailed,
+                    isFocusSessionActive: false,
+                    isFocusSessionPaused: false,
+                    readFailureReason: .versionIncompatible,
+                    readFailureProbeCountUsed: usedProbeCount,
+                    now: now,
+                    dayBoundary: dayBoundary
+                ),
+                "probe \(usedProbeCount) must not be spent on a permanent failure"
+            )
+        }
+        // Transient causes keep the ladder.
+        XCTAssertFalse(
+            TinyBuddyWidgetTimelinePolicy.isPermanentReadFailure(.snapshotCorrupt)
+        )
+        XCTAssertNotNil(
+            TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .readFailed,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                readFailureReason: .snapshotCorrupt,
+                now: now,
+                dayBoundary: dayBoundary
+            )
+        )
+    }
+
+    func testPersistentReadFailureSchedulesAtMostThreeProbesPerLocalDay() {
+        // Simulate a full local day of Widget timeline rebuilds that keep
+        // failing: the ladder must terminate instead of polling forever.
+        var probeState = TinyBuddyWidgetReadFailureProbeState(
+            dayIdentifier: "2026-10-21",
+            probeCount: 0
+        )
+        let dayStart = Date(timeIntervalSince1970: 1_700_000_000)
+        let simulatedDayBoundary = dayStart.addingTimeInterval(86_400)
+        var instant = dayStart
+        var scheduledProbes: [Date] = []
+
+        for _ in 0..<200 {
+            let used = probeState.probeCount(on: "2026-10-21")
+            guard let next = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .readFailed,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                readFailureProbeCountUsed: used,
+                now: instant,
+                dayBoundary: simulatedDayBoundary
+            ) else {
+                break
+            }
+            probeState = probeState.recordingProbe(on: "2026-10-21")
+            scheduledProbes.append(next)
+            instant = next
+        }
+
+        XCTAssertEqual(
+            scheduledProbes.count,
+            TinyBuddyWidgetTimelinePolicy.maximumReadFailureProbeCount
+        )
+        XCTAssertEqual(
+            scheduledProbes,
+            [
+                dayStart.addingTimeInterval(5 * 60),
+                dayStart.addingTimeInterval(25 * 60),
+                dayStart.addingTimeInterval(105 * 60),
+            ]
+        )
+        XCTAssertEqual(probeState.probeCount(on: "2026-10-21"), 3)
+        for probe in scheduledProbes {
+            XCTAssertLessThan(probe, simulatedDayBoundary)
+        }
+    }
+
+    func testReadFailureBudgetResetsOnNewLocalDay() {
+        let yesterday = TinyBuddyWidgetReadFailureProbeState(
+            dayIdentifier: "2026-10-20",
+            probeCount: TinyBuddyWidgetTimelinePolicy.maximumReadFailureProbeCount
+        )
+
+        XCTAssertEqual(yesterday.probeCount(on: "2026-10-21"), 0)
+        XCTAssertEqual(
+            yesterday.probeCount(on: "2026-10-20"),
+            TinyBuddyWidgetTimelinePolicy.maximumReadFailureProbeCount
+        )
+
+        let today = yesterday.recordingProbe(on: "2026-10-21")
+        XCTAssertEqual(today.dayIdentifier, "2026-10-21")
+        XCTAssertEqual(today.probeCount, 1)
+        XCTAssertEqual(today.probeCount(on: "2026-10-20"), 0)
+
+        // An exhausted yesterday therefore cannot suppress today's recovery.
+        XCTAssertEqual(
+            TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .readFailed,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                readFailureProbeCountUsed: yesterday.probeCount(on: "2026-10-21"),
+                now: now,
+                dayBoundary: dayBoundary
+            ),
+            now.addingTimeInterval(5 * 60)
+        )
+    }
+
+    func testReadFailureProbeNeverCrossesDayBoundary() {
+        let lateNow = dayBoundary.addingTimeInterval(-60)
+        XCTAssertNil(
+            TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+                state: .readFailed,
+                isFocusSessionActive: false,
+                isFocusSessionPaused: false,
+                now: lateNow,
+                dayBoundary: dayBoundary
+            )
+        )
+    }
+
+    func testLiveFocusRefreshDoesNotConsumeReadFailureProbeBudget() {
+        // A live session keeps its own cadence; the read-failure ladder is only
+        // consulted when no session is open, so its budget cannot be burned by
+        // live-focus refreshes.
+        let date = TinyBuddyWidgetTimelinePolicy.nextRefreshDate(
+            state: .readFailed,
+            isFocusSessionActive: true,
+            isFocusSessionPaused: false,
+            readFailureProbeCountUsed: TinyBuddyWidgetTimelinePolicy
+                .maximumReadFailureProbeCount,
+            now: now,
+            dayBoundary: dayBoundary
+        )
+        XCTAssertEqual(
+            date,
+            now.addingTimeInterval(TinyBuddyWidgetTimelinePolicy.liveFocusRefreshInterval)
         )
     }
 

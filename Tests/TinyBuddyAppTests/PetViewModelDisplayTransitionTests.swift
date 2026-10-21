@@ -122,9 +122,18 @@ final class PetViewModelDisplayTransitionTests: XCTestCase {
         )
         await Task.yield()
 
-        XCTAssertEqual(presentationAfterNewStatus.title, "数据读取失败")
+        // The newer failed refresh keeps the valid same-day data visible and
+        // owns the non-blocking refresh notice (the older succeeded status
+        // would clear it), so this still proves sequence ordering wins.
+        XCTAssertEqual(presentationAfterNewStatus.state, .completedToday)
+        XCTAssertEqual(presentationAfterNewStatus.title, "今日完成")
+        XCTAssertTrue(presentationAfterNewStatus.hasRefreshNotice)
         XCTAssertEqual(viewModel.displayPresentation.title, presentationAfterNewStatus.title)
         XCTAssertEqual(viewModel.displayPresentation.dataDateText, presentationAfterNewStatus.dataDateText)
+        XCTAssertEqual(viewModel.displayPresentation.message, presentationAfterNewStatus.message)
+        XCTAssertEqual(viewModel.displayPresentation.refreshNotice, presentationAfterNewStatus.refreshNotice)
+        XCTAssertEqual(viewModel.displayPresentation.focusCount, 1)
+        XCTAssertEqual(viewModel.displayPresentation.completionCount, 1)
     }
 
     func testRapidNotificationsConvergeOnHighestSequenceAndNewestCommittedSnapshot() async throws {
@@ -275,7 +284,9 @@ final class PetViewModelDisplayTransitionTests: XCTestCase {
 
         XCTAssertEqual(viewModel.displayPresentation.title, currentPresentation.title)
         XCTAssertEqual(viewModel.displayPresentation.dataDateText, currentPresentation.dataDateText)
-        XCTAssertEqual(viewModel.displayPresentation.state, .readFailed)
+        XCTAssertEqual(currentPresentation.state, .completedToday)
+        XCTAssertEqual(viewModel.displayPresentation.state, .completedToday)
+        XCTAssertTrue(viewModel.displayPresentation.hasRefreshNotice)
     }
 
     func testNewerLifecycleGenerationAcceptsStatusAfterWallClockRollback() async {
@@ -298,7 +309,10 @@ final class PetViewModelDisplayTransitionTests: XCTestCase {
             userInfo: lifecycleUserInfo(generation: 10, sequence: 1)
         )
         await Task.yield()
-        XCTAssertEqual(viewModel.displayPresentation.state, .readFailed)
+        // The failed refresh keeps the valid snapshot's data-driven state; the
+        // failure is a non-blocking notice, not a data-read failure.
+        XCTAssertEqual(viewModel.displayPresentation.state, .completedToday)
+        XCTAssertTrue(viewModel.displayPresentation.hasRefreshNotice)
 
         fixture.notificationCenter.post(
             name: .gitActivityRefreshStatusDidChange,
@@ -395,7 +409,10 @@ final class PetViewModelDisplayTransitionTests: XCTestCase {
             timeEnvironment: timeEnvironment,
             widgetReloader: {}
         )
-        XCTAssertEqual(viewModel.displayPresentation.state, .readFailed)
+        // A failed refresh over a persisted same-day snapshot keeps the data
+        // visible instead of claiming the snapshot could not be read.
+        XCTAssertEqual(viewModel.displayPresentation.state, .completedToday)
+        XCTAssertTrue(viewModel.displayPresentation.hasRefreshNotice)
 
         now = makeDate(year: 2026, month: 7, day: 4, hour: 23, minute: 0, second: 0)
         notificationCenter.post(

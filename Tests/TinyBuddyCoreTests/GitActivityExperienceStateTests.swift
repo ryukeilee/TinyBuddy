@@ -68,7 +68,10 @@ final class GitActivityExperienceStateTests: XCTestCase {
                 refreshStatus: status(outcome: .failed, diagnosticReason: .scriptExecutionFailed),
                 activitySnapshot: active
             ),
-            .failed
+            // With a non-nil refresh status this compatibility entry
+            // synthesizes `.available` and never expresses a snapshot read
+            // failure, so valid activity must not be classified as `.failed`.
+            .ready
         )
         // .partialRecovery with complete activity data → shows real activity state (.ready)
         XCTAssertEqual(

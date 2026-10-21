@@ -27,6 +27,12 @@ import Foundation
 ///   fallback are the canonical examples — so the Widget must re-read the
 ///   authoritative snapshot instead of staying on `.never` until an app-side
 ///   reload happens to arrive.
+/// - A genuine snapshot read failure (`.readFailed`, e.g. a corrupt blob, a
+///   denied sandbox read, or a persistence fault) retries on a bounded ladder
+///   of 5 / 20 / 80 minutes, at most three probes per local day. A read
+///   failure can be transient (the app commits a fresh snapshot, a container
+///   gets repaired), so the Widget needs its own bounded recovery path; the
+///   budget keeps a permanent failure from degenerating into polling.
 ///
 /// In-day self-scheduling never passes the local-day boundary: the prebuilt
 /// midnight rollover entry owns that transition. `nextRolloverProbeDate`
@@ -51,6 +57,31 @@ public enum TinyBuddyWidgetTimelinePolicy {
     /// transient state can never turn into a tight refresh loop.
     public static let minimumRefreshInterval: TimeInterval = 30
 
+    /// Bounded recovery ladder for a genuine snapshot read failure. Each
+    /// element is the delay before the next in-day probe; the ladder is short
+    /// (maximum three probes per local day) so an immediate transient failure
+    /// recovers on its own while a permanent one stops asking for wakeups.
+    public static let readFailureProbeIntervals: [TimeInterval] = [
+        5 * 60,
+        20 * 60,
+        80 * 60,
+    ]
+
+    /// Hard cap on `.readFailed` self-healing probes per local day. Exhausting
+    /// it leaves only app push reloads and the midnight rollover probe.
+    public static var maximumReadFailureProbeCount: Int {
+        readFailureProbeIntervals.count
+    }
+
+    /// Reasons that cannot heal by re-reading the snapshot. A version-
+    /// incompatible payload needs the app (or a new build) to rewrite it, so
+    /// the Widget must not spend its refresh budget probing for it.
+    public static func isPermanentReadFailure(
+        _ reason: TinyBuddySharedSnapshotReason?
+    ) -> Bool {
+        reason == .versionIncompatible
+    }
+
     /// Returns the date of the next self-scheduled widget refresh, or `nil`
     /// when the widget should stay on `policy: .never` (push reloads plus the
     /// prebuilt midnight rollover entry are enough).
@@ -66,6 +97,12 @@ public enum TinyBuddyWidgetTimelinePolicy {
     ///     publication). A neutral idle entry without data is a placeholder
     ///     and must re-probe; a genuinely empty day still renders its zero
     ///     metrics and stays push-only.
+    ///   - readFailureReason: The snapshot read-failure reason behind a
+    ///     `.readFailed` state, if known. Only used to suppress probes for
+    ///     permanent causes such as a version-incompatible payload.
+    ///   - readFailureProbeCountUsed: How many `.readFailed` probes have
+    ///     already been scheduled for the current local day. The caller owns
+    ///     persistence; the policy stays a pure decision.
     ///   - now: The current timeline instant.
     ///   - dayBoundary: The next local-day boundary; the returned date is
     ///     clamped so it never reaches or passes it.
@@ -74,6 +111,8 @@ public enum TinyBuddyWidgetTimelinePolicy {
         isFocusSessionActive: Bool,
         isFocusSessionPaused: Bool,
         hasRenderableData: Bool = true,
+        readFailureReason: TinyBuddySharedSnapshotReason? = nil,
+        readFailureProbeCountUsed: Int = 0,
         now: Date,
         dayBoundary: Date
     ) -> Date? {
@@ -90,6 +129,16 @@ public enum TinyBuddyWidgetTimelinePolicy {
                 // Recoverable unavailability: keep probing the authoritative
                 // combined snapshot so the Widget aligns once conditions heal.
                 interval = staleRecoveryRefreshInterval
+            case .readFailed:
+                // A read failure is not necessarily permanent: the app may
+                // rewrite a corrupt or unreachable snapshot. Probe on the
+                // bounded ladder, then stop for the rest of the local day.
+                let usedProbeCount = max(0, readFailureProbeCountUsed)
+                guard isPermanentReadFailure(readFailureReason) == false,
+                      usedProbeCount < readFailureProbeIntervals.count else {
+                    return nil
+                }
+                interval = readFailureProbeIntervals[usedProbeCount]
             case .idle where hasRenderableData == false:
                 // Neutral placeholder (prebuilt rollover, first launch, or a
                 // pet-slice-only snapshot before the activity/history slices
@@ -129,5 +178,39 @@ public enum TinyBuddyWidgetTimelinePolicy {
             return nil
         }
         return dayBoundary.addingTimeInterval(staleRecoveryRefreshInterval)
+    }
+}
+
+/// Pure bookkeeping for the bounded `.readFailed` probe ladder.
+///
+/// The budget is scoped to a local day: the first probe recorded for a new day
+/// resets the count, so yesterday's exhausted ladder can never suppress today's
+/// recovery probes. It holds no storage itself — the Widget extension persists
+/// it in its own `UserDefaults` domain so a Widget process restart does not
+/// reset the budget while a snapshot read keeps failing.
+public struct TinyBuddyWidgetReadFailureProbeState: Equatable, Sendable {
+    /// The local-day identifier the stored count belongs to.
+    public let dayIdentifier: String
+    /// Probes already scheduled for that day.
+    public let probeCount: Int
+
+    public init(dayIdentifier: String, probeCount: Int) {
+        self.dayIdentifier = dayIdentifier
+        self.probeCount = max(0, probeCount)
+    }
+
+    /// The probe count that applies to `dayIdentifier`. A different day means a
+    /// fresh budget; a day change also discards a stored count from the past.
+    public func probeCount(on dayIdentifier: String) -> Int {
+        self.dayIdentifier == dayIdentifier ? probeCount : 0
+    }
+
+    /// Records one scheduled probe for `dayIdentifier`, resetting the day and
+    /// therefore the count when the local day advanced.
+    public func recordingProbe(on dayIdentifier: String) -> Self {
+        Self(
+            dayIdentifier: dayIdentifier,
+            probeCount: probeCount(on: dayIdentifier) + 1
+        )
     }
 }

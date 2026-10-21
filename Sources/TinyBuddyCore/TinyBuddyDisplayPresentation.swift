@@ -148,6 +148,16 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
     public let state: TinyBuddyDisplayState
     public let title: String
     public let message: String
+    /// Non-blocking notice about a failed Git refresh that did not prevent
+    /// reading the expected local day's snapshot. It never replaces the
+    /// data-driven state and never hides activity metrics; it only appends
+    /// context to `message` and makes the message visible on compact Widget
+    /// layouts that normally hide it for activity states.
+    public let refreshNotice: String?
+    /// The snapshot read-failure reason, when `dataAvailability` was `.failed`.
+    /// The Widget passes it to the timeline policy so only transient read
+    /// failures get bounded in-day self-healing probes.
+    public let readFailureReason: TinyBuddySharedSnapshotReason?
     public let systemImage: String
     public let accentRole: TinyBuddyDisplayAccentRole
     public let action: TinyBuddyDisplayAction?
@@ -166,6 +176,12 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
     public let displayState: DisplayState
     /// Optional focus goal progress. When present, all surfaces show it identically.
     public let goalProgress: FocusGoalProgress?
+
+    /// Whether a failed refresh is being reported as a non-blocking notice
+    /// instead of replacing usable data with a data-quality state.
+    public var hasRefreshNotice: Bool {
+        refreshNotice != nil
+    }
 
     /// Drives only semantic cross-fades. Refresh timestamps and repeated
     /// publications deliberately do not change this identity.
@@ -251,6 +267,11 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             refreshStatus: refreshStatus,
             onboardingCompleted: onboardingCompleted
         )
+        let refreshNotice = Self.refreshNotice(
+            for: state,
+            refreshStatus: refreshStatus,
+            dataAvailability: dataAvailability
+        )
         let displayState = Self.displayState(
             snapshot: snapshot,
             focusCount: focusCount,
@@ -264,7 +285,13 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
 
         self.state = state
         self.title = content.title
-        self.message = content.message
+        self.message = refreshNotice.map { "\(content.message) \($0)" } ?? content.message
+        self.refreshNotice = refreshNotice
+        if case let .failed(reason) = dataAvailability {
+            self.readFailureReason = reason
+        } else {
+            self.readFailureReason = nil
+        }
         self.systemImage = content.systemImage
         self.accentRole = content.accentRole
         self.action = content.action
@@ -351,7 +378,13 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             break
         }
 
-        if refreshStatus?.outcome == .failed {
+        // A failed Git refresh is a refresh problem, not a snapshot read
+        // failure. When the expected local day's snapshot is usable, keep the
+        // data-driven state (and its metrics) and report the failure through a
+        // non-blocking notice instead of masking valid data as "read failed".
+        // Snapshot read failures above keep `.readFailed`, and an unusable,
+        // stale, or still-loading snapshot with a failed refresh keeps it too.
+        if refreshStatus?.outcome == .failed, dataAvailability != .available {
             return .readFailed
         }
 
@@ -370,7 +403,12 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             return .loading
         }
 
-        if refreshStatus?.metrics?.authorizedRootCount ?? 0 > 0,
+        // Repository counts come from the refresh itself, so a failed refresh
+        // cannot prove an empty directory layout. Only a non-failed scan may
+        // turn metrics into `.noRepositories`; otherwise the usable snapshot
+        // stays data-driven (with the refresh notice).
+        if refreshStatus?.outcome != .failed,
+           refreshStatus?.metrics?.authorizedRootCount ?? 0 > 0,
            refreshStatus?.metrics?.repositoryCount == 0 {
             return .noRepositories
         }
@@ -468,6 +506,23 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         case (true, true):
             return .active
         }
+    }
+
+    /// Returns the non-blocking refresh notice for a failed Git refresh that
+    /// left the expected local day's snapshot readable. `nil` otherwise: real
+    /// read failures keep the `.readFailed` contract, and authorization states
+    /// already carry their own actionable copy.
+    private static func refreshNotice(
+        for state: TinyBuddyDisplayState,
+        refreshStatus: GitActivityRefreshStatus?,
+        dataAvailability: TinyBuddyDisplayDataAvailability
+    ) -> String? {
+        guard refreshStatus?.outcome == .failed,
+              dataAvailability == .available,
+              state.isActivityState else {
+            return nil
+        }
+        return "后台刷新未完成，当前展示的是最近一次可信数据。"
     }
 
     private static func content(
@@ -779,7 +834,13 @@ public struct TinyBuddyDisplayLayout: Equatable, Sendable {
         showsProject = accessibilityText == false
             && presentation.recentProjectName != nil
             && (isHUD || (isExpandedWidget && (prioritizesActivity || showsPartialActivityDetails)))
-        showsMessage = isHUD || (prioritizesActivity == false && showsPartialActivityDetails == false)
+        // A failed refresh that leaves usable data keeps the activity state, so
+        // its non-blocking notice must stay visible on compact/expanded Widget
+        // layouts that otherwise reserve the message line for data-quality
+        // states. Activity metrics remain visible alongside it.
+        showsMessage = isHUD
+            || presentation.hasRefreshNotice
+            || (prioritizesActivity == false && showsPartialActivityDetails == false)
         showsDataDate = accessibilityText == false
             && (isHUD || (isExpandedWidget && (prioritizesActivity || showsPartialActivityDetails)))
         stacksMetricsVertically = isHUD && accessibilityText
