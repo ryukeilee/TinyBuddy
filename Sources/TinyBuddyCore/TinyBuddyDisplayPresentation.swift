@@ -549,24 +549,31 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         return reason
     }
 
-    /// Whether a read failure is caused by missing shared-store access rather
-    /// than by the payload itself.
+    /// Whether a read failure was *explicitly* denied by the App Sandbox.
     ///
-    /// A denied or unavailable App Group is not a transient read failure: the
-    /// same read can never succeed until the app/sandbox access is restored, so
-    /// the copy must name that external cause and its recovery instead of
-    /// promising a retry. The classification lives here, next to the copy that
-    /// depends on it, so the HUD and the Widget never re-derive it separately.
-    static func isSharedAccessDenied(
+    /// Only `.sandboxReadDenied` is proof of a permission cause: the reader
+    /// observed a real permission error (EPERM/EACCES or a Cocoa no-permission
+    /// error). Every other reason is uncertain and must not be reported as a
+    /// permission denial, in particular `.appGroupUnavailable`, which folds
+    /// together a missing container path and any other non-permission read
+    /// error (for example a recoverable I/O failure).
+    ///
+    /// An unproven cause must keep the retryable copy and its retry action:
+    /// neither the store nor the coordinator can prove that a later read is
+    /// pointless, and dropping the affordance would remove a recovery path
+    /// that may still work. The classification lives here, next to the copy
+    /// that depends on it, so the HUD and the Widget never re-derive it
+    /// separately.
+    static func isSharedAccessExplicitlyDenied(
         _ reason: TinyBuddySharedSnapshotReason?
     ) -> Bool {
         switch reason {
-        case .sandboxReadDenied?, .appGroupUnavailable?:
+        case .sandboxReadDenied?:
             return true
-        case .staleData?, .snapshotCorrupt?, .versionIncompatible?,
-             .invalidActivityRevision?, .persistenceFailed?,
-             .timelineReloadFailed?, .gitScanFailed?, .gitScanPartial?,
-             .gitScanSkipped?, .none:
+        case .appGroupUnavailable?, .staleData?, .snapshotCorrupt?,
+             .versionIncompatible?, .invalidActivityRevision?,
+             .persistenceFailed?, .timelineReloadFailed?, .gitScanFailed?,
+             .gitScanPartial?, .gitScanSkipped?, .none:
             return false
         }
     }
@@ -614,19 +621,20 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
                 .reauthorize,
                 "重新授权"
             )
-        case .readFailed where isSharedAccessDenied(readFailureReason):
-            // Access to the shared App Group store is denied or unavailable,
-            // which no in-app retry can fix, so no retry action is offered.
-            // The message names the real cause and the only real recoveries,
-            // and keeps stating that the retained result is still what is
-            // shown, so the failure is never softened into a healthy state.
+        case .readFailed where isSharedAccessExplicitlyDenied(readFailureReason):
+            // The reader observed a real permission error, so this branch names
+            // that cause. The retry action is deliberately kept: a re-read is
+            // harmless, this state cannot prove it would fail again, and the
+            // copy therefore states the external recovery as the next step
+            // only if the denial persists instead of claiming a retry cannot
+            // work. The failure is never softened into a healthy state.
             return (
                 "数据读取失败",
-                "当前继续保留上次可信结果；共享数据（App Group）访问权限被拒绝，重试读取不会恢复。请重新安装带正确签名和共享授权的版本，或恢复访问授权。",
+                "当前继续保留上次可信结果；共享数据（App Group）的读取被系统拒绝。可重试读取；若持续失败，需重新安装带正确签名和共享授权的版本，或恢复访问授权。",
                 "lock.slash",
                 .error,
-                nil,
-                nil
+                .rescan,
+                "重试读取"
             )
         case .readFailed:
             return (

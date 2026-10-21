@@ -196,7 +196,7 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
             loading|数据加载中|正在读取已授权仓库，完成后会自动同步所有入口。|arrow.triangle.2.circlepath|loading|-|…|no-metrics
             authorizationRequired|从选择仓库目录开始|TinyBuddy 只读取你授权目录中的 Git 元数据。|folder.badge.plus|warning|chooseDirectories|•?•|no-metrics
             authorizationInvalid|仓库目录授权已失效|目录可能已移动、移除或被撤销；重新授权后即可恢复。|lock.trianglebadge.exclamationmark|warning|reauthorize|•?•|no-metrics
-            readFailed|数据读取失败|当前继续保留上次可信结果；共享数据（App Group）访问权限被拒绝，重试读取不会恢复。请重新安装带正确签名和共享授权的版本，或恢复访问授权。|lock.slash|error|-|×_×|no-metrics
+            readFailed|数据读取失败|当前继续保留上次可信结果；共享数据（App Group）的读取被系统拒绝。可重试读取；若持续失败，需重新安装带正确签名和共享授权的版本，或恢复访问授权。|lock.slash|error|rescan|×_×|no-metrics
             stale|数据已过期|当前快照不属于今天，刷新完成前不会当作今日数据展示。|clock.badge.exclamationmark|warning|rescan|•_•|no-metrics
             noRepositories|未发现 Git 仓库|已授权目录中没有可识别的 Git 仓库。|folder.badge.minus|warning|addDirectory|•ᴗ•|no-metrics
             completedToday|今日完成|今天已经有完成记录，可以继续推进下一项。|checkmark.circle.fill|success|-|★ᴗ★|metrics
@@ -798,86 +798,109 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
         XCTAssertEqual(value.readFailureReason, .snapshotCorrupt)
     }
 
-    // MARK: - Permission-caused read failures
+    // MARK: - Read failures and their causes
 
-    func testSharedAccessDeniedReadFailuresNameThePermissionCauseAndItsRecovery() {
-        // `sandboxReadDenied` and `appGroupUnavailable` mean the shared App
-        // Group store cannot be reached at all. No in-app retry can succeed
-        // while that access is denied, so the copy names the permission cause
-        // and its out-of-app recovery instead of promising a retry.
-        let permissionReasons: [TinyBuddySharedSnapshotReason] = [
-            .sandboxReadDenied,
-            .appGroupUnavailable
-        ]
+    func testOnlyAnExplicitSandboxDenialIsClassifiedAsDenied() {
+        // `.sandboxReadDenied` is the only reason that is proof of a permission
+        // cause. `.appGroupUnavailable` folds together a missing container and
+        // any other non-permission read error (including a recoverable I/O
+        // failure), so it must not be asserted as a denial.
+        XCTAssertTrue(
+            TinyBuddyDisplayPresentation.isSharedAccessExplicitlyDenied(.sandboxReadDenied)
+        )
+        XCTAssertFalse(
+            TinyBuddyDisplayPresentation.isSharedAccessExplicitlyDenied(.appGroupUnavailable)
+        )
+        XCTAssertFalse(
+            TinyBuddyDisplayPresentation.isSharedAccessExplicitlyDenied(nil)
+        )
+    }
 
-        for reason in permissionReasons {
-            XCTAssertTrue(
-                TinyBuddyDisplayPresentation.isSharedAccessDenied(reason),
-                "\(reason)"
+    func testSandboxDeniedReadFailureNamesTheCauseAndKeepsTheRetryAction() {
+        let reason = TinyBuddySharedSnapshotReason.sandboxReadDenied
+        let value = presentation(
+            activity: activity(focus: 3, completion: 4, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .succeeded, repositoryCount: 1),
+            dataAvailability: .failed(reason)
+        )
+
+        // The failure is never downgraded to a healthy or hidden state.
+        XCTAssertEqual(value.state, .readFailed)
+        XCTAssertFalse(value.state.isActivityState)
+        XCTAssertEqual(value.title, "数据读取失败")
+        XCTAssertEqual(value.accentRole, .error)
+        XCTAssertEqual(value.systemImage, "lock.slash")
+        // The stable reason identifier still survives for diagnostics.
+        XCTAssertEqual(value.readFailureReason, reason)
+
+        // The cause is named as a shared-data problem the system rejected.
+        XCTAssertTrue(value.message.contains("共享数据"), value.message)
+        XCTAssertTrue(value.message.contains("读取被系统拒绝"), value.message)
+        // The retained result is still stated as retained.
+        XCTAssertTrue(
+            value.message.contains("当前继续保留上次可信结果"),
+            value.message
+        )
+        // The external recovery is named, but conditionally: a persisted
+        // denial needs it, so the copy never claims a retry is pointless.
+        XCTAssertTrue(value.message.contains("重新安装"), value.message)
+        XCTAssertTrue(value.message.contains("恢复访问授权"), value.message)
+        XCTAssertTrue(value.message.contains("若持续失败"), value.message)
+        XCTAssertFalse(value.message.contains("不会恢复"), value.message)
+
+        // The retry affordance survives: a re-read is harmless and nothing in
+        // this state proves it would fail again, so the recovery entry point
+        // must not be dropped.
+        XCTAssertEqual(value.action, .rescan)
+        XCTAssertEqual(value.actionTitle, "重试读取")
+        XCTAssertTrue(value.message.contains("可重试读取"), value.message)
+
+        // The diagnosis is not replaced by a refresh notice, and Widget
+        // layouts still refuse to present retained values as current activity.
+        XCTAssertNil(value.refreshNotice)
+        for size in [TinyBuddyDisplayLayoutSize.compact, .expanded] {
+            XCTAssertFalse(
+                TinyBuddyDisplayLayout(
+                    presentation: value,
+                    environment: TinyBuddyDisplayEnvironment(size: size)
+                ).showsMetrics,
+                size.rawValue
             )
-            let value = presentation(
-                activity: activity(focus: 3, completion: 4, project: "TinyBuddy"),
-                refreshStatus: status(outcome: .succeeded, repositoryCount: 1),
-                dataAvailability: .failed(reason)
-            )
+        }
 
-            // The failure is never downgraded to a healthy or hidden state.
-            XCTAssertEqual(value.state, .readFailed, "\(reason)")
-            XCTAssertFalse(value.state.isActivityState, "\(reason)")
-            XCTAssertEqual(value.title, "数据读取失败", "\(reason)")
-            XCTAssertEqual(value.accentRole, .error, "\(reason)")
-            XCTAssertEqual(value.systemImage, "lock.slash", "\(reason)")
-            // The stable reason identifier still survives for diagnostics.
-            XCTAssertEqual(value.readFailureReason, reason, "\(reason)")
+        // The HUD keeps enough lines for the actionable copy.
+        let hudLayout = TinyBuddyDisplayLayout(
+            presentation: value,
+            environment: TinyBuddyDisplayEnvironment(size: .standard)
+        )
+        XCTAssertTrue(hudLayout.showsMessage)
+        XCTAssertEqual(hudLayout.messageLineLimit, 3)
+    }
 
-            // The cause is named as a shared-data permission problem.
-            XCTAssertTrue(value.message.contains("共享数据"), value.message)
-            XCTAssertTrue(value.message.contains("访问权限被拒绝"), value.message)
-            // The retained result is still stated as retained.
-            XCTAssertTrue(
-                value.message.contains("当前继续保留上次可信结果"),
-                value.message
-            )
-            // The real recoveries are named: reinstall the correctly signed
-            // build, or restore the access authorization.
-            XCTAssertTrue(value.message.contains("重新安装"), value.message)
-            XCTAssertTrue(value.message.contains("恢复访问授权"), value.message)
-            // No retry promise: the message states that retrying cannot help.
-            XCTAssertFalse(value.message.contains("可重试读取"), value.message)
-            XCTAssertTrue(value.message.contains("重试读取不会恢复"), value.message)
+    func testAppGroupUnavailableReadFailureKeepsTheRetryableCopyAndAction() {
+        // A missing App Group container is not proof of a permission denial:
+        // the same reason also carries recoverable I/O failures, so the copy
+        // must stay retryable and must never claim the access was denied.
+        let reason = TinyBuddySharedSnapshotReason.appGroupUnavailable
+        let value = presentation(
+            activity: activity(focus: 3, completion: 4, project: "TinyBuddy"),
+            refreshStatus: status(outcome: .succeeded, repositoryCount: 1),
+            dataAvailability: .failed(reason)
+        )
 
-            // A retry action would be a button that can never work, so none is
-            // offered. `action` and `actionTitle` are nil together: the HUD
-            // renders its action button only when `actionTitle != nil`
-            // (`PetView`) and `PetViewModel.performGitActivityAction` returns
-            // early for a nil `action`, and the Widget renders no action at
-            // all. `GitActivityExperiencePresentation` maps both optionals
-            // together.
-            XCTAssertNil(value.action, "\(reason)")
-            XCTAssertNil(value.actionTitle, "\(reason)")
-            XCTAssertEqual(value.action == nil, value.actionTitle == nil, "\(reason)")
+        XCTAssertEqual(value.state, .readFailed)
+        XCTAssertEqual(value.title, "数据读取失败")
+        XCTAssertEqual(value.message, "当前继续保留上次可信结果；可重试读取。")
+        XCTAssertEqual(value.systemImage, "exclamationmark.triangle")
+        XCTAssertEqual(value.accentRole, .error)
+        XCTAssertEqual(value.action, .rescan)
+        XCTAssertEqual(value.actionTitle, "重试读取")
+        XCTAssertEqual(value.readFailureReason, reason)
+        XCTAssertNil(value.refreshNotice)
 
-            // The diagnosis stays a non-blocking-free data-quality state: no
-            // refresh notice replaces it, and Widget layouts still refuse to
-            // present the retained values as current activity.
-            XCTAssertNil(value.refreshNotice, "\(reason)")
-            for size in [TinyBuddyDisplayLayoutSize.compact, .expanded] {
-                XCTAssertFalse(
-                    TinyBuddyDisplayLayout(
-                        presentation: value,
-                        environment: TinyBuddyDisplayEnvironment(size: size)
-                    ).showsMetrics,
-                    "\(reason)/\(size.rawValue)"
-                )
-            }
-
-            // The HUD keeps enough lines for the actionable copy.
-            let hudLayout = TinyBuddyDisplayLayout(
-                presentation: value,
-                environment: TinyBuddyDisplayEnvironment(size: .standard)
-            )
-            XCTAssertTrue(hudLayout.showsMessage, "\(reason)")
-            XCTAssertEqual(hudLayout.messageLineLimit, 3, "\(reason)")
+        // No permission claim, and no assertion that a retry cannot help.
+        for claim in ["权限被拒绝", "访问被拒绝", "不会恢复", "重新安装"] {
+            XCTAssertFalse(value.message.contains(claim), "\(claim): \(value.message)")
         }
     }
 
@@ -895,7 +918,7 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
 
         for reason in dataReasons {
             XCTAssertFalse(
-                TinyBuddyDisplayPresentation.isSharedAccessDenied(reason),
+                TinyBuddyDisplayPresentation.isSharedAccessExplicitlyDenied(reason),
                 "\(reason)"
             )
             let value = presentation(
@@ -1082,18 +1105,13 @@ final class TinyBuddyDisplayPresentationTests: XCTestCase {
                 )
                 XCTAssertEqual(value.state, .readFailed, "\(outcome)/\(availability)")
                 XCTAssertEqual(value.title, "数据读取失败")
-                // Only payload-level (retryable) causes offer the retry action;
-                // a denied shared store keeps it nil because no retry can work.
-                let expectsRetryAction = TinyBuddyDisplayPresentation
-                    .isSharedAccessDenied(reason) == false
-                XCTAssertEqual(
-                    value.action,
-                    expectsRetryAction ? .rescan : nil,
-                    "\(outcome)/\(availability)"
-                )
+                // Every read failure, including the explicitly denied one,
+                // keeps the retry action: nothing here proves a re-read is
+                // pointless, so the recovery entry point is never removed.
+                XCTAssertEqual(value.action, .rescan, "\(outcome)/\(availability)")
                 XCTAssertEqual(
                     value.actionTitle,
-                    expectsRetryAction ? "重试读取" : nil,
+                    "重试读取",
                     "\(outcome)/\(availability)"
                 )
                 XCTAssertEqual(value.accentRole, .error)
