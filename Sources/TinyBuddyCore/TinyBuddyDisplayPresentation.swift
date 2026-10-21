@@ -371,21 +371,22 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
             return .authorizationRequired
         }
 
+        // `.readFailed` is reserved for a genuine shared-snapshot read failure:
+        // an unreadable App Group, a payload that cannot be decoded, an
+        // unsupported schema, or a payload that failed validation. A failed Git
+        // refresh is never a read failure, not even when the snapshot is stale
+        // or still loading, because the refresh status and the combined
+        // snapshot are persisted separately: the refresh can fail over a
+        // snapshot that was read successfully, and a stale or loading snapshot
+        // proves nothing about whether today's payload is readable. Those
+        // cases keep their data-quality state below (`stale`/`loading`, which
+        // never render activity metrics) and report the refresh failure through
+        // `refreshNotice`.
         switch dataAvailability {
         case .failed:
             return .readFailed
         case .stale, .loading, .available:
             break
-        }
-
-        // A failed Git refresh is a refresh problem, not a snapshot read
-        // failure. When the expected local day's snapshot is usable, keep the
-        // data-driven state (and its metrics) and report the failure through a
-        // non-blocking notice instead of masking valid data as "read failed".
-        // Snapshot read failures above keep `.readFailed`, and an unusable,
-        // stale, or still-loading snapshot with a failed refresh keeps it too.
-        if refreshStatus?.outcome == .failed, dataAvailability != .available {
-            return .readFailed
         }
 
         switch dataAvailability {
@@ -508,21 +509,37 @@ public struct TinyBuddyDisplayPresentation: Equatable, Sendable {
         }
     }
 
-    /// Returns the non-blocking refresh notice for a failed Git refresh that
-    /// left the expected local day's snapshot readable. `nil` otherwise: real
-    /// read failures keep the `.readFailed` contract, and authorization states
-    /// already carry their own actionable copy.
+    /// Returns the non-blocking refresh notice for a failed Git refresh, so the
+    /// failure is never dropped and never reintroduced as a read failure.
+    /// `nil` for a real read failure (its copy already states that the last
+    /// trusted result is retained and offers to retry the read) and for
+    /// authorization states, which carry their own actionable copy.
     private static func refreshNotice(
         for state: TinyBuddyDisplayState,
         refreshStatus: GitActivityRefreshStatus?,
         dataAvailability: TinyBuddyDisplayDataAvailability
     ) -> String? {
-        guard refreshStatus?.outcome == .failed,
-              dataAvailability == .available,
-              state.isActivityState else {
+        guard refreshStatus?.outcome == .failed else {
             return nil
         }
-        return "后台刷新未完成，当前展示的是最近一次可信数据。"
+
+        switch dataAvailability {
+        case .failed:
+            return nil
+        case .available:
+            // Usable same-day data stays authoritative; the notice only adds
+            // the refresh context.
+            guard state.isActivityState else {
+                return nil
+            }
+            return "后台刷新未完成，当前展示的是最近一次可信数据。"
+        case .stale:
+            // The retained snapshot belongs to another local day, so the
+            // notice must not imply that the visible data is today's.
+            return "后台刷新未完成，今日数据待刷新后更新。"
+        case .loading:
+            return "后台刷新未完成，稍后会自动重试。"
+        }
     }
 
     private static func content(
