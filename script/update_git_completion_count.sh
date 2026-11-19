@@ -26,8 +26,8 @@ TODAY="${TINYBUDDY_TODAY:-$(/bin/date +%F)}"
 TIME_SCOPE_IDENTIFIER="${TINYBUDDY_TIME_SCOPE_IDENTIFIER:-${TZ:-system-default}}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 # Signed-runtime dependency boundary: Bash 3.2 plus date, find, stat, mktemp,
-# awk, sed, sort, cmp, cp, mv, rm, mkdir, rmdir, test, sleep, tr, paste, basename,
-# base64, cksum, defaults, plutil, PlistBuddy, git, and optional perl. The
+# awk, sed, sort, cmp, cp, mv, rm, mkdir, rmdir, mkfifo, test, sleep, tr, paste,
+# basename, base64, cksum, defaults, plutil, PlistBuddy, git, and optional perl. The
 # script also requires its inherited temporary directory, authorized scan
 # roots, and the app-group preferences container.
 FIND_BIN="${TINYBUDDY_FIND_BIN:-find}"
@@ -134,6 +134,26 @@ rewrite_log_file="$(mktemp)"
 rewrite_candidates_file="$(mktemp)"
 find_stderr_file="$(mktemp)"
 focus_block_list_file="$(mktemp)"
+command_timeout_marker_file="$(mktemp)"
+command_timeout_dir="$(mktemp -d)"
+reflog_signature_output_file="$(mktemp)"
+reflog_stat_output_file="$(mktemp)"
+reflog_cksum_output_file="$(mktemp)"
+repository_fingerprint_output_file="$(mktemp)"
+repository_fingerprint_stat_output_file="$(mktemp)"
+scan_root_signature_output_file="$(mktemp)"
+commit_record_output_file="$(mktemp)"
+development_interruption_output_file="$(mktemp)"
+normalized_scan_root_output_file="$(mktemp)"
+command_timeout_fifo="$command_timeout_dir/timer"
+if ! mkfifo "$command_timeout_fifo"; then
+  echo "TinyBuddy refresh script: failed to create the timeout timer" >&2
+  exit 1
+fi
+# One read/write descriptor keeps the FIFO from ever reaching EOF. The
+# watchdog reads it with `read -t`, which needs no child timer process and is
+# interrupted by the TERM trap immediately.
+exec 9<>"$command_timeout_fifo"
 diagnostics_emitted=0
 shared_data_rewritten=0
 repository_count=0
@@ -155,6 +175,12 @@ trusted_snapshot_stale=0
 refresh_outcome_override=""
 future_reflog_event_detected=0
 active_command_pid=""
+active_watchdog_pid=""
+# A signal landing between forking a wrapped command and recording its pid
+# would otherwise leave that child out of terminate_active_command. Defer the
+# termination until both pids are registered.
+command_launching=0
+pending_termination_signal=""
 
 record_invalid_repository() {
   local diagnostic="$1"
@@ -179,41 +205,110 @@ run_command_with_timeout() {
   shift
   local command_pid
   local command_status=0
-  local deadline=$((SECONDS + timeout_seconds))
+  local watchdog_pid
 
+  rm -f "$command_timeout_marker_file"
+  command_launching=1
+  # Put the wrapped command in its own process group and restore job control
+  # immediately. find -exec and other tools can spawn children; signalling the
+  # direct child alone would leave those descendants running past a timeout or
+  # cancellation. With monitor mode on only for the fork, `$!` becomes the
+  # process-group leader, so the timeout and termination paths can signal the
+  # whole group with -$command_pid. Bash 3.2 prints a harmless "[n] Terminated"
+  # job-control notice for signalled groups; suppress it for this wrapper.
+  set -m
   "$@" &
   command_pid=$!
+  # Restore normal job handling as soon as the command owns its process group.
+  # Leaving monitor mode on for the rest of the script would put later
+  # unwrapped commands (for example a cached `cp` or a `git status`) in their
+  # own groups too, hiding them from the application's cancellation signal.
+  set +m
   active_command_pid="$command_pid"
 
-  while kill -0 "$command_pid" 2>/dev/null; do
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      kill -TERM "$command_pid" 2>/dev/null || true
+  # A watchdog replaces the previous poll loop, which spawned `sleep 0.01`
+  # repeatedly: on macOS each poll iteration cost several milliseconds, once
+  # per external command in every refresh. The watchdog waits on the FIFO with
+  # `read -t`, which needs no child timer process. Bash defers trapped signals
+  # until `read` returns, so the parent reaps the idle watchdog with SIGKILL
+  # (it owns no resources) instead of TERM; that keeps a fast-failing command
+  # from leaving a timer behind. The command itself still gets the same
+  # SIGTERM-then-SIGKILL escalation on timeout.
+  (
+    read -t "$timeout_seconds" -u 9 _ || true
+    if kill -0 "$command_pid" 2>/dev/null; then
+      : > "$command_timeout_marker_file"
+      kill -TERM -- "-$command_pid" 2>/dev/null || true
+      # Bash 3.2's fractional read -t is unreliable after a timed read, so the
+      # bounded grace uses a real sleep. The parent waits for this watchdog on
+      # the timeout path, so the grace sleep is reaped with it.
       sleep 0.1
-      kill -KILL "$command_pid" 2>/dev/null || true
-      wait "$command_pid" 2>/dev/null || true
-      active_command_pid=""
-      return 124
+      kill -KILL -- "-$command_pid" 2>/dev/null || true
     fi
-    sleep 0.01
-  done
+  ) </dev/null >/dev/null 2>&1 &
+  watchdog_pid=$!
+  active_watchdog_pid="$watchdog_pid"
+  command_launching=0
+  if [ -n "$pending_termination_signal" ]; then
+    # Reuse the normal termination path, and ignore further HUP/INT/TERM while
+    # it cleans up: Bash 3.2 can deliver a second signal during teardown and
+    # otherwise re-enter terminate_active_command for the same process group.
+    local deferred_signal="$pending_termination_signal"
+    pending_termination_signal=""
+    trap '' HUP INT TERM
+    handle_termination "$deferred_signal"
+  fi
 
-  wait "$command_pid" || command_status=$?
+  { wait "$command_pid"; } 2>/dev/null || command_status=$?
+  if [ -e "$command_timeout_marker_file" ]; then
+    # The watchdog is in the timeout path: it still owns the 100 ms grace
+    # period and the final SIGKILL. Wait for it instead of killing it, so a
+    # command that shuts down cleanly on SIGTERM gets its bounded grace.
+    { wait "$watchdog_pid"; } 2>/dev/null || true
+    active_watchdog_pid=""
+    rm -f "$command_timeout_marker_file"
+    active_command_pid=""
+    return 124
+  fi
+  kill -KILL "$watchdog_pid" 2>/dev/null || true
+  { wait "$watchdog_pid"; } 2>/dev/null || true
+  active_watchdog_pid=""
   active_command_pid=""
   return "$command_status"
 }
 
 terminate_active_command() {
+  if [ -n "$active_watchdog_pid" ]; then
+    if [ -e "$command_timeout_marker_file" ]; then
+      # Timeout handling is in progress: let it finish its backstop grace and
+      # SIGKILL so the grace sleep is not orphaned.
+      { wait "$active_watchdog_pid"; } 2>/dev/null || true
+    else
+      kill -KILL "$active_watchdog_pid" 2>/dev/null || true
+      { wait "$active_watchdog_pid"; } 2>/dev/null || true
+    fi
+    active_watchdog_pid=""
+  fi
+
   if [ -z "$active_command_pid" ]; then
     return
   fi
 
-  kill -TERM "$active_command_pid" 2>/dev/null || true
-  wait "$active_command_pid" 2>/dev/null || true
+  kill -TERM -- "-$active_command_pid" 2>/dev/null || true
+  # A command may ignore SIGTERM; escalation must stay bounded so termination
+  # always converges. The sleep is synchronous and reaped by this shell.
+  sleep 0.1
+  kill -KILL -- "-$active_command_pid" 2>/dev/null || true
+  { wait "$active_command_pid"; } 2>/dev/null || true
   active_command_pid=""
 }
 
 handle_termination() {
   local signal_number="$1"
+  if [ "$command_launching" -eq 1 ]; then
+    pending_termination_signal="$signal_number"
+    return
+  fi
   terminate_active_command
   exit "$((128 + signal_number))"
 }
@@ -223,7 +318,9 @@ cleanup() {
     rmdir "$SNAPSHOT_WRITE_LOCK_OWNER" 2>/dev/null || true
     rmdir "$SNAPSHOT_WRITE_LOCK" 2>/dev/null || true
   fi
-  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$repo_fingerprints_cache_file" "$new_repo_fingerprints_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$project_discovery_records_file" "$repository_fingerprint_roots_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$automated_oids_file" "$automated_identities_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file"
+  exec 9>&- 2>/dev/null || true
+  rm -f "$scan_roots_file" "$excluded_paths_file" "$raw_excluded_paths_file" "$invalidated_roots_file" "$raw_invalidated_roots_file" "$valid_scan_roots_file" "$repo_list_file" "$repo_scan_file" "$repo_reflog_file" "$repo_git_paths_file" "$repo_stats_cache_file" "$new_repo_stats_file" "$repo_fingerprints_cache_file" "$new_repo_fingerprints_file" "$validated_repo_list_file" "$repository_identity_file" "$repository_records_file" "$unique_repository_records_file" "$project_discovery_records_file" "$repository_fingerprint_roots_file" "$raw_activity_events_file" "$normalized_activity_events_file" "$repo_activity_events_file" "$automated_oids_file" "$automated_identities_file" "$rewrite_log_file" "$rewrite_candidates_file" "$find_stderr_file" "$focus_block_list_file" "$command_timeout_marker_file" "$command_timeout_fifo" "$reflog_signature_output_file" "$reflog_stat_output_file" "$reflog_cksum_output_file" "$repository_fingerprint_output_file" "$repository_fingerprint_stat_output_file" "$scan_root_signature_output_file" "$commit_record_output_file" "$development_interruption_output_file" "$normalized_scan_root_output_file"
+  rmdir "$command_timeout_dir" 2>/dev/null || true
 }
 
 emit_runtime_diagnostics_once() {
@@ -252,6 +349,10 @@ emit_find_stderr_sample() {
   log_error "find stderr present: line_count=$line_count contents=redacted"
 }
 
+# Writes the normalized path to $normalized_scan_root_output_file instead of
+# stdout: callers invoke this in the foreground so the wrapped `test -d` stays
+# owned by the main shell and a cancellation signal runs its trap promptly.
+# A command substitution here would defer the trap until the check returned.
 normalized_scan_root_path() {
   local path="$1"
   local resolved_path="$path"
@@ -264,12 +365,13 @@ normalized_scan_root_path() {
     resolved_path="${resolved_path%/}"
   done
 
-  printf '%s\n' "$resolved_path"
+  printf '%s\n' "$resolved_path" > "$normalized_scan_root_output_file"
 }
 
 path_contains_noise_component() {
   local candidate_path
-  candidate_path="$(normalized_scan_root_path "$1" | tr '[:upper:]' '[:lower:]')"
+  normalized_scan_root_path "$1"
+  candidate_path="$(tr '[:upper:]' '[:lower:]' < "$normalized_scan_root_output_file")"
 
   case "$candidate_path" in
     */.build|*/.build/*|\
@@ -310,8 +412,10 @@ path_contains_noise_component() {
 path_is_within_root() {
   local candidate_path
   local root_path
-  candidate_path="$(normalized_scan_root_path "$1")"
-  root_path="$(normalized_scan_root_path "$2")"
+  normalized_scan_root_path "$1"
+  candidate_path="$(<"$normalized_scan_root_output_file")"
+  normalized_scan_root_path "$2"
+  root_path="$(<"$normalized_scan_root_output_file")"
 
   [ "$candidate_path" = "$root_path" ] || [[ "$candidate_path" == "$root_path/"* ]]
 }
@@ -341,7 +445,8 @@ resolve_discovery_scan_scope() {
   local remainder
   local scan_path
 
-  scan_path="$(normalized_scan_root_path "$1")"
+  normalized_scan_root_path "$1"
+  scan_path="$(<"$normalized_scan_root_output_file")"
   discovery_scan_exclusion_base="$scan_path"
   discovery_scan_max_depth=$((REPOSITORY_SCAN_MAX_DEPTH + 1))
 
@@ -380,7 +485,8 @@ path_is_explicitly_excluded() {
   local authorized_root
   local exclusion
   local relative_path
-  candidate_path="$(normalized_scan_root_path "$1")"
+  normalized_scan_root_path "$1"
+  candidate_path="$(<"$normalized_scan_root_output_file")"
 
   while IFS= read -r authorized_root; do
     if ! path_is_within_root "$candidate_path" "$authorized_root"; then
@@ -405,7 +511,8 @@ path_is_explicitly_excluded() {
 
 is_broad_scan_root() {
   local path
-  path="$(normalized_scan_root_path "$1")"
+  normalized_scan_root_path "$1"
+  path="$(<"$normalized_scan_root_output_file")"
 
   [ "$path" = "/" ] || [ "$path" = "/Users" ] || [ "$path" = "$USER_HOME" ]
 }
@@ -731,9 +838,6 @@ append_reflog_events_for_today() {
   local actor_is_automated
   local message
   local day_identifier
-  local local_hour
-  local local_minute
-  local block_minute
   local focus_block
   local message_fingerprint
   local activity_subject
@@ -754,10 +858,6 @@ append_reflog_events_for_today() {
     fi
     day_identifier="$(/bin/date -r "$epoch" +%Y-%m-%d 2>/dev/null)" || continue
     [ "$day_identifier" = "$TODAY" ] || continue
-    local_hour="$(/bin/date -r "$epoch" +%H 2>/dev/null)" || continue
-    local_minute="$(/bin/date -r "$epoch" +%M 2>/dev/null)" || continue
-    block_minute=0
-    [ "$local_minute" -ge 30 ] && block_minute=30
     focus_block=$((epoch / 1800))
     activity_subject="${message#*: }"
     message_fingerprint="$(printf '%s' "$activity_subject" | /usr/bin/cksum)"
@@ -1134,8 +1234,13 @@ build_scan_root_signature() {
       continue
     fi
 
-    if ! root_signature="$(run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" \
-      "$STAT_BIN" -f 'ROOT\t%N\t%z\t%m\t%i' "$scan_root")"; then
+    # Keep the wrapped stat in the foreground so a cancellation signal can run
+    # the main shell's trap instead of waiting on a command-substitution subshell.
+    if run_command_with_timeout "$SCAN_ROOT_TIMEOUT_SECONDS" \
+      "$STAT_BIN" -f 'ROOT\t%N\t%z\t%m\t%i' "$scan_root" \
+      > "$scan_root_signature_output_file"; then
+      IFS= read -r root_signature < "$scan_root_signature_output_file" || root_signature=""
+    else
       printf 'ROOT\t%s\ttimeout-or-error\n' "$scan_root" >> "$signature_file"
       continue
     fi
@@ -1479,15 +1584,18 @@ read_reflog_signature() {
   local reflog_path="$1"
   local stat_signature
   local content_checksum
-  (
-    trap - ERR
-    stat_signature="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
-      "$STAT_BIN" -f '%m:%z:%i' "$reflog_path")" || exit $?
-    content_checksum="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
-      /usr/bin/cksum "$reflog_path")" || exit $?
-    content_checksum="${content_checksum%% *}"
-    printf '%s:%s\n' "$stat_signature" "$content_checksum"
-  )
+  # Write each command's output to a file instead of a command substitution:
+  # the main shell then stays inside the wrapped foreground command, so a
+  # SIGTERM can run the termination trap instead of waiting for a slow stat or
+  # cksum to hit its timeout.
+  run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+    "$STAT_BIN" -f '%m:%z:%i' "$reflog_path" > "$reflog_stat_output_file" || return $?
+  run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+    /usr/bin/cksum "$reflog_path" > "$reflog_cksum_output_file" || return $?
+  IFS= read -r stat_signature < "$reflog_stat_output_file" || return 1
+  IFS= read -r content_checksum < "$reflog_cksum_output_file" || return 1
+  content_checksum="${content_checksum%% *}"
+  printf '%s:%s\n' "$stat_signature" "$content_checksum" > "$reflog_signature_output_file"
 }
 
 cached_reflog_events_match() {
@@ -1725,14 +1833,19 @@ repository_stable_fingerprint() {
     roots="$(LC_ALL=C sort -u "$repository_fingerprint_roots_file" | paste -sd, -)"
   fi
   if [ -n "$roots" ]; then
-    printf 'git-roots:%s\n' "$roots"
+    printf 'git-roots:%s\n' "$roots" > "$repository_fingerprint_output_file"
     return 0
   fi
 
-  filesystem_identity="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
-    "$STAT_BIN" -f '%d:%i' "$common_dir")" || return $?
+  # Keep the stat in the foreground too: a command substitution here would
+  # defer a cancellation signal until the wrapped stat finishes, the same
+  # problem the reflog signature path fixed above.
+  : > "$repository_fingerprint_stat_output_file"
+  run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+    "$STAT_BIN" -f '%d:%i' "$common_dir" > "$repository_fingerprint_stat_output_file" || return $?
+  IFS= read -r filesystem_identity < "$repository_fingerprint_stat_output_file" || return 1
   [ -n "$filesystem_identity" ] || return 1
-  printf 'filesystem:%s\n' "$filesystem_identity"
+  printf 'filesystem:%s\n' "$filesystem_identity" > "$repository_fingerprint_output_file"
 }
 
 process_repository_list() {
@@ -1897,8 +2010,10 @@ process_repository_list() {
     readable_reflog_repo_count=$((readable_reflog_repo_count + 1))
 
     trap - ERR
-    if reflog_mtime="$(read_reflog_signature "$reflog_path")"; then
+    if read_reflog_signature "$reflog_path"; then
       read_reflog_signature_exit_code=0
+      reflog_mtime=""
+      IFS= read -r reflog_mtime < "$reflog_signature_output_file" || true
     else
       read_reflog_signature_exit_code="$?"
     fi
@@ -1928,10 +2043,16 @@ process_repository_list() {
     fi
     if [ -z "$repository_fingerprint" ]; then
       trap - ERR
-      if repository_fingerprint="$(repository_stable_fingerprint "$repo_root" "$common_dir")"; then
+      # Foreground call (no command substitution) so a cancellation signal can
+      # run the termination trap while a slow rev-list/stat is still active.
+      if repository_stable_fingerprint "$repo_root" "$common_dir"; then
         resolve_fingerprint_exit_code=0
       else
         resolve_fingerprint_exit_code="$?"
+      fi
+      if [ "$resolve_fingerprint_exit_code" -eq 0 ]; then
+        repository_fingerprint=""
+        IFS= read -r repository_fingerprint < "$repository_fingerprint_output_file" || true
       fi
       enable_error_trap
       if [ "$resolve_fingerprint_exit_code" -ne 0 ]; then
@@ -1974,8 +2095,10 @@ process_repository_list() {
     if cached_reflog_events_match "$repository_identity" "$git_dir" "$reflog_path" "$reflog_mtime"; then
       append_cached_reflog_events "$repository_identity" "$display_name" "$git_dir" "$reflog_path" "$reflog_mtime"
       trap - ERR
-      if verified_reflog_signature="$(read_reflog_signature "$reflog_path")"; then
+      if read_reflog_signature "$reflog_path"; then
         read_verified_signature_exit_code=0
+        verified_reflog_signature=""
+        IFS= read -r verified_reflog_signature < "$reflog_signature_output_file" || true
       else
         read_verified_signature_exit_code="$?"
       fi
@@ -2003,8 +2126,10 @@ process_repository_list() {
       fi
 
       trap - ERR
-      if verified_reflog_signature="$(read_reflog_signature "$reflog_path")"; then
+      if read_reflog_signature "$reflog_path"; then
         read_verified_signature_exit_code=0
+        verified_reflog_signature=""
+        IFS= read -r verified_reflog_signature < "$reflog_signature_output_file" || true
       else
         read_verified_signature_exit_code="$?"
       fi
@@ -2048,9 +2173,16 @@ process_repository_list() {
       recent_repository_identity="$repository_identity"
       recent_reflog_path="$event_reflog_path"
       recent_project_name="$display_name"
-      recent_project_fingerprint="$(awk -F '\t' -v identity="$repository_identity" '$2 == identity { print $1; exit }' "$project_discovery_records_file")"
     fi
   done < "$normalized_activity_events_file"
+
+  # The fingerprint is only read after the loop, so resolve the surviving
+  # winner once instead of spawning one awk per candidate event. The previous
+  # per-event lookup was the dominant warm-refresh cost for repositories with
+  # many same-day reflog events.
+  if [ -n "$recent_repository_identity" ]; then
+    recent_project_fingerprint="$(awk -F '\t' -v identity="$recent_repository_identity" '$2 == identity { print $1; exit }' "$project_discovery_records_file")"
+  fi
 }
 
 write_plist_string() {
@@ -2272,11 +2404,14 @@ development_interruption_payload() {
   )
   rm -f "$status_file"
 
-  if commit_record="$(run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
-      "$GIT_BIN" -C "$selected_repository_root" log -1 --format='%h%n%s%n%ct')"; then
-    commit_hash="$(printf '%s\n' "$commit_record" | sed -n '1p')"
-    commit_subject="$(printf '%s\n' "$commit_record" | sed -n '2p')"
-    commit_epoch="$(printf '%s\n' "$commit_record" | sed -n '3p')"
+  # As with the status read above, keep the wrapped log in the foreground so
+  # the main shell (not a command-substitution subshell) owns the active process.
+  if run_command_with_timeout "$REPOSITORY_READ_TIMEOUT_SECONDS" \
+      "$GIT_BIN" -C "$selected_repository_root" log -1 --format='%h%n%s%n%ct' \
+      > "$commit_record_output_file"; then
+    commit_hash="$(sed -n '1p' "$commit_record_output_file")"
+    commit_subject="$(sed -n '2p' "$commit_record_output_file")"
+    commit_epoch="$(sed -n '3p' "$commit_record_output_file")"
     case "$commit_epoch" in
       ""|*[!0-9]*) return 1 ;;
     esac
@@ -2632,7 +2767,8 @@ LC_ALL=C sort -u "$excluded_paths_file" -o "$excluded_paths_file"
 
 valid_scan_roots_file="$(mktemp)"
 while IFS= read -r scan_root; do
-  normalized_scan_root="$(normalized_scan_root_path "$scan_root")"
+  normalized_scan_root_path "$scan_root"
+  normalized_scan_root="$(<"$normalized_scan_root_output_file")"
 
   if is_broad_scan_root "$scan_root"; then
     log_error "authorized git scan root is too broad; skipping one root"
@@ -2661,7 +2797,8 @@ printf '%s' "$INVALIDATED_ROOTS" | while IFS= read -r invalidated_root || [ -n "
   fi
 done
 while IFS= read -r invalidated_root; do
-  normalized_invalidated_root="$(normalized_scan_root_path "$invalidated_root")"
+  normalized_scan_root_path "$invalidated_root"
+  normalized_invalidated_root="$(<"$normalized_scan_root_output_file")"
   if ! path_is_within_authorized_roots "$normalized_invalidated_root"; then
     log_error "repository discovery invalidation escaped authorized roots; preserving previous shared data"
     refresh_outcome_override="failed"
@@ -2765,7 +2902,12 @@ fi
 
 focus_block_count="$(sort -u "$focus_block_list_file" | awk 'END { print NR + 0 }')"
 development_interruption_snapshot=""
-if ! development_interruption_snapshot="$(development_interruption_payload)"; then
+# Call the payload builder in the foreground, not via command substitution:
+# it runs wrapped git status/log commands, and a subshell would defer the main
+# shell's cancellation trap until those commands finish.
+if development_interruption_payload > "$development_interruption_output_file"; then
+  IFS= read -r development_interruption_snapshot < "$development_interruption_output_file" || development_interruption_snapshot=""
+else
   development_interruption_snapshot=""
 fi
 

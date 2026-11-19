@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 @testable import TinyBuddyCore
 import XCTest
@@ -18,6 +19,43 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
 
         XCTAssertFalse(source.contains("<<<"))
+    }
+
+    func testWrappedCommandsStayInTheForegroundForCancellation() throws {
+        let harness = try ScriptHarness()
+        let source = try String(contentsOf: harness.scriptURL, encoding: .utf8)
+
+        // A wrapped command inside a command substitution runs in a subshell:
+        // the main shell defers its termination trap until that subshell
+        // returns, and with job control the wrapped process sits in a separate
+        // process group the application's signal cannot reach.
+        for wrapped in [
+            "run_command_with_timeout",
+            "normalized_scan_root_path",
+            "development_interruption_payload",
+            "repository_stable_fingerprint",
+            "read_reflog_signature"
+        ] {
+            let pattern = NSRegularExpression.escapedPattern(for: "$(" + wrapped)
+                + #"\s*"#
+            XCTAssertNil(
+                try? NSRegularExpression(pattern: pattern).firstMatch(
+                    in: source,
+                    range: NSRange(source.startIndex..., in: source)
+                ),
+                "wrapped command \(wrapped) must not run inside a command substitution"
+            )
+        }
+        // Monitor mode must end right after the fork and pid capture so later
+        // unwrapped foreground commands stay in the script's process group.
+        let launchSequence = #"set -m\s+"\$@" &\s*command_pid=\$!\s*(?:#[^\n]*\n\s*)*set \+m"#
+        XCTAssertNotNil(
+            try? NSRegularExpression(pattern: launchSequence).firstMatch(
+                in: source,
+                range: NSRange(source.startIndex..., in: source)
+            ),
+            "the fork, pid capture, and set +m must stay adjacent"
+        )
     }
 
     func testScriptUsesSandboxCompatibleRevisionSource() throws {
@@ -896,6 +934,327 @@ final class GitActivityRefreshScriptTests: XCTestCase {
         XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayCommitCount.count"] as? Int, 1)
         XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayFocusBlockCount.count"] as? Int, 1)
         XCTAssertEqual(recoveredPlist["tinybuddy.gitTodayRecentProject.projectName"] as? String, "ProjectAlpha")
+    }
+
+    func testScriptDoesNotWaitForScanTimeoutWhenAnExternalCommandFailsFast() throws {
+        let harness = try ScriptHarness()
+        _ = try harness.makeRepository(named: "ProjectAlpha")
+
+        // A fast-failing command inside a command substitution must not keep
+        // the wrapper's timer child alive holding the captured pipe. With the
+        // previous polling wrapper this took the full scan-root timeout.
+        let startedAt = Date()
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_STAT_BIN": "/nonexistent/tinybuddy-stat",
+            "TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS": "10"
+        ])
+        XCTAssertLessThan(
+            Date().timeIntervalSince(startedAt),
+            5,
+            "a fast failing external command must not wait for the scan-root timeout"
+        )
+    }
+
+    func testScriptRecoversFromACommandThatOnlyEndsOnTimeout() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        // The probe sleeps instead of responding to the scan; the wrapper must
+        // time it out (1 s) instead of waiting the full 30 s, and the command
+        // exits immediately when SIGTERM arrives.
+        let slowStatURL = try harness.makeStatProbeFailingHeadReflog(for: repoURL, delaySeconds: 30)
+        let startedAt = Date()
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_STAT_BIN": slowStatURL.path,
+            "TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS": "1",
+            "TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS": "1"
+        ])
+        XCTAssertLessThan(
+            Date().timeIntervalSince(startedAt),
+            10,
+            "the timeout path must converge without waiting for the 30 s probe"
+        )
+    }
+
+    func testScriptPreservesTimeoutGraceForCommandCleanup() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        let cleanupURL = harness.rootURL.appendingPathComponent("timeout-cleanup.txt")
+        let probeURL = harness.rootURL.appendingPathComponent("cleanup-stat-probe.sh")
+        let repositoryName = repoURL.lastPathComponent
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          case "$argument" in
+            */\(repositoryName)/.git/logs/HEAD)
+              trap 'sleep 0.05; printf cleaned >> "\(cleanupURL.path)"; exit 0' TERM
+              while :; do :; done
+              ;;
+          esac
+        done
+        exec /usr/bin/stat "$@"
+        """
+        try script.write(to: probeURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: probeURL.path
+        )
+
+        _ = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_STAT_BIN": probeURL.path,
+            "TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS": "1"
+        ])
+        // The command handles SIGTERM and needs a few milliseconds to clean up;
+        // the bounded grace must let it finish instead of killing it first.
+        XCTAssertEqual(
+            try String(contentsOf: cleanupURL, encoding: .utf8),
+            "cleaned",
+            "the timeout path must preserve the SIGTERM grace period"
+        )
+    }
+
+    func testCancellationEscalatesWhenACommandIgnoresSIGTERM() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        let markerURL = harness.rootURL.appendingPathComponent("cancel-probe-started")
+        let pidURL = harness.rootURL.appendingPathComponent("cancel-probe.pid")
+        let probeURL = harness.rootURL.appendingPathComponent("ignore-term-stat-probe.sh")
+        let repositoryName = repoURL.lastPathComponent
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          case "$argument" in
+            */\(repositoryName)/.git/logs/HEAD)
+              printf '%s' "$$" > "\(pidURL.path)"
+              : > "\(markerURL.path)"
+              trap '' TERM
+              while :; do :; done
+              ;;
+          esac
+        done
+        exec /usr/bin/stat "$@"
+        """
+        try script.write(to: probeURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: probeURL.path
+        )
+
+        let running = try harness.start(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_STAT_BIN": probeURL.path,
+            "TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS": "30"
+        ])
+        defer {
+            if running.isRunning { running.forceKill() }
+            if let probePID = Self.probeProcessIdentifier(from: pidURL) {
+                kill(probePID, SIGKILL)
+            }
+        }
+
+        // Wait until the probe is genuinely inside the reflog read before
+        // cancelling, so the test covers the reflog phase rather than startup.
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: markerURL.path), Date() < deadline {
+            usleep(20_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL.path))
+
+        running.sendTerminationSignal()
+        let exited = running.waitForExit(within: 5)
+        let survivingProbePID = Self.probeProcessIdentifier(from: pidURL)
+        if !exited {
+            running.forceKill()
+            if let survivingProbePID {
+                kill(survivingProbePID, SIGKILL)
+            }
+        }
+        _ = running.wait()
+        XCTAssertTrue(
+            exited,
+            "cancellation must escalate past a command that ignores SIGTERM"
+        )
+
+        if let probePID = survivingProbePID {
+            XCTAssertEqual(kill(probePID, 0), -1, "the ignoring probe must not survive cancellation")
+        }
+    }
+
+    private static func probeProcessIdentifier(from url: URL) -> Int32? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    func testCancellationConvergesWhileResolvingRepositoryFingerprint() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        let startedURL = harness.rootURL.appendingPathComponent("fingerprint-probe-started")
+        let pidURL = harness.rootURL.appendingPathComponent("fingerprint-probe.pid")
+        let gitProbeURL = try harness.makeBlockingFingerprintGitProbe(
+            startedURL: startedURL,
+            pidURL: pidURL
+        )
+
+        let running = try harness.start(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_GIT_BIN": gitProbeURL.path,
+            // Keep the wrapped rev-list alive long enough to cancel mid-flight.
+            "TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS": "30"
+        ])
+        defer {
+            if running.isRunning { running.forceKill() }
+            if let probePID = Self.probeProcessIdentifier(from: pidURL) {
+                kill(probePID, SIGKILL)
+            }
+        }
+
+        let readyDeadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: startedURL.path), Date() < readyDeadline {
+            usleep(20_000)
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: startedURL.path),
+            "the fingerprint probe must be running before cancellation is sent"
+        )
+
+        let cancelAt = Date()
+        running.sendTerminationSignal()
+        let exited = running.waitForExit(within: 5)
+        let elapsed = Date().timeIntervalSince(cancelAt)
+        let survivingProbePID = Self.probeProcessIdentifier(from: pidURL)
+        if !exited {
+            running.forceKill()
+            if let survivingProbePID { kill(survivingProbePID, SIGKILL) }
+        }
+        _ = running.wait()
+
+        XCTAssertTrue(
+            exited,
+            "cancellation must converge while the fingerprint rev-list is blocked"
+        )
+        XCTAssertLessThan(
+            elapsed,
+            2,
+            "cancellation must not wait for the fingerprint revision timeout: \(elapsed)s"
+        )
+        if let probePID = survivingProbePID {
+            XCTAssertEqual(kill(probePID, 0), -1, "the blocked fingerprint probe must be reaped")
+        }
+    }
+
+    func testProcessGroupCancellationConvergesDuringInterruptionSnapshot() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        let startedURL = harness.rootURL.appendingPathComponent("interruption-probe-started")
+        let pidURL = harness.rootURL.appendingPathComponent("interruption-probe.pid")
+        let gitProbeURL = try harness.makeBlockingInterruptionGitProbe(
+            startedURL: startedURL,
+            pidURL: pidURL
+        )
+
+        let running = try harness.start(
+            scanRoots: [harness.scanRootURL],
+            extraEnvironment: [
+                "TINYBUDDY_GIT_BIN": gitProbeURL.path,
+                "TINYBUDDY_GIT_REPOSITORY_READ_TIMEOUT_SECONDS": "30"
+            ],
+            launchInOwnProcessGroup: true
+        )
+        defer {
+            if running.isRunning { running.forceKill() }
+            if let probePID = Self.probeProcessIdentifier(from: pidURL) {
+                kill(probePID, SIGKILL)
+            }
+        }
+
+        let readyDeadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: startedURL.path), Date() < readyDeadline {
+            usleep(20_000)
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: startedURL.path),
+            "the interruption git probe must be running before cancellation is sent"
+        )
+
+        let cancelAt = Date()
+        running.sendProcessGroupTerminationSignal()
+        let exited = running.waitForExit(within: 5)
+        let elapsed = Date().timeIntervalSince(cancelAt)
+        let survivingProbePID = Self.probeProcessIdentifier(from: pidURL)
+        if !exited {
+            running.forceKill()
+            if let survivingProbePID { kill(survivingProbePID, SIGKILL) }
+        }
+        _ = running.wait()
+
+        XCTAssertTrue(
+            exited,
+            "a process-group cancellation must converge during the interruption snapshot"
+        )
+        XCTAssertLessThan(
+            elapsed,
+            2,
+            "process-group cancellation must not wait for the wrapped git timeout: \(elapsed)s"
+        )
+        if let probePID = survivingProbePID {
+            XCTAssertEqual(kill(probePID, 0), -1, "the blocked interruption git probe must be reaped")
+        }
+    }
+
+    func testTimeoutReapsFindExecChildren() throws {
+        let harness = try ScriptHarness()
+        let repoURL = try harness.makeRepository(named: "ProjectAlpha")
+        try harness.writeHeadReflog(
+            for: repoURL,
+            lines: [harness.reflogLine(daysOffset: 0, hour: 10, minute: 15, message: "commit: current")]
+        )
+        let startedURL = harness.rootURL.appendingPathComponent("find-child-stat-started")
+        let pidURL = harness.rootURL.appendingPathComponent("find-child-stat.pid")
+        let statProbeURL = try harness.makeBlockingFindChildStatProbe(
+            startedURL: startedURL,
+            pidURL: pidURL
+        )
+        defer {
+            if let probePID = Self.probeProcessIdentifier(from: pidURL) {
+                kill(probePID, SIGKILL)
+            }
+        }
+
+        let startedAt = Date()
+        let result = try harness.run(scanRoots: [harness.scanRootURL], extraEnvironment: [
+            "TINYBUDDY_STAT_BIN": statProbeURL.path,
+            "TINYBUDDY_GIT_SCAN_ROOT_TIMEOUT_SECONDS": "1"
+        ])
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertEqual(result.exitCode, 0, result.standardError)
+        XCTAssertLessThan(elapsed, 10, "the find timeout must converge: \(elapsed)s")
+        let probePID = Self.probeProcessIdentifier(from: pidURL)
+        XCTAssertNotNil(probePID, "the find -exec stat child must have been observed")
+        if let probePID {
+            XCTAssertEqual(
+                kill(probePID, 0),
+                -1,
+                "a find -exec child must not survive the scan-root timeout"
+            )
+        }
     }
 
     func testScriptSkipsSharedDataRewriteWhenSnapshotDidNotChange() throws {
@@ -2768,6 +3127,83 @@ private final class ScriptHarness {
         return GitProbe(scriptURL: scriptURL, logURL: logURL)
     }
 
+    /// A git wrapper that blocks on the fingerprint `rev-list` phase (writing
+    /// its own pid so the test can inspect/reap it) and delegates everything
+    /// else to the real git. Used to prove cancellation converges while the
+    /// fingerprint is resolving in the foreground.
+    /// A git wrapper that blocks on interruption-snapshot `git status` while
+    /// delegating other subcommands to the real git, so a cancellation can be
+    /// exercised inside the foreground interruption payload.
+    func makeBlockingInterruptionGitProbe(
+        startedURL: URL,
+        pidURL: URL
+    ) throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("blocking-interruption-git-probe.sh")
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          if [ "$argument" = "status" ]; then
+            printf '%s' "$$" > "\(pidURL.path)"
+            : > "\(startedURL.path)"
+            /bin/sleep 30
+            exit 0
+          fi
+        done
+        exec /usr/bin/git "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    func makeBlockingFingerprintGitProbe(
+        startedURL: URL,
+        pidURL: URL
+    ) throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("blocking-fingerprint-git-probe.sh")
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          if [ "$argument" = "rev-list" ]; then
+            printf '%s' "$$" > "\(pidURL.path)"
+            : > "\(startedURL.path)"
+            /bin/sleep 30
+            exit 0
+          fi
+        done
+        exec /usr/bin/git "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// A stat wrapper that blocks when `find -exec` calls it on a scan-root
+    /// entry, recording the child pid. find spawns this as a separate process,
+    /// so only process-group signalling reaps it after a timeout.
+    func makeBlockingFindChildStatProbe(
+        startedURL: URL,
+        pidURL: URL
+    ) throws -> URL {
+        let scriptURL = rootURL.appendingPathComponent("blocking-find-child-stat-probe.sh")
+        let script = """
+        #!/bin/bash
+        for argument in "$@"; do
+          case "$argument" in
+            ENTRY*)
+              printf '%s' "$$" > "\(pidURL.path)"
+              : > "\(startedURL.path)"
+              /bin/sleep 30
+              ;;
+          esac
+        done
+        exec /usr/bin/stat "$@"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
     func makeFailingIdentityGitProbe() throws -> URL {
         let scriptURL = rootURL.appendingPathComponent("failing-identity-git-probe.sh")
         let script = """
@@ -2939,10 +3375,26 @@ private final class ScriptHarness {
         try start(scanRoots: scanRoots, extraEnvironment: extraEnvironment).wait()
     }
 
-    func start(scanRoots: [URL], extraEnvironment: [String: String] = [:]) throws -> RunningScriptRun {
+    func start(
+        scanRoots: [URL],
+        extraEnvironment: [String: String] = [:],
+        launchInOwnProcessGroup: Bool = false
+    ) throws -> RunningScriptRun {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [scriptURL.path]
+        if launchInOwnProcessGroup {
+            // Mirror a process-group cancellation: perl moves the launched
+            // shell into its own process group before exec so a group TERM
+            // reaches the refresh script but not the test runner.
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+            process.arguments = [
+                "-e",
+                "setpgrp(0, 0); exec '/bin/bash', $ARGV[0];",
+                scriptURL.path
+            ]
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [scriptURL.path]
+        }
 
         var environment = ProcessInfo.processInfo.environment
         environment["HOME"] = homeURL.path
@@ -3031,6 +3483,30 @@ private final class RunningScriptRun {
         self.process = process
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
+    }
+
+    var isRunning: Bool {
+        process.isRunning
+    }
+
+    func sendTerminationSignal() {
+        kill(process.processIdentifier, SIGTERM)
+    }
+
+    func sendProcessGroupTerminationSignal() {
+        kill(-process.processIdentifier, SIGTERM)
+    }
+
+    func forceKill() {
+        kill(process.processIdentifier, SIGKILL)
+    }
+
+    func waitForExit(within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while process.isRunning && Date() < deadline {
+            usleep(20_000)
+        }
+        return !process.isRunning
     }
 
     func wait() -> ScriptRunResult {

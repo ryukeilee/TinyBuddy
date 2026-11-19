@@ -135,6 +135,58 @@ public struct TinyBuddyTimeContext: Sendable {
     }
 
     public static func isValidDayIdentifier(_ value: String) -> Bool {
+        let bytes = value.utf8
+        guard bytes.count == 10 else { return false }
+
+        // Validate the fixed-width shape and parse the components without
+        // allocating a byte array or constructing a Calendar per call. Archive
+        // validation calls this for every session on every save, where the
+        // formatter round-trip was the dominant per-row cost.
+        var year = 0
+        var month = 0
+        var day = 0
+        var position = 0
+        for byte in bytes {
+            if position == 4 || position == 7 {
+                guard byte == 45 else { return false }
+            } else {
+                guard byte >= 48, byte <= 57 else { return false }
+                let digit = Int(byte - 48)
+                switch position {
+                case 0...3: year = year * 10 + digit
+                case 5...6: month = month * 10 + digit
+                default: day = day * 10 + digit
+                }
+            }
+            position += 1
+        }
+
+        guard (1 ... 9_999).contains(year) else { return false }
+        // Calendar(identifier: .gregorian) still applies the historical
+        // 1582-10-05...14 cutover, so those years keep the original path.
+        guard year >= 1583 else { return Self.isValidHistoricalDayIdentifier(value) }
+        guard (1 ... 12).contains(month) else { return false }
+        guard day >= 1, day <= Self.daysInMonth(year: year, month: month) else {
+            return false
+        }
+        return true
+    }
+
+    private static func daysInMonth(year: Int, month: Int) -> Int {
+        switch month {
+        case 2:
+            let isLeapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+            return isLeapYear ? 29 : 28
+        case 4, 6, 9, 11:
+            return 30
+        default:
+            return 31
+        }
+    }
+
+    /// Original calendar round-trip used for years before the Gregorian
+    /// cutover, preserving the exact previous semantics for those dates.
+    private static func isValidHistoricalDayIdentifier(_ value: String) -> Bool {
         let bytes = Array(value.utf8)
         guard bytes.count == 10,
               bytes[4] == 45,

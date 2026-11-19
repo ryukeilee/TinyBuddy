@@ -71,6 +71,21 @@ public final class FocusSessionEngine: @unchecked Sendable {
     private var evidenceBySessionID: [UUID: FocusSessionEvidence] = [:]
     /// Monotonic revision of the evidence archive.
     private var evidenceArchiveRevision: Int64 = 0
+    /// Wall-clock instant at which the committed session list last passed
+    /// `validate`. A no-op apply is the most frequent caller (foreground
+    /// changes, repeated activity reports, token replays); once the committed
+    /// state is known valid at `t`, re-validating at `now >= t` would only
+    /// repeat O(history) work because the time checks only relax as time moves
+    /// forward. A loaded archive starts unvalidated, and a backward clock jump
+    /// forces the full gate again, preserving the previous behavior.
+    private var committedStateValidationTime: Date?
+    /// The loaded evidence envelope is trusted only as a starting point: an
+    /// archive may have been written by an older generator whose explanation
+    /// text or attribution no longer matches the current engine. The first
+    /// successful commit therefore regenerates every record once, exactly like
+    /// the previous implementation did on every commit; later commits only
+    /// refresh changed sessions.
+    private var evidenceNeedsReconciliation = false
     /// The only in-process history cache. Ended-session aggregates are updated
     /// by durable deltas; open sessions are calculated in memory at publication
     /// time so elapsed duration never requires repeated archive writes.
@@ -157,19 +172,18 @@ public final class FocusSessionEngine: @unchecked Sendable {
         // with v1 archives or stores like MemoryStore that don't archive evidence).
         var evidence = loaded.evidence
         if evidence.isEmpty {
-            for session in loaded.sessions where session.decisionEvents?.isEmpty == false {
-                let sessionEvents = session.decisionEvents ?? []
-                let attributedViaGit = deriveAttributedViaGitActivity(from: session, events: sessionEvents)
-                let redactedID = stableIdentifier(from: session.project.key)
-                let input = FocusSessionEvidenceInput(
-                    session: session,
-                    attributedViaForegroundApp: !attributedViaGit,
-                    attributedViaGitActivity: attributedViaGit,
-                    redactedForegroundAppID: attributedViaGit ? nil : redactedID,
-                    redactedRepoIdentifier: attributedViaGit ? redactedID : nil
-                )
-                if let ev = FocusSessionEvidenceEngine.generateEvidence(for: input) {
-                    evidence[ev.sessionID] = ev
+            evidence = generateEvidenceForSessions(loaded.sessions)
+        } else {
+            evidenceNeedsReconciliation = true
+            // Repair an archive whose evidence envelope is present but
+            // incomplete once at load. Incremental commits only refresh
+            // changed sessions, so a missing unchanged entry would otherwise
+            // never appear (the previous implementation regenerated the whole
+            // archive on every successful commit).
+            for session in loaded.sessions
+            where session.decisionEvents?.isEmpty == false && evidence[session.id] == nil {
+                if let generated = generateEvidence(for: session) {
+                    evidence[session.id] = generated
                 }
             }
         }
@@ -187,11 +201,21 @@ public final class FocusSessionEngine: @unchecked Sendable {
             // offline interval and incorrectly count that gap. The unchanged
             // on-disk archive remains the recovery source; a later successful
             // mutation atomically persists this already-closed authority row.
-            _ = persistAfterReconcile()
+            let didPersistReconcile = persistAfterReconcile()
             historyCache = FocusHistoryAggregationCache(
                 sessions: sessions,
                 projectResolver: projectContextResolver
             )
+            if !didPersistReconcile {
+                // The recovered rows gained crash-recovery decisions but the
+                // repair write failed. Reloaded evidence is stale; regenerate
+                // it in memory so the next successful commit persists exactly
+                // what a full regeneration would have produced.
+                evidenceBySessionID = generateEvidenceForSessions(sessions)
+                evidenceNeedsReconciliation = false
+            } else {
+                evidenceNeedsReconciliation = false
+            }
         }
         rebuildReminderCache()
     }
@@ -1156,7 +1180,8 @@ public final class FocusSessionEngine: @unchecked Sendable {
         } else {
             restored = previous
         }
-        guard validate(restored) else {
+        let validationTime = clock.now
+        guard validate(restored, now: validationTime) else {
             lock.unlock()
             return .rejected(.overlappingSession)
         }
@@ -1171,15 +1196,20 @@ public final class FocusSessionEngine: @unchecked Sendable {
             )
         }
         markConfirmedSessions(in: &restored, revision: nextRevision)
-        let evidence = generateEvidenceForSessions(restored)
+        let changes = historyChanges(from: sessions, to: restored)
+        let evidence = evidenceNeedsReconciliation
+            ? generateEvidenceForSessions(restored)
+            : updatedEvidence(from: evidenceBySessionID, changes: changes)
         guard saveSessions(restored, revision: nextArchiveRevision, evidence: evidence) else {
             lock.unlock()
             return .rejected(.persistenceFailed)
         }
-        let update = historyCache.apply(historyChanges(from: sessions, to: restored))
+        evidenceNeedsReconciliation = false
+        committedStateValidationTime = validationTime
+        let update = historyCache.apply(changes)
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = restored
-        rebuildReminderCache()
+        updateReminderCache(changes: changes)
         evidenceBySessionID = evidence
         evidenceArchiveRevision += 1
         lastEditUndo = nil
@@ -1241,15 +1271,33 @@ private extension FocusSessionEngine {
         let previous = sessions
         var working = sessions
         mutation(&working)
-        guard validate(working) else {
+        guard working != previous else {
+            // Nothing changed. Reuse the earlier validation result instead of
+            // rescanning every historical session for a report that cannot
+            // alter the archive. The first no-op after loading still validates
+            // once, so an invalid loaded archive is rejected exactly as before.
+            guard let committedStateValidationTime,
+                  clock.now >= committedStateValidationTime else {
+                let validationTime = clock.now
+                guard validate(working, now: validationTime) else {
+                    return ApplyResult(
+                        outcome: .rejectedInvalid,
+                        reminderSnapshot: nil,
+                        history: nil
+                    )
+                }
+                self.committedStateValidationTime = validationTime
+                return .noChange
+            }
+            return .noChange
+        }
+        let validationTime = clock.now
+        guard validate(working, now: validationTime) else {
             return ApplyResult(
                 outcome: .rejectedInvalid,
                 reminderSnapshot: nil,
                 history: nil
             )
-        }
-        guard working != previous else {
-            return .noChange
         }
         guard archiveRevision < Int64.max else {
             return ApplyResult(
@@ -1260,7 +1308,10 @@ private extension FocusSessionEngine {
         }
         let nextArchiveRevision = archiveRevision + 1
         let nextEvidenceRevision = evidenceArchiveRevision + 1
-        let evidence = generateEvidenceForSessions(working)
+        let changes = historyChanges(from: previous, to: working)
+        let evidence = evidenceNeedsReconciliation
+            ? generateEvidenceForSessions(working)
+            : updatedEvidence(from: evidenceBySessionID, changes: changes)
         guard saveSessions(working, revision: nextArchiveRevision, evidence: evidence) else {
             // Retain the prior session archive and history cache together.
             return ApplyResult(
@@ -1269,10 +1320,12 @@ private extension FocusSessionEngine {
                 history: nil
             )
         }
-        let update = historyCache.apply(historyChanges(from: previous, to: working))
+        evidenceNeedsReconciliation = false
+        committedStateValidationTime = validationTime
+        let update = historyCache.apply(changes)
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
-        rebuildReminderCache()
+        updateReminderCache(changes: changes)
         evidenceBySessionID = evidence
         evidenceArchiveRevision = nextEvidenceRevision
         archiveRevision = nextArchiveRevision
@@ -1326,59 +1379,88 @@ private extension FocusSessionEngine {
         return result.outcome
     }
 
-    func validate(_ list: [FocusSession]) -> Bool {
-        // Unique identifiers.
-        let ids = list.map(\.id)
-        guard Set(ids).count == ids.count else { return false }
-        let decisionIDs = list.compactMap(\.decisionEvents).flatMap { $0 }.map(\.id)
-        guard Set(decisionIDs).count == decisionIDs.count else { return false }
+    func validate(_ list: [FocusSession], now: Date) -> Bool {
+        let futureLimit = now.addingTimeInterval(config.dayBoundaryTolerance)
+        // One pass over the archive: the previous implementation allocated four
+        // intermediate arrays (session ids, flattened decision ids, open
+        // sessions, and a sorted copy) on every apply, including no-op reports.
+        var sessionIDs = Set<UUID>()
+        sessionIDs.reserveCapacity(list.count)
+        var decisionIDs = Set<UUID>()
+        var openSessionCount = 0
+        var orderedByStart = true
+        var previousStartedAt: Date?
 
-        // At most one open session.
-        guard list.filter(\.isOpen).count <= 1 else { return false }
-
-        // Individual field invariants.
-        for s in list {
-            // No future startedAt beyond tolerance.
-            if s.startedAt > clock.now + config.dayBoundaryTolerance { return false }
-            guard s.lastUserActivityAt >= s.startedAt,
-                  s.lastStateChangeAt >= s.startedAt else { return false }
-            // end >= start.
-            if let end = s.endedAt, end < s.startedAt { return false }
-            if s.isOpen && s.isManuallyConfirmed { return false }
-            if let events = s.decisionEvents,
-               events.contains(where: { !$0.at.timeIntervalSinceReferenceDate.isFinite }) {
-                return false
+        for session in list {
+            guard sessionIDs.insert(session.id).inserted else { return false }
+            if let events = session.decisionEvents {
+                for event in events {
+                    guard decisionIDs.insert(event.id).inserted else { return false }
+                    guard event.at.timeIntervalSinceReferenceDate.isFinite else { return false }
+                }
             }
-            switch s.status {
+
+            if session.isOpen {
+                openSessionCount += 1
+                if openSessionCount > 1 { return false }
+                if session.isManuallyConfirmed { return false }
+            }
+
+            // No future startedAt beyond tolerance.
+            if session.startedAt > futureLimit { return false }
+            guard session.lastUserActivityAt >= session.startedAt,
+                  session.lastStateChangeAt >= session.startedAt else { return false }
+            // end >= start.
+            if let end = session.endedAt, end < session.startedAt { return false }
+            switch session.status {
             case .active:
-                guard s.endedAt == nil, s.currentPauseStartedAt == nil else {
+                guard session.endedAt == nil, session.currentPauseStartedAt == nil else {
                     return false
                 }
             case .paused:
-                guard s.endedAt == nil,
-                      let pauseStart = s.currentPauseStartedAt,
-                      pauseStart >= s.startedAt,
-                      pauseStart <= clock.now + config.dayBoundaryTolerance else {
+                guard session.endedAt == nil,
+                      let pauseStart = session.currentPauseStartedAt,
+                      pauseStart >= session.startedAt,
+                      pauseStart <= futureLimit else {
                     return false
                 }
             case .ended:
-                guard let end = s.endedAt,
-                      s.lastUserActivityAt <= end,
-                      s.lastStateChangeAt <= end,
-                      s.currentPauseStartedAt == nil,
-                      s.pausedTotal <= end.timeIntervalSince(s.startedAt) else {
+                guard let end = session.endedAt,
+                      session.lastUserActivityAt <= end,
+                      session.lastStateChangeAt <= end,
+                      session.currentPauseStartedAt == nil,
+                      session.pausedTotal <= end.timeIntervalSince(session.startedAt) else {
                     return false
                 }
             }
             // activeDuration must be non‑negative.
-            if s.activeDuration(now: clock.now) < 0 { return false }
+            if session.activeDuration(now: now) < 0 { return false }
+
+            if let previousStartedAt, session.startedAt < previousStartedAt {
+                orderedByStart = false
+            }
+            previousStartedAt = session.startedAt
         }
 
-        // Non‑overlapping sessions (contiguous allowed).
-        let sorted = list.sorted { $0.startedAt < $1.startedAt }
-        for i in 0 ..< sorted.count where i + 1 < sorted.count {
-            let thisEnd = sorted[i].endedAt ?? Date.distantFuture
-            if sorted[i + 1].startedAt < thisEnd { return false }
+        // Non‑overlapping sessions (contiguous allowed). Append-style archives
+        // are already ordered, so only the unstable case needs a sort.
+        if orderedByStart {
+            if list.count > 1 {
+                for index in 1 ..< list.count {
+                    let previousEnd = list[index - 1].endedAt ?? Date.distantFuture
+                    if list[index].startedAt < previousEnd { return false }
+                }
+            }
+        } else {
+            let order = list.indices.sorted { lhs, rhs in
+                let lhsStart = list[lhs].startedAt
+                let rhsStart = list[rhs].startedAt
+                return lhsStart == rhsStart ? lhs < rhs : lhsStart < rhsStart
+            }
+            for position in 0 ..< order.count where position + 1 < order.count {
+                let thisEnd = list[order[position]].endedAt ?? Date.distantFuture
+                if list[order[position + 1]].startedAt < thisEnd { return false }
+            }
         }
         return true
     }
@@ -1395,17 +1477,23 @@ private extension FocusSessionEngine {
         let nextRevision = confirmedRevision + 1
         let nextArchiveRevision = archiveRevision + 1
         markConfirmedSessions(in: &working, revision: nextRevision)
-        guard validate(working) else { lock.unlock(); return .rejected(.overlappingSession) }
+        let validationTime = clock.now
+        guard validate(working, now: validationTime) else { lock.unlock(); return .rejected(.overlappingSession) }
         guard working != previous else { lock.unlock(); return .rejected(.invalidTimeRange) }
-        let evidence = generateEvidenceForSessions(working)
+        let changes = historyChanges(from: previous, to: working)
+        let evidence = evidenceNeedsReconciliation
+            ? generateEvidenceForSessions(working)
+            : updatedEvidence(from: evidenceBySessionID, changes: changes)
         guard saveSessions(working, revision: nextArchiveRevision, evidence: evidence) else {
             lock.unlock()
             return .rejected(.persistenceFailed)
         }
-        let update = historyCache.apply(historyChanges(from: previous, to: working))
+        evidenceNeedsReconciliation = false
+        committedStateValidationTime = validationTime
+        let update = historyCache.apply(changes)
         recordTrustedHistoryDays(update.affectedDayIdentifiers)
         sessions = working
-        rebuildReminderCache()
+        updateReminderCache(changes: changes)
         evidenceBySessionID = evidence
         evidenceArchiveRevision += 1
         lastEditUndo = previous
@@ -1577,26 +1665,53 @@ private extension FocusSessionEngine {
     func generateEvidenceForSessions(_ sessions: [FocusSession]) -> [UUID: FocusSessionEvidence] {
         var result: [UUID: FocusSessionEvidence] = [:]
         for session in sessions {
-            guard let events = session.decisionEvents, !events.isEmpty else {
-                // Legacy sessions without decision events get no evidence.
-                continue
-            }
-
-            // Derive attribution context from session properties.
-            let attributedViaGitActivity = deriveAttributedViaGitActivity(from: session, events: events)
-            let attributedViaForegroundApp = !attributedViaGitActivity
-            let redactedID = stableIdentifier(from: session.project.key)
-
-            let input = FocusSessionEvidenceInput(
-                session: session,
-                attributedViaForegroundApp: attributedViaForegroundApp,
-                attributedViaGitActivity: attributedViaGitActivity,
-                redactedForegroundAppID: attributedViaForegroundApp ? redactedID : nil,
-                redactedRepoIdentifier: attributedViaGitActivity ? redactedID : nil
-            )
-            if let evidence = FocusSessionEvidenceEngine.generateEvidence(for: input) {
+            if let evidence = generateEvidence(for: session) {
                 result[evidence.sessionID] = evidence
             }
+        }
+        return result
+    }
+
+    /// Deterministic evidence for one session, or `nil` for legacy rows that
+    /// carry no decision trail. Extracted so incremental commits can refresh
+    /// only the sessions that changed without re-deriving the whole archive.
+    func generateEvidence(for session: FocusSession) -> FocusSessionEvidence? {
+        guard let events = session.decisionEvents, !events.isEmpty else {
+            // Legacy sessions without decision events get no evidence.
+            return nil
+        }
+
+        // Derive attribution context from session properties.
+        let attributedViaGitActivity = deriveAttributedViaGitActivity(from: session, events: events)
+        let attributedViaForegroundApp = !attributedViaGitActivity
+        let redactedID = stableIdentifier(from: session.project.key)
+
+        let input = FocusSessionEvidenceInput(
+            session: session,
+            attributedViaForegroundApp: attributedViaForegroundApp,
+            attributedViaGitActivity: attributedViaGitActivity,
+            redactedForegroundAppID: attributedViaForegroundApp ? redactedID : nil,
+            redactedRepoIdentifier: attributedViaGitActivity ? redactedID : nil
+        )
+        return FocusSessionEvidenceEngine.generateEvidence(for: input)
+    }
+
+    /// Refreshes evidence only for the sessions that changed. Evidence is a
+    /// deterministic function of a session's own content, so the committed
+    /// record for every unchanged session is exactly what a full regeneration
+    /// would produce; this avoids an O(history) hashing pass on every commit.
+    func updatedEvidence(
+        from existing: [UUID: FocusSessionEvidence],
+        changes: [FocusHistorySessionChange]
+    ) -> [UUID: FocusSessionEvidence] {
+        var result = existing
+        for change in changes {
+            if let previous = change.previous {
+                result.removeValue(forKey: previous.id)
+            }
+            guard let current = change.current,
+                  let evidence = generateEvidence(for: current) else { continue }
+            result[evidence.sessionID] = evidence
         }
         return result
     }
@@ -1623,6 +1738,99 @@ private extension FocusSessionEngine {
         from previous: [FocusSession],
         to current: [FocusSession]
     ) -> [FocusHistorySessionChange] {
+        if let fastChanges = orderedHistoryChanges(from: previous, to: current) {
+            return fastChanges
+        }
+        return dictionaryHistoryChanges(from: previous, to: current)
+    }
+
+    /// Covers the append, in-place transition, and single-deletion shapes that
+    /// every manual control path and most automatic transitions produce. Those
+    /// keep the authoritative array order, so changes can be derived with one
+    /// linear comparison instead of building two dictionaries, a union set and
+    /// a globally sorted key list on every commit. Returns `nil` when the shape
+    /// is not recognized and the complete dictionary diff is required.
+    private func orderedHistoryChanges(
+        from previous: [FocusSession],
+        to current: [FocusSession]
+    ) -> [FocusHistorySessionChange]? {
+        if previous.count == current.count {
+            guard sameSessionOrder(previous, current) else { return nil }
+            var changes: [FocusHistorySessionChange] = []
+            for index in previous.indices where previous[index] != current[index] {
+                changes.append(FocusHistorySessionChange(
+                    previous: previous[index],
+                    current: current[index]
+                ))
+            }
+            return changes
+        }
+
+        if current.count == previous.count + 1 {
+            guard sameSessionElements(previous, current) else { return nil }
+            return [FocusHistorySessionChange(
+                previous: nil,
+                current: current[previous.count]
+            )]
+        }
+
+        if previous.count == current.count + 1 {
+            guard let removedIndex = singleRemovedIndex(from: previous, to: current) else {
+                return nil
+            }
+            return [FocusHistorySessionChange(
+                previous: previous[removedIndex],
+                current: nil
+            )]
+        }
+
+        return nil
+    }
+
+    private func sameSessionOrder(_ lhs: [FocusSession], _ rhs: [FocusSession]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for index in lhs.indices where lhs[index].id != rhs[index].id {
+            return false
+        }
+        return true
+    }
+
+    private func sameSessionElements(_ prefix: [FocusSession], _ values: [FocusSession]) -> Bool {
+        guard values.count >= prefix.count else { return false }
+        for index in prefix.indices where prefix[index] != values[index] {
+            return false
+        }
+        return true
+    }
+
+    private func singleRemovedIndex(
+        from previous: [FocusSession],
+        to current: [FocusSession]
+    ) -> Int? {
+        guard previous.count == current.count + 1 else { return nil }
+        var prefixLength = 0
+        while prefixLength < current.count,
+              previous[prefixLength] == current[prefixLength] {
+            prefixLength += 1
+        }
+        guard prefixLength < previous.count else { return nil }
+        var previousIndex = prefixLength + 1
+        var currentIndex = prefixLength
+        while currentIndex < current.count {
+            guard previousIndex < previous.count,
+                  previous[previousIndex] == current[currentIndex] else {
+                return nil
+            }
+            previousIndex += 1
+            currentIndex += 1
+        }
+        return prefixLength
+    }
+
+    private func dictionaryHistoryChanges(
+        from previous: [FocusSession],
+        to current: [FocusSession]
+    ) -> [FocusHistorySessionChange] {
         let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
         let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
         return Set(previousByID.keys)
@@ -1634,6 +1842,61 @@ private extension FocusSessionEngine {
                 guard old != new else { return nil }
                 return FocusHistorySessionChange(previous: old, current: new)
             }
+    }
+
+    /// Applies only the reminder-cache deltas implied by the committed changes.
+    /// The open-session slot and the ended duration per local day are the only
+    /// derived values the heartbeat reads, so a commit does not need to rescan
+    /// the whole archive to keep them correct.
+    func updateReminderCache(changes: [FocusHistorySessionChange]) {
+        guard !changes.isEmpty else { return }
+        var affectedDays = Set<String>()
+        for change in changes {
+            if let old = change.previous {
+                affectedDays.insert(old.dayIdentifier)
+                if old.isOpen {
+                    openReminderSession = nil
+                    continuousReminderStartedAt = nil
+                }
+            }
+        }
+        // Record the new open session only after every removed open session is
+        // cleared. A project switch is one commit that ends the old session and
+        // opens a new one; a single interleaved pass could clear the new slot
+        // when the ended row happens to come later in the diff.
+        for change in changes {
+            if let current = change.current {
+                affectedDays.insert(current.dayIdentifier)
+                if current.isOpen {
+                    openReminderSession = current
+                    continuousReminderStartedAt = current.decisionEvents?
+                        .last(where: { $0.kind == .started || $0.kind == .resumed })?.at
+                        ?? current.startedAt
+                }
+            }
+        }
+
+        // Recompute affected days from the committed archive in archive order
+        // instead of subtracting the old duration and adding the new one: a
+        // float subtract/add pair can drift below an exact reminder threshold
+        // (e.g. 3600 becomes 3599.9999999999995). A large edit or undo can
+        // touch many days, where the single full rebuild pass is cheaper.
+        if affectedDays.count > 16 {
+            rebuildReminderCache()
+            return
+        }
+        for dayIdentifier in affectedDays {
+            var total: TimeInterval = 0
+            for session in sessions
+            where session.dayIdentifier == dayIdentifier && !session.isOpen {
+                total += session.activeDuration(now: session.endedAt ?? session.startedAt)
+            }
+            if total == 0 {
+                endedReminderDurationByDay.removeValue(forKey: dayIdentifier)
+            } else {
+                endedReminderDurationByDay[dayIdentifier] = total
+            }
+        }
     }
 
     func recordTrustedHistoryDays(_ affectedDays: Set<String>) {

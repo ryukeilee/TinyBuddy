@@ -163,6 +163,43 @@ final class FocusSessionFileStoreTests: XCTestCase {
         XCTAssertNil(FocusSessionFileStore(fileURL: fileURL).load())
     }
 
+    func testSemanticallyValidArchiveMatchesCalendarAndOverlapRules() {
+        let day = "2026-11-19"
+        let project = FocusProjectContext(key: "/tmp/example", displayName: "example")
+        let firstStart = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        func session(start: Date, duration: TimeInterval) -> FocusSession {
+            FocusSession(
+                project: project,
+                dayIdentifier: day,
+                startedAt: start,
+                endedAt: start.addingTimeInterval(duration),
+                status: .ended,
+                lastUserActivityAt: start.addingTimeInterval(duration),
+                lastStateChangeAt: start.addingTimeInterval(duration)
+            )
+        }
+
+        let first = session(start: firstStart, duration: 60)
+        let second = session(start: firstStart.addingTimeInterval(600), duration: 60)
+        // The overlap check must not depend on the stored order.
+        XCTAssertTrue(FocusSessionArchive(revision: 1, sessions: [first, second]).isSemanticallyValid)
+        XCTAssertTrue(FocusSessionArchive(revision: 1, sessions: [second, first]).isSemanticallyValid)
+
+        let overlapping = session(start: firstStart.addingTimeInterval(30), duration: 60)
+        XCTAssertFalse(FocusSessionArchive(revision: 1, sessions: [first, overlapping]).isSemanticallyValid)
+        XCTAssertFalse(FocusSessionArchive(revision: 1, sessions: [overlapping, first]).isSemanticallyValid)
+
+        var blankKey = first
+        blankKey.project = FocusProjectContext(key: " \u{200B}\t", displayName: "example")
+        XCTAssertFalse(FocusSessionArchive(revision: 1, sessions: [blankKey]).isSemanticallyValid)
+
+        var impossibleDay = first
+        impossibleDay.dayIdentifier = "2026-02-29"
+        XCTAssertFalse(FocusSessionArchive(revision: 1, sessions: [impossibleDay]).isSemanticallyValid)
+        impossibleDay.dayIdentifier = "2024-02-29"
+        XCTAssertTrue(FocusSessionArchive(revision: 1, sessions: [impossibleDay]).isSemanticallyValid)
+    }
+
     private var backupURL: URL {
         directory.appendingPathComponent("\(fileURL.lastPathComponent).bak")
     }
