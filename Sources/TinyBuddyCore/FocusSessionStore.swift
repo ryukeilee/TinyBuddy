@@ -89,18 +89,33 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
     /// as a trusted empty day. A failed check is deliberately fail-closed: the
     /// archive is unavailable until a valid primary or backup is recovered.
     public var isSemanticallyValid: Bool {
-        guard schemaVersion == Self.currentSchemaVersion,
-              revision >= 0,
-              Set(sessions.map(\.id)).count == sessions.count else {
+        guard schemaVersion == Self.currentSchemaVersion, revision >= 0 else {
             return false
         }
-        let decisionIDs = sessions.compactMap(\.decisionEvents).flatMap { $0 }.map(\.id)
-        guard Set(decisionIDs).count == decisionIDs.count else { return false }
+
+        // One pass instead of four intermediate collections. The save path runs
+        // this on every durable commit, so the per-archive allocations matter
+        // as much as the checks themselves.
+        var sessionIDs = Set<UUID>()
+        sessionIDs.reserveCapacity(sessions.count)
+        var decisionIDs = Set<UUID>()
+        var orderedByStart = true
+        var previousStartedAt: Date?
 
         for session in sessions {
+            guard sessionIDs.insert(session.id).inserted else { return false }
+            if let events = session.decisionEvents {
+                for event in events {
+                    guard decisionIDs.insert(event.id).inserted else { return false }
+                    guard event.at.timeIntervalSinceReferenceDate.isFinite else {
+                        return false
+                    }
+                }
+            }
+
             guard TinyBuddyTimeContext.isValidDayIdentifier(session.dayIdentifier),
-                  !session.project.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !session.project.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !Self.isBlank(session.project.key),
+                  !Self.isBlank(session.project.displayName),
                   Self.isFinite(session.startedAt),
                   Self.isFinite(session.lastUserActivityAt),
                   Self.isFinite(session.lastStateChangeAt),
@@ -108,10 +123,7 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
                   session.lastStateChangeAt >= session.startedAt,
                   session.pausedTotal.isFinite,
                   session.pausedTotal >= 0,
-                  session.manualRevision.map({ $0 >= 0 }) ?? true,
-                  session.decisionEvents?.allSatisfy({ event in
-                      event.at.timeIntervalSinceReferenceDate.isFinite
-                  }) ?? true else {
+                  session.manualRevision.map({ $0 >= 0 }) ?? true else {
                 return false
             }
 
@@ -141,18 +153,52 @@ public struct FocusSessionArchive: Codable, Equatable, Sendable {
                     return false
                 }
             }
+
+            if let previousStartedAt, session.startedAt < previousStartedAt {
+                orderedByStart = false
+            }
+            previousStartedAt = session.startedAt
         }
 
-        let sorted = sessions.sorted { $0.startedAt < $1.startedAt }
-        for index in sorted.indices where index + 1 < sorted.count {
-            let end = sorted[index].endedAt ?? .distantFuture
-            guard sorted[index + 1].startedAt >= end else { return false }
+        if orderedByStart {
+            if sessions.count > 1 {
+                for index in 1 ..< sessions.count {
+                    let end = sessions[index - 1].endedAt ?? .distantFuture
+                    if sessions[index].startedAt < end { return false }
+                }
+            }
+        } else {
+            let order = sessions.indices.sorted { lhs, rhs in
+                let lhsStart = sessions[lhs].startedAt
+                let rhsStart = sessions[rhs].startedAt
+                return lhsStart == rhsStart ? lhs < rhs : lhsStart < rhsStart
+            }
+            for position in order.indices where position + 1 < order.count {
+                let end = sessions[order[position]].endedAt ?? .distantFuture
+                guard sessions[order[position + 1]].startedAt >= end else { return false }
+            }
         }
         return true
     }
 
     private static func isFinite(_ date: Date) -> Bool {
         date.timeIntervalSinceReferenceDate.isFinite
+    }
+
+    /// Equivalent to `trimmingCharacters(in: .whitespacesAndNewlines).isEmpty`
+    /// without allocating a trimmed copy for every field of every session on
+    /// every save.
+    private static func isBlank(_ value: String) -> Bool {
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x0009 ... 0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+                 0x2000 ... 0x200B, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
     }
 }
 

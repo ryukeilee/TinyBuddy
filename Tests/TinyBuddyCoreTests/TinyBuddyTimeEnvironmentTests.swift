@@ -74,6 +74,94 @@ final class TinyBuddyTimeEnvironmentTests: XCTestCase {
         XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("๒๐๒๖-๐๒-๒๘"))
     }
 
+    func testFastDayIdentifierValidationMatchesCalendarReference() {
+        // Years from the Gregorian cutover onward use the arithmetic fast path;
+        // compare it with the calendar round-trip it replaced across month
+        // boundaries, leap days, and a stable sample of the supported range.
+        var values: [String] = []
+        // Every day of a leap year and a common year.
+        for year in [2024, 2026] {
+            for month in 1 ... 12 {
+                for day in 1 ... 31 {
+                    values.append(String(format: "%04d-%02d-%02d", year, month, day))
+                }
+            }
+        }
+        // Month/leap boundaries across the whole fast-path range.
+        for year in Array(1583 ... 1600) + Array(stride(from: 1610, through: 2400, by: 10)) {
+            for month in 1 ... 12 {
+                values.append(String(format: "%04d-%02d-01", year, month))
+                values.append(String(format: "%04d-%02d-28", year, month))
+                values.append(String(format: "%04d-%02d-29", year, month))
+                values.append(String(format: "%04d-%02d-31", year, month))
+            }
+        }
+        for year in stride(from: 2401, through: 9_999, by: 97) {
+            values.append(String(format: "%04d-02-29", year))
+            values.append(String(format: "%04d-12-31", year))
+        }
+        for value in values {
+            XCTAssertEqual(
+                TinyBuddyTimeContext.isValidDayIdentifier(value),
+                Self.calendarRoundTripDayValidation(value),
+                value
+            )
+        }
+    }
+
+    func testDayIdentifierValidationPreservesGregorianCutoverSemantics() {
+        XCTAssertTrue(TinyBuddyTimeContext.isValidDayIdentifier("1582-10-04"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("1582-10-05"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("1582-10-10"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("1582-10-14"))
+        XCTAssertTrue(TinyBuddyTimeContext.isValidDayIdentifier("1582-10-15"))
+        XCTAssertTrue(TinyBuddyTimeContext.isValidDayIdentifier("0001-01-01"))
+        XCTAssertTrue(TinyBuddyTimeContext.isValidDayIdentifier("0999-12-31"))
+        XCTAssertTrue(TinyBuddyTimeContext.isValidDayIdentifier("9999-12-31"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("0000-01-01"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("2026-00-10"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("2026-01-00"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("2026-13-01"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("2026-01-32"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier("2026/01/01"))
+        XCTAssertFalse(TinyBuddyTimeContext.isValidDayIdentifier(""))
+    }
+
+    private static func calendarRoundTripDayValidation(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 10,
+              bytes[4] == 45,
+              bytes[7] == 45,
+              bytes.enumerated().allSatisfy({ index, byte in
+                  index == 4 || index == 7 || (48 ... 57).contains(byte)
+              }) else {
+            return false
+        }
+        let year = Int(String(decoding: bytes[0 ..< 4], as: UTF8.self))
+        let month = Int(String(decoding: bytes[5 ..< 7], as: UTF8.self))
+        let day = Int(String(decoding: bytes[8 ..< 10], as: UTF8.self))
+        guard let year, let month, let day, (1 ... 9_999).contains(year) else {
+            return false
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var components = DateComponents()
+        components.calendar = calendar
+        components.timeZone = calendar.timeZone
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = 12
+        guard let date = calendar.date(from: components) else { return false }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date) == value
+    }
+
     func testNextRefreshDateUsesEarlierOfMidnightAndInterval() throws {
         let nearMidnight = try XCTUnwrap(makeContext(
             now: makeDate(year: 2026, month: 7, day: 1, hour: 23, minute: 50, timeZone: utc),
